@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { MONO } from '../data.js'
-import { loadCustomers, createClient, subscribeCustomers, attachTag, detachTag, deleteClient } from '../lib/customersData.js'
+import { loadCustomers, createClient, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties } from '../lib/customersData.js'
 import { listTags, findOrCreateTag, subscribeTags } from '../lib/tagsData.js'
 import { stripeStatus, stripePaymentLink } from '../lib/stripeData.js'
 
@@ -50,6 +50,15 @@ export default function Clients({ app }) {
   const [payLink, setPayLink] = useState(null)
   const [payBusy, setPayBusy] = useState(false)
   const [payErr, setPayErr] = useState(null)
+  const [props, setProps] = useState([])
+
+  // Load the selected client's service properties.
+  useEffect(() => {
+    if (!selId) { setProps([]); return }
+    let alive = true
+    loadProperties(selId).then((r) => { if (alive) setProps(r) }).catch(() => { if (alive) setProps([]) })
+    return () => { alive = false }
+  }, [selId, customers])
 
   async function refresh() {
     const rows = await loadCustomers()
@@ -242,6 +251,34 @@ export default function Clients({ app }) {
               <Row label="Status" value={cap(cur.status)} />
               {cur.notes && <Row label="Notes" value={cur.notes} />}
             </div>
+
+            {props.length > 0 && (
+              <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '18px 20px' }}>
+                <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 10 }}>
+                  <div style={{ fontWeight: 700, fontSize: 14 }}>Properties ({props.length})</div>
+                  {props.some((p) => p.lat == null) && (
+                    <div style={{ fontSize: 11.5, color: '#c08a2e' }}>{props.filter((p) => p.lat == null).length} without map pin</div>
+                  )}
+                </div>
+                <div style={{ maxHeight: 360, overflowY: 'auto', margin: '0 -6px' }}>
+                  {props.map((p) => (
+                    <div key={p.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 6px', borderTop: '1px solid #f1f3f0' }}>
+                      <div title={p.lat != null ? 'Geocoded' : 'No map pin yet'} style={{ marginTop: 5, width: 8, height: 8, borderRadius: '50%', flex: 'none', background: p.lat != null ? '#1f7a4d' : '#e0b450' }} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600 }}>
+                          {p.code ? <span style={{ color: '#7c8a82', fontWeight: 700, marginRight: 6 }}>{p.code}</span> : null}
+                          {p.address || p.name}
+                        </div>
+                        <div style={{ fontSize: 12, color: '#7c8a82' }}>
+                          {[p.service, p.notes].filter(Boolean).join(' · ') || '—'}
+                        </div>
+                      </div>
+                      {p.price != null && <div style={{ fontSize: 12.5, color: '#5d6b63', flex: 'none' }}>${Number(p.price).toFixed(2)}</div>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {stripeOk && cur.invoice && cur.invoice.amount != null && (
               <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '18px 20px' }}>

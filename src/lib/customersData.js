@@ -77,6 +77,17 @@ export async function createClient(payload) {
   return customer.id
 }
 
+// Properties (service locations) belonging to a customer.
+export async function loadProperties(customerId) {
+  const { data, error } = await supabase
+    .from('properties')
+    .select('id, code, name, address, service, notes, price, lat, lng')
+    .eq('customer_id', customerId)
+    .order('created_at', { ascending: true })
+  if (error) throw error
+  return data || []
+}
+
 // Link / unlink a managed tag to a customer.
 export async function attachTag(customerId, tagId) {
   const { error } = await supabase
@@ -109,6 +120,7 @@ export function subscribeCustomers(cb) {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'invoice_schedules' }, cb)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'customer_tags' }, cb)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'tags' }, cb)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'properties' }, cb)
     .subscribe()
   return () => supabase.removeChannel(channel)
 }
