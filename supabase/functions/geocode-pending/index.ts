@@ -43,8 +43,11 @@ async function geocode(address: string) {
   } catch { return null }
 }
 
+// Eligible = no coords yet, has an address, and hasn't failed too many times.
+const PENDING = "lat=is.null&address=not.is.null&geocode_attempts=lt.3"
+
 async function countRemaining(): Promise<number> {
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/properties?lat=is.null&address=not.is.null&select=id`,
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/properties?${PENDING}&select=id`,
     { headers: { ...svc, Prefer: "count=exact", Range: "0-0" } })
   const cr = r.headers.get("content-range") || "*/0"
   return Number(cr.split("/")[1] || 0)
@@ -68,13 +71,17 @@ Deno.serve(async (req) => {
     const body = await req.json().catch(() => ({}))
     const limit = Math.min(Math.max(Number(body.limit) || 15, 1), 25)
 
-    const rows = await rest(`properties?lat=is.null&address=not.is.null&select=id,address&limit=${limit}`)
+    // Least-tried first, so a few un-geocodable addresses never block the rest.
+    const rows = await rest(`properties?${PENDING}&select=id,address,geocode_attempts&order=geocode_attempts.asc&limit=${limit}`)
     let updated = 0
     for (let i = 0; i < rows.length; i++) {
       const loc = await geocode(rows[i].address)
       if (loc) {
         await rest(`properties?id=eq.${rows[i].id}`, { method: "PATCH", prefer: "return=minimal", body: { lat: loc.lat, lng: loc.lng } })
         updated++
+      } else {
+        // Record the miss so this row drops out after a few tries.
+        await rest(`properties?id=eq.${rows[i].id}`, { method: "PATCH", prefer: "return=minimal", body: { geocode_attempts: (rows[i].geocode_attempts || 0) + 1 } })
       }
       if (i < rows.length - 1) await sleep(1100) // respect Nominatim's ~1 req/sec policy
     }

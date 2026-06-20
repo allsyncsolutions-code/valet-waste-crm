@@ -2,25 +2,75 @@
 // the geocode-pending edge function for filling in coordinates afterward.
 import { supabase } from './supabaseClient.js'
 
-// Parse pasted text into property rows.
-// Preferred format, one per line:  CODE | Address, City Zip | Service | Notes
-// (only the address is required). Lines with no "|" are treated as an address.
-// Section headers like "Vilano Beach:" are skipped.
-export function parseRows(text) {
+// Split one line into cells. Pipe/tab = simple split; comma = quote-aware CSV.
+function splitCells(line, delim) {
+  if (delim !== ',') return line.split(delim).map((s) => s.trim())
   const out = []
-  for (const raw of String(text || '').split(/\r?\n/)) {
+  let cur = '', q = false
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]
+    if (q) {
+      if (ch === '"') { if (line[i + 1] === '"') { cur += '"'; i++ } else q = false }
+      else cur += ch
+    } else if (ch === '"') q = true
+    else if (ch === ',') { out.push(cur); cur = '' }
+    else cur += ch
+  }
+  out.push(cur)
+  return out.map((s) => s.trim())
+}
+
+// Parse pasted text OR an uploaded CSV/TSV into property rows.
+// Handles three shapes:
+//   1. Pipe format:  CODE | Address, City Zip | Service | Notes  (address required)
+//   2. CSV/TSV with a header row containing ADDRESS (+ optional CODE/CITY/ZIP/TYPE/LOCATION)
+//   3. Plain addresses, one per line (the line starts with a street number)
+// Titles and section-heading lines are skipped.
+export function parseRows(text) {
+  const str = String(text || '')
+  const delim = str.includes('|') ? '|' : (str.includes('\t') ? '\t' : ',')
+  const out = []
+  let map = null // column index map, set when a header row is seen
+
+  for (const raw of str.split(/\r?\n/)) {
     const line = raw.trim()
     if (!line) continue
-    if (!line.includes('|')) {
-      // skip obvious headings (no street number, or ends with a colon)
-      if (line.endsWith(':') || !/\d/.test(line)) continue
-      out.push({ code: '', name: '', address: line, service: '', notes: '' })
+    const cells = splitCells(line, delim)
+    const lower = cells.map((c) => c.toLowerCase())
+
+    // Header row? (defines the column mapping for CSV/TSV)
+    if (lower.includes('address')) {
+      const idx = (...names) => lower.findIndex((c) => names.includes(c))
+      map = {
+        code: idx('code'),
+        address: idx('address'),
+        city: idx('city'),
+        zip: idx('zip', 'zipcode', 'zip code', 'postal'),
+        service: idx('type', 'service'),
+        notes: idx('location', 'notes', 'bin'),
+      }
       continue
     }
-    const p = line.split('|').map((s) => s.trim())
-    const [code = '', address = '', service = '', notes = ''] = p
-    if (!address) continue
-    out.push({ code, name: '', address, service, notes })
+
+    let rec
+    if (map) {
+      const get = (i) => (i >= 0 && i < cells.length ? cells[i] : '')
+      const addr = [get(map.address), get(map.city)].filter(Boolean).join(', ')
+      const zip = get(map.zip)
+      rec = { code: get(map.code), name: '', address: zip ? `${addr} ${zip}` : addr, service: get(map.service), notes: get(map.notes) }
+    } else if (delim === '|') {
+      const [code = '', address = '', service = '', notes = ''] = cells
+      rec = { code, name: '', address, service, notes }
+    } else if (/^\d/.test(line)) {
+      // Plain address line (starts with a street number).
+      rec = { code: '', name: '', address: line, service: '', notes: '' }
+    } else {
+      // Comma/TSV data before any header (title, label rows) — skip.
+      continue
+    }
+
+    if (!rec.address || !/\d/.test(rec.address)) continue // need a street number
+    out.push(rec)
   }
   return out
 }

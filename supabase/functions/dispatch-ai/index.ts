@@ -516,6 +516,19 @@ Deno.serve(async (req) => {
     new Response(JSON.stringify(b), { status, headers: { ...CORS, "Content-Type": "application/json" } })
 
   try {
+    // Randy can mutate data via the service role, so require an authenticated
+    // staff caller (the frontend sends the signed-in user's token).
+    const token = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "")
+    const ures = token
+      ? await fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${token}` } })
+      : null
+    if (!ures || !ures.ok) return json({ text: "Please sign in to use Trashy Randy.", actions: [] }, 401)
+    const callerId = (await ures.json())?.id
+    const prof = callerId ? await sbGet(`profiles?id=eq.${enc(callerId)}&select=role`) : []
+    if (!["admin", "staff"].includes(prof?.[0]?.role)) {
+      return json({ text: "Trashy Randy is only available to staff accounts.", actions: [] }, 403)
+    }
+
     const apiKey = Deno.env.get("ANTHROPIC_API_KEY")
     if (!apiKey) {
       return json({
