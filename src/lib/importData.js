@@ -20,6 +20,37 @@ function splitCells(line, delim) {
   return out.map((s) => s.trim())
 }
 
+const ZIP = /^\d{5}(-\d{4})?$/
+const STREET = (c) => /^\d+\s*\S/.test(c) && !ZIP.test(c)
+const SERVICE_RE = /(trash|recycl|compost|dumpster|garbage|pickup)/i
+
+// Infer columns from a header-less tabular row (e.g. CODE, ADDRESS, City, Zip,
+// TYPE, Location — with or without the leading CODE). Returns null if the row
+// has no recognizable street address (so titles/section headings are skipped).
+function inferRow(cells) {
+  const c = cells.map((x) => (x || '').trim())
+  const addrIdx = c.findIndex(STREET)
+  if (addrIdx === -1) return null
+  const zipIdx = c.findIndex((x) => ZIP.test(x))
+  const serviceIdx = c.findIndex((x) => SERVICE_RE.test(x))
+  const code = addrIdx >= 1 && /^[A-Za-z0-9]{1,6}$/.test(c[0]) ? c[0] : ''
+  // City = first letters-only cell after the address (before the zip if present).
+  const upper = zipIdx > addrIdx ? zipIdx : c.length
+  let city = ''
+  for (let i = addrIdx + 1; i < upper; i++) {
+    if (i !== serviceIdx && /[A-Za-z]/.test(c[i]) && !/\d/.test(c[i])) { city = c[i]; break }
+  }
+  const zip = zipIdx >= 0 ? c[zipIdx] : ''
+  const service = serviceIdx >= 0 ? c[serviceIdx] : ''
+  // Notes = first lettered cell after the zip/service block (the Location column).
+  let notes = ''
+  for (let i = Math.max(addrIdx, zipIdx, serviceIdx) + 1; i < c.length; i++) {
+    if (/[A-Za-z]/.test(c[i]) && c[i] !== city) { notes = c[i]; break }
+  }
+  const address = [c[addrIdx], city].filter(Boolean).join(', ') + (zip ? ` ${zip}` : '')
+  return { code, name: '', address, service, notes }
+}
+
 // Parse pasted text OR an uploaded CSV/TSV into property rows.
 // Handles three shapes:
 //   1. Pipe format:  CODE | Address, City Zip | Service | Notes  (address required)
@@ -61,13 +92,17 @@ export function parseRows(text) {
     } else if (delim === '|') {
       const [code = '', address = '', service = '', notes = ''] = cells
       rec = { code, name: '', address, service, notes }
+    } else if (cells.length >= 3 && cells.some((x) => ZIP.test(x)) && cells.some(STREET)) {
+      // Header-less tabular row (CSV/TSV) — infer the columns.
+      rec = inferRow(cells)
     } else if (/^\d/.test(line)) {
       // Plain address line (starts with a street number).
       rec = { code: '', name: '', address: line, service: '', notes: '' }
     } else {
-      // Comma/TSV data before any header (title, label rows) — skip.
+      // Title / section-heading / junk line — skip.
       continue
     }
+    if (!rec) continue
 
     if (!rec.address || !/\d/.test(rec.address)) continue // need a street number
     out.push(rec)

@@ -88,6 +88,18 @@ export async function loadProperties(customerId) {
   return data || []
 }
 
+// Update a property. Editing the address clears its coordinates and resets the
+// geocode-attempt counter so it gets re-geocoded on the next pass.
+export async function updateProperty(id, patch) {
+  const fields = {}
+  for (const k of ['code', 'name', 'address', 'service', 'notes', 'price']) {
+    if (patch[k] !== undefined) fields[k] = patch[k]
+  }
+  if (patch.address !== undefined) { fields.lat = null; fields.lng = null; fields.geocode_attempts = 0 }
+  const { error } = await supabase.from('properties').update(fields).eq('id', id)
+  if (error) throw error
+}
+
 // Link / unlink a managed tag to a customer.
 export async function attachTag(customerId, tagId) {
   const { error } = await supabase

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { MONO } from '../data.js'
-import { loadCustomers, createClient, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties } from '../lib/customersData.js'
+import { loadCustomers, createClient, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, updateProperty } from '../lib/customersData.js'
+import { geocodeAll } from '../lib/importData.js'
 import { listTags, findOrCreateTag, subscribeTags } from '../lib/tagsData.js'
 import { stripeStatus, stripePaymentLink } from '../lib/stripeData.js'
 
@@ -51,6 +52,9 @@ export default function Clients({ app }) {
   const [payBusy, setPayBusy] = useState(false)
   const [payErr, setPayErr] = useState(null)
   const [props, setProps] = useState([])
+  const [editPid, setEditPid] = useState(null)
+  const [editP, setEditP] = useState({ address: '', service: '', notes: '' })
+  const [pBusy, setPBusy] = useState(false)
 
   // Load the selected client's service properties.
   useEffect(() => {
@@ -123,6 +127,29 @@ export default function Clients({ app }) {
       setPayBusy(false)
     }
   }
+  function startEditProp(p) {
+    setEditPid(p.id)
+    setEditP({ address: p.address || '', service: p.service || '', notes: p.notes || '' })
+  }
+  async function saveProp(p) {
+    if (pBusy) return
+    setPBusy(true)
+    setErr(null)
+    try {
+      const patch = { service: editP.service.trim(), notes: editP.notes.trim() }
+      const addrChanged = editP.address.trim() !== (p.address || '')
+      if (addrChanged) patch.address = editP.address.trim()
+      await updateProperty(p.id, patch)
+      setEditPid(null)
+      setProps(await loadProperties(selId))
+      if (addrChanged) { await geocodeAll(() => {}); setProps(await loadProperties(selId)) }
+    } catch (e) {
+      setErr(e.message || String(e))
+    } finally {
+      setPBusy(false)
+    }
+  }
+
   async function doDelete() {
     if (!cur) return
     const id = cur.id
@@ -262,18 +289,35 @@ export default function Clients({ app }) {
                 </div>
                 <div style={{ maxHeight: 360, overflowY: 'auto', margin: '0 -6px' }}>
                   {props.map((p) => (
-                    <div key={p.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 6px', borderTop: '1px solid #f1f3f0' }}>
-                      <div title={p.lat != null ? 'Geocoded' : 'No map pin yet'} style={{ marginTop: 5, width: 8, height: 8, borderRadius: '50%', flex: 'none', background: p.lat != null ? '#1f7a4d' : '#e0b450' }} />
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 13, fontWeight: 600 }}>
-                          {p.code ? <span style={{ color: '#7c8a82', fontWeight: 700, marginRight: 6 }}>{p.code}</span> : null}
-                          {p.address || p.name}
+                    <div key={p.id} style={{ padding: '8px 6px', borderTop: '1px solid #f1f3f0' }}>
+                      {editPid === p.id ? (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                          <input value={editP.address} onChange={(e) => setEditP({ ...editP, address: e.target.value })} style={{ ...inp, fontSize: 13 }} placeholder="Full address, City Zip" />
+                          <div style={{ display: 'flex', gap: 6 }}>
+                            <input value={editP.service} onChange={(e) => setEditP({ ...editP, service: e.target.value })} style={{ ...inp, fontSize: 13 }} placeholder="Service" />
+                            <input value={editP.notes} onChange={(e) => setEditP({ ...editP, notes: e.target.value })} style={{ ...inp, fontSize: 13 }} placeholder="Bin location / notes" />
+                          </div>
+                          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                            <button onClick={() => setEditPid(null)} disabled={pBusy} style={{ background: '#fff', border: '1px solid #dde2dd', color: '#5d6b63', borderRadius: 8, padding: '6px 12px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
+                            <button onClick={() => saveProp(p)} disabled={pBusy} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 8, padding: '6px 14px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', opacity: pBusy ? 0.6 : 1 }}>{pBusy ? 'Saving…' : 'Save & re-geocode'}</button>
+                          </div>
                         </div>
-                        <div style={{ fontSize: 12, color: '#7c8a82' }}>
-                          {[p.service, p.notes].filter(Boolean).join(' · ') || '—'}
+                      ) : (
+                        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                          <div title={p.lat != null ? 'Geocoded' : 'No map pin yet'} style={{ marginTop: 5, width: 8, height: 8, borderRadius: '50%', flex: 'none', background: p.lat != null ? '#1f7a4d' : '#e0b450' }} />
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600 }}>
+                              {p.code ? <span style={{ color: '#7c8a82', fontWeight: 700, marginRight: 6 }}>{p.code}</span> : null}
+                              {p.address || p.name}
+                            </div>
+                            <div style={{ fontSize: 12, color: '#7c8a82' }}>
+                              {[p.service, p.notes].filter(Boolean).join(' · ') || '—'}
+                            </div>
+                          </div>
+                          {p.price != null && <div style={{ fontSize: 12.5, color: '#5d6b63', flex: 'none' }}>${Number(p.price).toFixed(2)}</div>}
+                          <button onClick={() => startEditProp(p)} style={{ flex: 'none', background: 'none', border: 'none', color: '#1f7a4d', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>Edit</button>
                         </div>
-                      </div>
-                      {p.price != null && <div style={{ fontSize: 12.5, color: '#5d6b63', flex: 'none' }}>${Number(p.price).toFixed(2)}</div>}
+                      )}
                     </div>
                   ))}
                 </div>
