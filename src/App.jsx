@@ -7,6 +7,7 @@ import Clients from './views/Clients.jsx'
 import Settings from './views/Settings.jsx'
 import Schedule from './views/Schedule.jsx'
 import Invoices from './views/Invoices.jsx'
+import Dashboard from './views/Dashboard.jsx'
 import AiDock from './AiDock.jsx'
 
 // Tabs not yet wired to Supabase show a clean placeholder (no sample data).
@@ -166,7 +167,7 @@ export default function App() {
   const app = { activeLine, activeLineObj, go, openAssistant, askAi, runAi, isMobile, isTablet }
 
   const views = {
-    dashboard: <Placeholder title="Dashboard" />,
+    dashboard: <Dashboard app={app} />,
     routes: <RoutesView app={app} />,
     schedule: <Schedule app={app} />,
     invoices: <Invoices app={app} />,
