@@ -44,8 +44,18 @@ const BOTTOM_NAV = [
   { id: 'clients', glyph: '◎', label: 'Clients' },
 ]
 
-export default function App() {
+export default function App({ user, onSignOut }) {
   const { isMobile, isTablet } = useResponsive()
+
+  const displayName = (user && (user.full_name || user.email)) || 'Staff'
+  const roleLabel = user && user.role === 'admin' ? 'Administrator' : 'Staff'
+  const initials = String(displayName)
+    .replace(/@.*$/, '')
+    .split(/[\s._-]+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((w) => w[0].toUpperCase())
+    .join('') || 'U'
 
   const [activeLine, setActiveLine] = useState('waste')
   const [activeView, setActiveView] = useState('clients')
@@ -265,12 +275,12 @@ export default function App() {
       </div>
 
       <div style={{ padding: '12px 16px', borderTop: '1px solid #233329', display: 'flex', alignItems: 'center', gap: 10 }}>
-        <div style={{ width: 30, height: 30, borderRadius: '50%', background: '#3a5246', color: '#dff0e6', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 600, fontSize: 12, flex: 'none' }}>RH</div>
-        <div style={{ flex: 1, lineHeight: 1.2 }}>
-          <div style={{ color: '#dfe9e3', fontWeight: 500, fontSize: 12.5 }}>Rosa Herrera</div>
-          <div style={{ fontSize: 10, color: '#5f7568' }}>Dispatch Lead</div>
+        <div style={{ width: 30, height: 30, borderRadius: '50%', background: '#3a5246', color: '#dff0e6', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 600, fontSize: 12, flex: 'none' }}>{initials}</div>
+        <div style={{ flex: 1, lineHeight: 1.2, minWidth: 0 }}>
+          <div style={{ color: '#dfe9e3', fontWeight: 500, fontSize: 12.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{displayName}</div>
+          <div style={{ fontSize: 10, color: '#5f7568' }}>{roleLabel}</div>
         </div>
-        <div style={{ color: '#5f7568', fontSize: 14, cursor: 'pointer' }}>⋯</div>
+        <div onClick={onSignOut} title="Sign out" style={{ color: '#9fb3a8', fontSize: 11, cursor: 'pointer', border: '1px solid #2a3c33', borderRadius: 7, padding: '4px 8px' }}>Sign out</div>
       </div>
     </nav>
   )
