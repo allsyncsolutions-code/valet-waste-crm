@@ -33,6 +33,7 @@ Guidelines:
 - When the user refers to a client by name, business, phone or email, call find_clients FIRST to resolve the exact customer_id before acting. If multiple match, ask which one. If none match and the action needs an existing client, say so.
 - Infer sensible defaults: weekly pickup on Monday, monthly invoicing. Invoices are created as drafts unless told otherwise.
 - You can create_client, update_client, create_schedule (pickup), tag_client, create_invoice, mark_invoice_paid, and add_stop_to_route. Use get_overview to answer questions about outstanding balance, today's pickups, or counts.
+- When the user gives you MORE THAN ONE property/address for the same client (a pasted list, a vendor sheet, etc.), use bulk_add_properties ONCE with all of them — do not call add_stop_to_route in a loop. Pass every row in the properties array and report how many were added.
 - You cannot send payment links or charge cards — tell the user to use the "Send payment link" button on the invoice for that.
 - After making a change, confirm what you did in one short sentence.`
 
@@ -170,6 +171,39 @@ const tools = [
       required: ["address"],
     },
   },
+  {
+    name: "bulk_add_properties",
+    description:
+      "Add MANY service properties for one client in a single call. Use this whenever the user pastes or lists more than one address/location for the same client (e.g. a vendor property list) — never loop add_stop_to_route for each. Resolves the client by name (creates it if new), batch-inserts every property, and optionally sets up one pickup schedule. Coordinates are filled in afterward by the geocoder, so you don't geocode here.",
+    input_schema: {
+      type: "object",
+      properties: {
+        client_name: { type: "string", description: "The client/company that owns these properties. Created if it doesn't exist." },
+        client_id: { type: "string", description: "Use instead of client_name if you already resolved the customer id via find_clients." },
+        default_service: { type: "string", description: "Service for properties that don't specify their own, e.g. 'Trash / Recycle'." },
+        price: { type: "number", description: "Price per property (e.g. 11 for $11/week). Applied to every property." },
+        create_schedule: { type: "boolean", description: "If true, create one pickup schedule for the client." },
+        pickup_day: { type: "string", description: "Pickup day if create_schedule, e.g. 'monday'. Defaults to monday." },
+        pickup_freq: { type: "string", description: "weekly | biweekly | monthly | on_call. Defaults to weekly." },
+        properties: {
+          type: "array",
+          description: "Every property to add.",
+          items: {
+            type: "object",
+            properties: {
+              code: { type: "string", description: "Short code from the source list, optional." },
+              name: { type: "string", description: "Label; defaults to the address if omitted." },
+              address: { type: "string", description: "Full street address incl. city/zip for geocoding." },
+              service: { type: "string", description: "Per-property service; falls back to default_service." },
+              notes: { type: "string", description: "Bin placement / access note, optional." },
+            },
+            required: ["address"],
+          },
+        },
+      },
+      required: ["properties"],
+    },
+  },
 ]
 
 // ---- PostgREST helpers (service role) ----
@@ -229,6 +263,7 @@ function logForTool(name: string, out: any): Promise<void> | undefined {
     case "create_invoice": return logActivity("invoice_created", `Created invoice ${out.number} ($${out.total})`, "invoice", out.id)
     case "mark_invoice_paid": return logActivity("invoice_paid", `Marked invoice ${out.number} paid`, "invoice")
     case "add_stop_to_route": return logActivity("stop_added", `Added ${out.stop_name} to route ${out.route}`, "route")
+    case "bulk_add_properties": return logActivity("properties_imported", `Imported ${out.inserted} properties for ${out.client}`, "customer", out.customer_id)
     default: return undefined
   }
 }
@@ -413,6 +448,37 @@ async function addStopToRoute(a: any) {
   return { route: route.code, stop_name: property.name, seq: stop.seq }
 }
 
+async function bulkAddProperties(a: any) {
+  const list = Array.isArray(a.properties) ? a.properties : []
+  if (!list.length) throw new Error("No properties provided.")
+  if (!a.client_id && !a.client_name) throw new Error("A client_name or client_id is required.")
+  // Hand off to the shared SQL importer (one batched insert, deterministic).
+  const r = await fetch(`${REST}/rpc/bulk_import_properties`, {
+    method: "POST",
+    headers: HEADERS,
+    body: JSON.stringify({
+      payload: {
+        customer_id: a.client_id ?? null,
+        customer_name: a.client_name ?? null,
+        default_service: a.default_service ?? null,
+        price: a.price ?? null,
+        create_schedule: a.create_schedule ?? false,
+        pickup_day: a.pickup_day ?? "monday",
+        pickup_freq: a.pickup_freq ?? "weekly",
+        properties: list,
+      },
+    }),
+  })
+  if (!r.ok) throw new Error(`bulk_import: ${r.status} ${await r.text()}`)
+  const out = await r.json()
+  return {
+    client: a.client_name ?? a.client_id,
+    customer_id: out?.customer_id,
+    inserted: out?.inserted ?? 0,
+    note: "Addresses will be geocoded shortly (in the background / via the Import screen).",
+  }
+}
+
 async function runTool(name: string, input: any): Promise<unknown> {
   switch (name) {
     case "find_clients": return await findClients(input)
@@ -424,6 +490,7 @@ async function runTool(name: string, input: any): Promise<unknown> {
     case "create_invoice": return await createInvoice(input)
     case "mark_invoice_paid": return await markInvoicePaid(input)
     case "add_stop_to_route": return await addStopToRoute(input)
+    case "bulk_add_properties": return await bulkAddProperties(input)
     default: throw new Error(`Unknown tool: ${name}`)
   }
 }
@@ -436,7 +503,7 @@ async function callAnthropic(messages: unknown[], apiKey: string) {
       "anthropic-version": "2023-06-01",
       "content-type": "application/json",
     },
-    body: JSON.stringify({ model: MODEL, max_tokens: 1024, system: SYSTEM, tools, messages }),
+    body: JSON.stringify({ model: MODEL, max_tokens: 4096, system: SYSTEM, tools, messages }),
   })
   const data = await r.json()
   if (!r.ok) throw new Error(data?.error?.message || `Anthropic ${r.status}`)
