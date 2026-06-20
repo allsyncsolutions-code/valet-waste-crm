@@ -2,6 +2,7 @@
 // views stay declarative. route_stops is the single source of truth shared by
 // dispatch and the driver view.
 import { supabase } from './supabaseClient.js'
+import { loadSettings, settingsDepot } from './settingsData.js'
 
 const DEFAULT_DEPOT = { name: 'AllSync Yard', lat: 44.804, lng: -93.278 }
 
@@ -22,6 +23,11 @@ function mapStop(row) {
 
 // Load one route's depot, ordered stops, and the unrouted properties.
 export async function loadRouteSlice(code = 'B') {
+  // The configured starting location (Settings) is the map home + optimizer
+  // start, unless a specific route overrides it with its own depot.
+  const settings = await loadSettings().catch(() => null)
+  const homeDepot = settingsDepot(settings) || DEFAULT_DEPOT
+
   const { data: route, error: rErr } = await supabase
     .from('routes')
     .select('*')
@@ -32,7 +38,7 @@ export async function loadRouteSlice(code = 'B') {
   // No route yet (e.g. fresh/empty database) — return an empty slice so the
   // view shows an empty state instead of erroring.
   if (!route) {
-    return { route: null, depot: DEFAULT_DEPOT, stops: [], unrouted: [] }
+    return { route: null, depot: homeDepot, stops: [], unrouted: [] }
   }
 
   const { data: stopRows, error: sErr } = await supabase
@@ -62,11 +68,9 @@ export async function loadRouteSlice(code = 'B') {
       status: 'pending',
     }))
 
-  const depot = {
-    name: route.depot_name || DEFAULT_DEPOT.name,
-    lat: route.depot_lat ?? DEFAULT_DEPOT.lat,
-    lng: route.depot_lng ?? DEFAULT_DEPOT.lng,
-  }
+  const depot = route.depot_lat != null
+    ? { name: route.depot_name || homeDepot.name, lat: route.depot_lat, lng: route.depot_lng }
+    : homeDepot
   return { route, depot, stops, unrouted }
 }
 

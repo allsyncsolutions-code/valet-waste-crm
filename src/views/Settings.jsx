@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { MONO } from '../data.js'
 import { listTags, createTag, updateTag, deleteTag, tagUsageCounts, subscribeTags, TAG_COLORS } from '../lib/tagsData.js'
+import { loadSettings, saveDepot, geocodeAddress, subscribeSettings } from '../lib/settingsData.js'
 
 export default function Settings({ app }) {
   const isMobile = app.isMobile
@@ -12,6 +13,10 @@ export default function Settings({ app }) {
   const [newColor, setNewColor] = useState(TAG_COLORS[0])
   const [confirmId, setConfirmId] = useState(null)
   const [paletteFor, setPaletteFor] = useState(null)
+  const [depot, setDepot] = useState({ name: '', address: '', lat: '', lng: '' })
+  const [depotMsg, setDepotMsg] = useState(null)
+  const [geoBusy, setGeoBusy] = useState(false)
+  const [depotSaving, setDepotSaving] = useState(false)
 
   async function refresh() {
     const [t, c] = await Promise.all([listTags(), tagUsageCounts()])
@@ -23,6 +28,50 @@ export default function Settings({ app }) {
     const unsub = subscribeTags(() => refresh().catch(() => {}))
     return unsub
   }, [])
+
+  useEffect(() => {
+    const load = () => loadSettings().then((s) => {
+      if (s) setDepot({ name: s.depot_name || '', address: s.depot_address || '', lat: s.depot_lat ?? '', lng: s.depot_lng ?? '' })
+    }).catch(() => {})
+    load()
+    const unsub = subscribeSettings(load)
+    return unsub
+  }, [])
+
+  async function geocode() {
+    const q = depot.address.trim()
+    if (!q) return
+    setGeoBusy(true)
+    setDepotMsg(null)
+    try {
+      const r = await geocodeAddress(q)
+      setDepot((d) => ({ ...d, lat: r.lat.toFixed(6), lng: r.lng.toFixed(6) }))
+      setDepotMsg({ type: 'ok', text: 'Found: ' + r.display })
+    } catch (e) {
+      setDepotMsg({ type: 'err', text: e.message || String(e) })
+    } finally {
+      setGeoBusy(false)
+    }
+  }
+  async function saveLoc(e) {
+    e.preventDefault()
+    const lat = parseFloat(depot.lat)
+    const lng = parseFloat(depot.lng)
+    if (Number.isNaN(lat) || Number.isNaN(lng)) {
+      setDepotMsg({ type: 'err', text: 'Enter a valid latitude and longitude (use Look up, or type them in).' })
+      return
+    }
+    setDepotSaving(true)
+    setDepotMsg(null)
+    try {
+      await saveDepot({ name: depot.name.trim(), address: depot.address.trim(), lat, lng })
+      setDepotMsg({ type: 'ok', text: 'Saved — the route map will start here.' })
+    } catch (e) {
+      setDepotMsg({ type: 'err', text: e.message || String(e) })
+    } finally {
+      setDepotSaving(false)
+    }
+  }
 
   async function addTag(e) {
     e.preventDefault()
@@ -55,6 +104,30 @@ export default function Settings({ app }) {
 
   return (
     <div style={{ maxWidth: 720, margin: '0 auto' }}>
+      {/* starting location */}
+      <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '20px 22px', marginBottom: 16 }}>
+        <div style={{ fontWeight: 700, fontSize: 16 }}>Starting location</div>
+        <div style={{ fontSize: 12.5, color: '#7c8a82', marginTop: 3, marginBottom: 16 }}>
+          Your yard or depot. The route map centers here, and the optimizer starts every route from this point.
+        </div>
+        {depotMsg && (
+          <div style={{ background: depotMsg.type === 'ok' ? '#eef7f1' : '#fdecea', border: '1px solid ' + (depotMsg.type === 'ok' ? '#cfe7da' : '#f3b7b0'), color: depotMsg.type === 'ok' ? '#1f7a4d' : '#9a2c1e', borderRadius: 10, padding: '9px 12px', fontSize: 12.5, marginBottom: 14 }}>{depotMsg.text}</div>
+        )}
+        <form onSubmit={saveLoc}>
+          <SField label="Name"><input value={depot.name} onChange={(e) => setDepot((d) => ({ ...d, name: e.target.value }))} style={inp} placeholder="Main Yard" /></SField>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+            <div style={{ flex: 1 }}><SField label="Address"><input value={depot.address} onChange={(e) => setDepot((d) => ({ ...d, address: e.target.value }))} style={inp} placeholder="123 Depot Rd, City, ST" /></SField></div>
+            <button type="button" onClick={geocode} disabled={geoBusy || !depot.address.trim()} style={{ flex: 'none', marginBottom: 11, background: '#fff', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 9, padding: '10px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: geoBusy || !depot.address.trim() ? 0.6 : 1 }}>{geoBusy ? 'Looking…' : 'Look up'}</button>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 11 }}>
+            <SField label="Latitude"><input value={depot.lat} onChange={(e) => setDepot((d) => ({ ...d, lat: e.target.value }))} style={inp} placeholder="44.804" /></SField>
+            <SField label="Longitude"><input value={depot.lng} onChange={(e) => setDepot((d) => ({ ...d, lng: e.target.value }))} style={inp} placeholder="-93.278" /></SField>
+          </div>
+          <button type="submit" disabled={depotSaving} style={{ marginTop: 6, background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: depotSaving ? 0.6 : 1 }}>{depotSaving ? 'Saving…' : 'Save location'}</button>
+        </form>
+      </div>
+
+      {/* tags */}
       <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '20px 22px' }}>
         <div style={{ fontWeight: 700, fontSize: 16 }}>Tags</div>
         <div style={{ fontSize: 12.5, color: '#7c8a82', marginTop: 3, marginBottom: 16 }}>
@@ -112,4 +185,13 @@ function Palette({ onPick }) {
   )
 }
 
-const inp = { border: '1px solid #dde2dd', background: '#fff', borderRadius: 9, padding: '10px 12px', fontSize: 15, outline: 'none', boxSizing: 'border-box' }
+function SField({ label, children }) {
+  return (
+    <label style={{ display: 'block', marginBottom: 11 }}>
+      <div style={{ fontSize: 11.5, color: '#5d6b63', marginBottom: 5, fontWeight: 500 }}>{label}</div>
+      {children}
+    </label>
+  )
+}
+
+const inp = { width: '100%', border: '1px solid #dde2dd', background: '#fff', borderRadius: 9, padding: '10px 12px', fontSize: 15, outline: 'none', boxSizing: 'border-box' }

@@ -78,6 +78,9 @@ export default function RouteMap({ depot, stops, height = 460 }) {
 
     if (pts.length > 1) {
       map.fitBounds(L.latLngBounds(pts).pad(0.18))
+    } else {
+      // No stops yet — center on the configured starting location.
+      map.setView([depot.lat, depot.lng], 12)
     }
   }, [depot, stops])
 
