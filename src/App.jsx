@@ -9,6 +9,7 @@ import Schedule from './views/Schedule.jsx'
 import Invoices from './views/Invoices.jsx'
 import Dashboard from './views/Dashboard.jsx'
 import Activity from './views/Activity.jsx'
+import Team from './views/Team.jsx'
 import AiDock from './AiDock.jsx'
 
 // Tabs not yet wired to Supabase show a clean placeholder (no sample data).
@@ -177,7 +178,7 @@ export default function App({ user, onSignOut }) {
   }
 
   // bag passed to views
-  const app = { activeLine, activeLineObj, go, openAssistant, askAi, runAi, isMobile, isTablet }
+  const app = { activeLine, activeLineObj, go, openAssistant, askAi, runAi, isMobile, isTablet, user }
 
   const views = {
     dashboard: <Dashboard app={app} />,
@@ -188,7 +189,7 @@ export default function App({ user, onSignOut }) {
     activity: <Activity app={app} />,
     drivers: <Placeholder title="Drivers & Field" />,
     portal: <Placeholder title="Client Portal" />,
-    team: <Placeholder title="Team" />,
+    team: <Team app={app} />,
     settings: <Settings app={app} />,
   }
 
