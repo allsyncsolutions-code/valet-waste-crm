@@ -1,202 +1,264 @@
-import { useState } from 'react'
-import { MONO, defaultSched, schedMatches } from '../data.js'
+import { useEffect, useMemo, useState } from 'react'
+import { MONO } from '../data.js'
+import { hasSupabase } from '../lib/supabaseClient.js'
+import { loadCustomers } from '../lib/customersData.js'
+import {
+  loadSchedules,
+  createSchedule,
+  updateSchedule,
+  toggleScheduleActive,
+  deleteSchedule,
+  subscribeSchedules,
+  FREQUENCIES,
+  DAYS,
+  freqLabel,
+} from '../lib/schedulesData.js'
 
-const DSHORT = ['S', 'M', 'T', 'W', 'T', 'F', 'S']
-const DFULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
-const MON = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
+const DAY_ORDER = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s)
+const initialsOf = (name) =>
+  (name || '?').split(/\s+/).slice(0, 2).map((w) => w[0]).join('').toUpperCase()
+
+const BLANK = { customerId: '', service: '', frequency: 'weekly', dayOfWeek: 'monday', startDate: '', notes: '', active: true }
 
 export default function Schedule({ app }) {
   const isMobile = app.isMobile
-  const [sc, setSc] = useState(defaultSched())
-  const setSched = (patch) => setSc((cur) => ({ ...cur, ...patch }))
+  const [schedules, setSchedules] = useState([])
+  const [customers, setCustomers] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [err, setErr] = useState(null)
+  const [search, setSearch] = useState('')
+  const [showForm, setShowForm] = useState(false)
+  const [editId, setEditId] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const [form, setForm] = useState(BLANK)
 
-  const seg = (id, label) => {
-    const on = sc.mode === id
-    return { id, label, weight: on ? 600 : 500, bg: on ? '#fff' : 'transparent', color: on ? '#15281d' : '#7c8a82', shadow: on ? '0 1px 3px rgba(0,0,0,.1)' : 'none', select: () => setSched({ mode: id }) }
+  async function refresh() {
+    const rows = await loadSchedules()
+    setSchedules(rows)
   }
-  const schedModes = [seg('nth', 'Nth weekday'), seg('weekly', 'Weekly'), seg('interval', 'Alternating')]
 
-  const weekdays = DSHORT.map((l, i) => {
-    const on = !!sc.days[i]
-    return {
-      label: l, on, border: on ? '#1f7a4d' : '#dde2dd', bg: on ? '#1f7a4d' : '#fff', color: on ? '#fff' : '#5d6b63',
-      toggle: () => {
-        const d = { ...sc.days }
-        if (d[i]) delete d[i]
-        else d[i] = true
-        if (Object.keys(d).length) setSched({ days: d })
-      },
+  useEffect(() => {
+    if (!hasSupabase) {
+      setErr('Supabase env vars not set — check .env.local')
+      setLoading(false)
+      return
     }
-  })
+    refresh().catch((e) => setErr(e.message || String(e))).finally(() => setLoading(false))
+    loadCustomers().then(setCustomers).catch(() => {})
+    const unsub = subscribeSchedules(() => {
+      refresh().catch(() => {})
+      loadCustomers().then(setCustomers).catch(() => {})
+    })
+    return () => unsub && unsub()
+  }, [])
 
-  const nthDefs = [[1, '1st'], [2, '2nd'], [3, '3rd'], [4, '4th'], ['last', 'Last']]
-  const nthChips = nthDefs.map(([k, label]) => {
-    const on = !!sc.nths[k]
-    return {
-      label, border: on ? '#1f7a4d' : '#dde2dd', bg: on ? '#e7f1eb' : '#fff', color: on ? '#1f7a4d' : '#5d6b63',
-      toggle: () => {
-        const n = { ...sc.nths }
-        if (n[k]) delete n[k]
-        else n[k] = true
-        setSched({ nths: n })
-      },
+  const set = (patch) => setForm((f) => ({ ...f, ...patch }))
+
+  const q = search.toLowerCase().trim()
+  const filtered = useMemo(
+    () => (q ? schedules.filter((s) => (s.customerName + ' ' + s.service + ' ' + s.customerAddress).toLowerCase().includes(q)) : schedules),
+    [schedules, q]
+  )
+
+  // Group by pickup day; on-call / no day go in their own bucket.
+  const groups = useMemo(() => {
+    const byDay = {}
+    const other = []
+    for (const s of filtered) {
+      if (s.frequency === 'on_call' || !s.dayOfWeek) other.push(s)
+      else (byDay[s.dayOfWeek] = byDay[s.dayOfWeek] || []).push(s)
     }
-  })
+    const ordered = DAY_ORDER.filter((d) => byDay[d]).map((d) => ({ key: d, label: cap(d), items: byDay[d] }))
+    if (other.length) ordered.push({ key: 'other', label: 'On-call / unscheduled', items: other })
+    return ordered
+  }, [filtered])
 
-  const intervalChips = [[1, 'Weekly'], [2, 'Every 2 wks'], [3, 'Every 3 wks'], [4, 'Every 4 wks']].map(([k, label]) => {
-    const on = sc.interval === k
-    return { label, border: on ? '#1f7a4d' : '#dde2dd', bg: on ? '#e7f1eb' : '#fff', color: on ? '#1f7a4d' : '#5d6b63', toggle: () => setSched({ interval: k }) }
-  })
+  const activeCount = schedules.filter((s) => s.active).length
 
-  const selDays = Object.keys(sc.days).map(Number).sort()
-  const dayNames = selDays.map((d) => DFULL[d]).join(' & ')
-  const dayNamesPl = selDays.map((d) => DFULL[d] + 's').join(' & ')
-  let summary
-  if (sc.mode === 'weekly') summary = 'Every ' + dayNamesPl
-  else if (sc.mode === 'interval') summary = (sc.interval === 1 ? 'Every ' : sc.interval === 2 ? 'Every other ' : 'Every ' + sc.interval + ' weeks on ') + dayNames
-  else {
-    const order = ['1', '2', '3', '4', 'last']
-    const labels = { 1: '1st', 2: '2nd', 3: '3rd', 4: '4th', last: 'last' }
-    const sel = order.filter((k) => sc.nths[k]).map((k) => labels[k])
-    summary = 'Every ' + (sel.length ? sel.join(' & ') : '—') + ' ' + dayNames
+  function openAdd() {
+    setEditId(null)
+    setForm({ ...BLANK, customerId: customers[0]?.id || '' })
+    setShowForm(true)
+  }
+  function openEdit(s) {
+    setEditId(s.id)
+    setForm({
+      customerId: s.customerId,
+      service: s.service,
+      frequency: s.frequency,
+      dayOfWeek: s.dayOfWeek || 'monday',
+      startDate: s.startDate || '',
+      notes: s.notes,
+      active: s.active,
+    })
+    setShowForm(true)
   }
 
-  // June 2026 calendar
-  const Y = 2026, M = 5
-  const first = new Date(Y, M, 1), startDow = first.getDay()
-  const dim = new Date(Y, M + 1, 0).getDate()
-  const hits = {}
-  let hitCount = 0
-  for (let d = 1; d <= dim; d++) { const dt = new Date(Y, M, d); if (schedMatches(dt, sc)) { hits[d] = true; hitCount++ } }
-  const TODAY = 18
-  const calCells = []
-  for (let i = 0; i < 42; i++) {
-    const dnum = i - startDow + 1
-    if (dnum < 1 || dnum > dim) { calCells.push({ key: i, label: '', bg: 'transparent', color: 'transparent', border: 'none', weight: 400 }); continue }
-    const hl = hits[dnum], today = dnum === TODAY
-    calCells.push({ key: i, label: String(dnum), weight: hl ? 600 : 400, bg: hl ? '#1f7a4d' : 'transparent', color: hl ? '#fff' : dnum < TODAY ? '#bcc6bd' : '#3a463f', border: today ? '2px solid #1f7a4d' : '1px solid transparent' })
+  async function onToggle(s) {
+    setSchedules((cur) => cur.map((x) => (x.id === s.id ? { ...x, active: !x.active } : x)))
+    try {
+      await toggleScheduleActive(s.id, !s.active)
+    } catch (e) {
+      setErr(e.message || String(e))
+      refresh().catch(() => {})
+    }
   }
-
-  const start = new Date(Y, M, TODAY)
-  const nextDates = []
-  for (let i = 0; i < 120 && nextDates.length < 5; i++) {
-    const dt = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i)
-    if (schedMatches(dt, sc)) {
-      const rel = i === 0 ? 'today' : 'in ' + i + 'd'
-      nextDates.push({ mon: MON[dt.getMonth()], day: String(dt.getDate()), weekday: DFULL[dt.getDay()], rel })
+  async function onDelete(s) {
+    if (!window.confirm(`Delete ${s.customerName}'s pickup schedule?`)) return
+    setSchedules((cur) => cur.filter((x) => x.id !== s.id))
+    try {
+      await deleteSchedule(s.id)
+    } catch (e) {
+      setErr(e.message || String(e))
+      refresh().catch(() => {})
     }
   }
 
-  const weekdayLabel = sc.mode === 'weekly' ? 'PICKUP DAYS' : 'PICKUP DAY'
-  const label = { fontFamily: MONO, fontSize: 10, letterSpacing: '.12em', color: '#7c8a82', margin: '18px 0 9px' }
+  async function submit(e) {
+    e.preventDefault()
+    if (!form.customerId) {
+      setErr('Pick a customer for this schedule.')
+      return
+    }
+    setSaving(true)
+    setErr(null)
+    try {
+      if (editId) await updateSchedule(editId, form)
+      else await createSchedule(form)
+      setShowForm(false)
+      await refresh()
+    } catch (e2) {
+      setErr(e2.message || String(e2))
+    } finally {
+      setSaving(false)
+    }
+  }
 
   return (
-    <div style={{ maxWidth: 1120, margin: '0 auto', display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1.15fr 1fr', gap: 18 }}>
-      {/* editor */}
-      <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '18px 20px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 11, paddingBottom: 14, borderBottom: '1px solid #f0f2ef' }}>
-          <div style={{ width: 36, height: 36, borderRadius: 9, background: '#e7f1eb', color: '#1f7a4d', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontWeight: 600 }}>NL</div>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontWeight: 700, fontSize: 15 }}>Northgate Retail Park</div>
-            <div style={{ fontSize: 12, color: '#7c8a82' }}>4yd dumpster ×4 · North Loop · $48 / stop</div>
-          </div>
+    <div style={{ maxWidth: 1080, margin: '0 auto' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14, flexWrap: 'wrap' }}>
+        <div style={{ position: 'relative', flex: 1, minWidth: 180 }}>
+          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search by customer, service or address…" style={searchInput} />
+          <div style={searchIcon}>⌕</div>
         </div>
-
-        <div style={label}>CADENCE</div>
-        <div style={{ display: 'flex', gap: 7, background: '#f4f5f3', borderRadius: 10, padding: 4 }}>
-          {schedModes.map((m) => (
-            <div key={m.id} onClick={m.select} style={{ flex: 1, textAlign: 'center', padding: '8px 6px', borderRadius: 8, cursor: 'pointer', fontSize: 12.5, fontWeight: m.weight, background: m.bg, color: m.color, boxShadow: m.shadow }}>{m.label}</div>
-          ))}
-        </div>
-
-        <div style={label}>{weekdayLabel}</div>
-        <div style={{ display: 'flex', gap: 6 }}>
-          {weekdays.map((d, i) => (
-            <div key={i} onClick={d.toggle} style={{ flex: 1, aspectRatio: '1', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 9, cursor: 'pointer', fontSize: 13, fontWeight: 600, border: `1px solid ${d.border}`, background: d.bg, color: d.color }}>{d.label}</div>
-          ))}
-        </div>
-
-        {sc.mode === 'nth' && (
-          <>
-            <div style={label}>WHICH WEEKS OF THE MONTH</div>
-            <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
-              {nthChips.map((c) => (
-                <div key={c.label} onClick={c.toggle} style={{ padding: '8px 14px', borderRadius: 9, cursor: 'pointer', fontSize: 13, fontWeight: 600, border: `1px solid ${c.border}`, background: c.bg, color: c.color }}>{c.label}</div>
-              ))}
-            </div>
-          </>
-        )}
-
-        {sc.mode === 'interval' && (
-          <>
-            <div style={label}>REPEAT EVERY</div>
-            <div style={{ display: 'flex', gap: 7 }}>
-              {intervalChips.map((c) => (
-                <div key={c.label} onClick={c.toggle} style={{ flex: 1, textAlign: 'center', padding: '9px 6px', borderRadius: 9, cursor: 'pointer', fontSize: 12.5, fontWeight: 600, border: `1px solid ${c.border}`, background: c.bg, color: c.color }}>{c.label}</div>
-              ))}
-            </div>
-          </>
-        )}
-
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 18 }}>
-          <div>
-            <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.12em', color: '#7c8a82', marginBottom: 9 }}>ARRIVAL WINDOW</div>
-            <div style={{ border: '1px solid #dde2dd', borderRadius: 9, padding: '9px 12px', fontSize: 13, fontFamily: MONO }}>7:00–8:00 AM</div>
-          </div>
-          <div>
-            <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.12em', color: '#7c8a82', marginBottom: 9 }}>BILLING</div>
-            <div style={{ border: '1px solid #dde2dd', borderRadius: 9, padding: '9px 12px', fontSize: 13 }}>Monthly batch</div>
-          </div>
-        </div>
-
-        <div style={{ marginTop: 18, background: '#f3faf5', border: '1px solid #d6e7dd', borderRadius: 11, padding: '13px 15px' }}>
-          <div style={{ fontSize: 11, color: '#1f7a4d', fontFamily: MONO, letterSpacing: '.08em', marginBottom: 6 }}>SUMMARY</div>
-          <div style={{ fontSize: 15, fontWeight: 600, color: '#15281d' }}>{summary}</div>
-          <div style={{ fontSize: 12, color: '#5d6b63', marginTop: 5 }}>Billed monthly · est. {hitCount} pickups / mo · ${hitCount * 48}/mo</div>
-        </div>
-
-        <div style={{ display: 'flex', gap: 9, marginTop: 16 }}>
-          <button style={{ flex: 1, background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: 11, fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Save schedule</button>
-          <button onClick={() => app.askAi('Set up a recurring pickup for Northgate Retail Park every 1st & 3rd Monday')} style={{ background: '#fff', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 9, padding: '11px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 7 }}>✦ Let AI set it</button>
-        </div>
+        <div style={{ fontFamily: MONO, fontSize: 11.5, color: '#7c8a82', flex: 'none' }}>{activeCount} active · {schedules.length} total</div>
+        <button onClick={openAdd} disabled={!customers.length} style={{ flex: 'none', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: customers.length ? 'pointer' : 'default', opacity: customers.length ? 1 : 0.5 }} title={customers.length ? '' : 'Add a client first'}>+ Add schedule</button>
       </div>
 
-      {/* preview */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-        <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '16px 18px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 13 }}>
-            <div style={{ fontWeight: 700, fontSize: 14 }}>June 2026</div>
-            <div style={{ fontFamily: MONO, fontSize: 11, color: '#1f7a4d' }}>{hitCount} pickups</div>
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 5, marginBottom: 6 }}>
-            {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((h, i) => (
-              <div key={i} style={{ textAlign: 'center', fontSize: 10, color: '#9aa69e', fontFamily: MONO }}>{h}</div>
-            ))}
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 5 }}>
-            {calCells.map((c) => (
-              <div key={c.key} style={{ aspectRatio: '1', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 8, fontSize: 12, fontFamily: MONO, fontWeight: c.weight, background: c.bg, color: c.color, border: c.border }}>{c.label}</div>
-            ))}
-          </div>
-        </div>
+      {err && <div style={errorBox}>{err}</div>}
 
-        <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '16px 18px' }}>
-          <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 11 }}>Next pickups</div>
-          {nextDates.map((n, i) => (
-            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '8px 0', borderTop: '1px solid #f0f2ef' }}>
-              <div style={{ width: 34, height: 34, borderRadius: 8, background: '#e7f1eb', color: '#1f7a4d', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', lineHeight: 1, flex: 'none' }}>
-                <div style={{ fontFamily: MONO, fontSize: 9 }}>{n.mon}</div>
-                <div style={{ fontFamily: MONO, fontSize: 14, fontWeight: 600 }}>{n.day}</div>
-              </div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 13, fontWeight: 500 }}>{n.weekday}</div>
-                <div style={{ fontSize: 11, color: '#7c8a82' }}>7:00–8:00 AM · $48</div>
-              </div>
-              <div style={{ fontFamily: MONO, fontSize: 10.5, color: '#9aa69e' }}>{n.rel}</div>
-            </div>
-          ))}
+      {loading && <div style={empty}>Loading schedules…</div>}
+      {!loading && !schedules.length && (
+        <div style={{ background: '#fff', border: '1px dashed #d8ddd6', borderRadius: 13, padding: '44px 24px', textAlign: 'center' }}>
+          <div style={{ fontSize: 24, marginBottom: 8 }}>▤</div>
+          <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 5 }}>No pickup schedules yet</div>
+          <div style={{ fontSize: 13, color: '#7c8a82', marginBottom: 16 }}>{customers.length ? 'Add a recurring pickup for one of your clients.' : 'Add a client first — schedules attach to a customer.'}</div>
+          {!!customers.length && <button onClick={openAdd} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>+ Add schedule</button>}
         </div>
+      )}
+
+      {!loading && !!schedules.length && !filtered.length && <div style={empty}>No schedules match “{search}”.</div>}
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        {groups.map((g) => (
+          <div key={g.key}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 9, margin: '0 2px 8px' }}>
+              <div style={{ fontFamily: MONO, fontSize: 11, letterSpacing: '.1em', color: '#1f7a4d', fontWeight: 600 }}>{g.label.toUpperCase()}</div>
+              <div style={{ flex: 1, height: 1, background: '#e6eae6' }} />
+              <div style={{ fontFamily: MONO, fontSize: 10.5, color: '#9aa69e' }}>{g.items.length}</div>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 10 }}>
+              {g.items.map((s) => (
+                <div key={s.id} style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 12, padding: '13px 15px', opacity: s.active ? 1 : 0.62 }}>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 11 }}>
+                    <div style={{ width: 36, height: 36, flex: 'none', borderRadius: 9, background: '#e7f1eb', color: '#1f7a4d', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontWeight: 600, fontSize: 12 }}>{initialsOf(s.customerName)}</div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, fontSize: 13.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.customerName}</div>
+                      <div style={{ fontSize: 11.5, color: '#7c8a82', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.service || 'No service noted'}</div>
+                    </div>
+                    <span style={{ flex: 'none', fontFamily: MONO, fontSize: 10, color: '#1f7a4d', background: '#e7f1eb', padding: '2px 8px', borderRadius: 6 }}>{freqLabel(s.frequency)}</span>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 11 }}>
+                    <button onClick={() => onToggle(s)} style={{ ...pillBtn, color: s.active ? '#1f7a4d' : '#9aa69e', borderColor: s.active ? '#cfe0d5' : '#e0e4df' }}>
+                      <span style={{ width: 7, height: 7, borderRadius: '50%', background: s.active ? '#22b06b' : '#c2cabf', display: 'inline-block' }} /> {s.active ? 'Active' : 'Paused'}
+                    </button>
+                    <div style={{ flex: 1 }} />
+                    <button onClick={() => openEdit(s)} style={miniBtn}>Edit</button>
+                    <button onClick={() => onDelete(s)} style={{ ...miniBtn, color: '#c0492f' }}>Delete</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
       </div>
+
+      {showForm && (
+        <div onClick={() => !saving && setShowForm(false)} style={overlay}>
+          <form onClick={(e) => e.stopPropagation()} onSubmit={submit} style={modal}>
+            <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 4 }}>{editId ? 'Edit schedule' : 'Add pickup schedule'}</div>
+            <div style={{ fontSize: 12, color: '#7c8a82', marginBottom: 16 }}>A recurring pickup attached to a customer.</div>
+
+            <Field label="Customer *">
+              <select value={form.customerId} onChange={(e) => set({ customerId: e.target.value })} style={inp} disabled={!!editId}>
+                <option value="">Select a customer…</option>
+                {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </Field>
+            <Field label="Service"><input value={form.service} onChange={(e) => set({ service: e.target.value })} style={inp} placeholder="4yd dumpster x2" /></Field>
+            <div style={twoCol}>
+              <Field label="Frequency">
+                <select value={form.frequency} onChange={(e) => set({ frequency: e.target.value })} style={inp}>
+                  {FREQUENCIES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                </select>
+              </Field>
+              <Field label="Day">
+                <select value={form.dayOfWeek} onChange={(e) => set({ dayOfWeek: e.target.value })} style={inp} disabled={form.frequency === 'on_call'}>
+                  {DAYS.map((d) => <option key={d} value={d}>{cap(d)}</option>)}
+                </select>
+              </Field>
+            </div>
+            <div style={twoCol}>
+              <Field label="Start date"><input value={form.startDate || ''} onChange={(e) => set({ startDate: e.target.value })} style={inp} type="date" /></Field>
+              <Field label="Status">
+                <select value={form.active ? 'active' : 'paused'} onChange={(e) => set({ active: e.target.value === 'active' })} style={inp}>
+                  <option value="active">Active</option>
+                  <option value="paused">Paused</option>
+                </select>
+              </Field>
+            </div>
+            <Field label="Notes"><input value={form.notes} onChange={(e) => set({ notes: e.target.value })} style={inp} placeholder="Gate code, access notes…" /></Field>
+
+            <div style={{ display: 'flex', gap: 9, marginTop: 14 }}>
+              <button type="button" onClick={() => setShowForm(false)} disabled={saving} style={cancelBtn}>Cancel</button>
+              <button type="submit" disabled={saving || !form.customerId} style={{ ...primaryBtn, opacity: saving || !form.customerId ? 0.6 : 1 }}>{saving ? 'Saving…' : editId ? 'Save changes' : 'Create schedule'}</button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   )
 }
+
+function Field({ label, children }) {
+  return (
+    <label style={{ display: 'block', marginBottom: 11 }}>
+      <div style={{ fontSize: 11.5, color: '#5d6b63', marginBottom: 5, fontWeight: 500 }}>{label}</div>
+      {children}
+    </label>
+  )
+}
+
+const twoCol = { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 11 }
+const inp = { width: '100%', border: '1px solid #dde2dd', background: '#fff', borderRadius: 9, padding: '9px 11px', fontSize: 15, outline: 'none', boxSizing: 'border-box' }
+const empty = { padding: '22px 14px', textAlign: 'center', color: '#9aa69e', fontSize: 12.5 }
+const errorBox = { marginBottom: 14, background: '#fdecea', border: '1px solid #f3b7b0', color: '#9a2c1e', borderRadius: 11, padding: '10px 14px', fontSize: 12.5 }
+const miniBtn = { background: '#f3f5f2', border: '1px solid #e6eae6', borderRadius: 7, padding: '5px 11px', fontSize: 12, fontWeight: 600, color: '#5d6b63', cursor: 'pointer' }
+const pillBtn = { display: 'inline-flex', alignItems: 'center', gap: 6, background: '#fff', border: '1px solid #cfe0d5', borderRadius: 7, padding: '5px 10px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }
+const overlay = { position: 'fixed', inset: 0, background: 'rgba(15,30,20,.45)', zIndex: 500, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '6vh 16px', overflowY: 'auto' }
+const modal = { width: 480, maxWidth: '100%', background: '#fff', borderRadius: 14, padding: 22, boxShadow: '0 20px 60px rgba(0,0,0,.25)' }
+const cancelBtn = { flex: 'none', background: '#fff', border: '1px solid #dde2dd', color: '#5d6b63', borderRadius: 9, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }
+const primaryBtn = { flex: 1, background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }
+const searchInput = { width: '100%', border: '1px solid #dde2dd', background: '#f7f9f7', borderRadius: 9, padding: '9px 12px 9px 32px', fontSize: 16, outline: 'none', boxSizing: 'border-box' }
+const searchIcon = { position: 'absolute', left: 11, top: '50%', transform: 'translateY(-50%)', color: '#9aa69e' }

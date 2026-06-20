@@ -5,6 +5,8 @@ import { supabase } from './lib/supabaseClient.js'
 import RoutesView from './views/Routes.jsx'
 import Clients from './views/Clients.jsx'
 import Settings from './views/Settings.jsx'
+import Schedule from './views/Schedule.jsx'
+import Invoices from './views/Invoices.jsx'
 import AiDock from './AiDock.jsx'
 
 // Tabs not yet wired to Supabase show a clean placeholder (no sample data).
@@ -166,8 +168,8 @@ export default function App() {
   const views = {
     dashboard: <Placeholder title="Dashboard" />,
     routes: <RoutesView app={app} />,
-    schedule: <Placeholder title="Schedules" />,
-    invoices: <Placeholder title="Invoicing" />,
+    schedule: <Schedule app={app} />,
+    invoices: <Invoices app={app} />,
     clients: <Clients app={app} />,
     drivers: <Placeholder title="Drivers & Field" />,
     portal: <Placeholder title="Client Portal" />,
