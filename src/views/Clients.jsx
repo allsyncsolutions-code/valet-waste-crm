@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { MONO } from '../data.js'
 import { loadCustomers, createClient, subscribeCustomers, attachTag, detachTag, deleteClient } from '../lib/customersData.js'
 import { listTags, findOrCreateTag, subscribeTags } from '../lib/tagsData.js'
+import { stripeStatus, stripePaymentLink } from '../lib/stripeData.js'
 
 const FREQ = [
   ['weekly', 'Weekly'],
@@ -45,6 +46,10 @@ export default function Clients({ app }) {
   const [tagInput, setTagInput] = useState('')
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [allTags, setAllTags] = useState([])
+  const [stripeOk, setStripeOk] = useState(false)
+  const [payLink, setPayLink] = useState(null)
+  const [payBusy, setPayBusy] = useState(false)
+  const [payErr, setPayErr] = useState(null)
 
   async function refresh() {
     const rows = await loadCustomers()
@@ -56,6 +61,7 @@ export default function Clients({ app }) {
     refresh().catch((e) => setErr(e.message || String(e))).finally(() => setLoading(false))
     const reloadTags = () => listTags().then(setAllTags).catch(() => {})
     reloadTags()
+    stripeStatus().then((d) => setStripeOk(!!(d && d.connected && d.chargesEnabled))).catch(() => {})
     const unsubC = subscribeCustomers(() => refresh().catch(() => {}))
     const unsubT = subscribeTags(reloadTags)
     return () => { unsubC && unsubC(); unsubT && unsubT() }
@@ -92,6 +98,20 @@ export default function Clients({ app }) {
     } catch (e) {
       setErr(e.message || String(e))
       refresh().catch(() => {})
+    }
+  }
+  async function makePayLink() {
+    if (!cur || !cur.invoice || cur.invoice.amount == null) return
+    setPayBusy(true)
+    setPayErr(null)
+    setPayLink(null)
+    try {
+      const d = await stripePaymentLink({ amount: cur.invoice.amount, description: 'Invoice — ' + cur.name, customerName: cur.name })
+      setPayLink(d.url)
+    } catch (e) {
+      setPayErr(e.message || String(e))
+    } finally {
+      setPayBusy(false)
     }
   }
   async function doDelete() {
@@ -153,7 +173,7 @@ export default function Clients({ app }) {
         {list.map((c) => {
           const on = c.id === selId
           return (
-            <div key={c.id} onClick={() => { setSelId(c.id); setConfirmDelete(false); setTagInput('') }} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '11px 10px', borderRadius: 10, cursor: 'pointer', marginBottom: 2, background: on ? '#f3faf5' : '#fff', border: `1px solid ${on ? '#cfe0d5' : 'transparent'}` }}>
+            <div key={c.id} onClick={() => { setSelId(c.id); setConfirmDelete(false); setTagInput(''); setPayLink(null); setPayErr(null) }} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '11px 10px', borderRadius: 10, cursor: 'pointer', marginBottom: 2, background: on ? '#f3faf5' : '#fff', border: `1px solid ${on ? '#cfe0d5' : 'transparent'}` }}>
               <div style={{ width: 36, height: 36, borderRadius: 9, background: '#e7f1eb', color: '#1f7a4d', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontWeight: 600, fontSize: 12, flex: 'none' }}>{initialsOf(c.name)}</div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.name}</div>
@@ -222,6 +242,25 @@ export default function Clients({ app }) {
               <Row label="Status" value={cap(cur.status)} />
               {cur.notes && <Row label="Notes" value={cur.notes} />}
             </div>
+
+            {stripeOk && cur.invoice && cur.invoice.amount != null && (
+              <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '18px 20px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 14 }}>Payment link</div>
+                    <div style={{ fontSize: 12, color: '#7c8a82' }}>Charge ${Number(cur.invoice.amount).toFixed(2)} — send the link to your customer.</div>
+                  </div>
+                  <button onClick={makePayLink} disabled={payBusy} style={{ flex: 'none', background: '#635bff', color: '#fff', border: 'none', borderRadius: 9, padding: '9px 14px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', opacity: payBusy ? 0.6 : 1 }}>{payBusy ? 'Creating…' : 'Create link'}</button>
+                </div>
+                {payErr && <div style={{ marginTop: 10, color: '#9a2c1e', fontSize: 12 }}>{payErr}</div>}
+                {payLink && (
+                  <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <input readOnly value={payLink} onFocus={(e) => e.target.select()} style={{ ...inp, flex: 1, fontSize: 12 }} />
+                    <a href={payLink} target="_blank" rel="noreferrer" style={{ flex: 'none', background: '#1f7a4d', color: '#fff', borderRadius: 8, padding: '9px 12px', fontSize: 12.5, fontWeight: 600, textDecoration: 'none' }}>Open</a>
+                  </div>
+                )}
+              </div>
+            )}
 
             {confirmDelete ? (
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, background: '#fdecea', border: '1px solid #f3b7b0', borderRadius: 11, padding: '12px 14px' }}>
