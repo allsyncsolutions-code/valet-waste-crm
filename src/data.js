@@ -3,9 +3,9 @@
 export const MONO = "'IBM Plex Mono', monospace"
 
 export const LINES = [
-  { id: 'waste', name: 'Waste & Recycling', meta: '6 routes · 142 clients', color: '#1f7a4d' },
-  { id: 'junk', name: 'Junk Removal', meta: 'On-demand · 28 jobs', color: '#2f6db0' },
-  { id: 'lawn', name: 'Lawn Care', meta: '3 routes · 64 clients', color: '#7a9e2e' },
+  { id: 'waste', name: 'Waste & Recycling', meta: '', color: '#1f7a4d' },
+  { id: 'junk', name: 'Junk Removal', meta: '', color: '#2f6db0' },
+  { id: 'lawn', name: 'Lawn Care', meta: '', color: '#7a9e2e' },
 ]
 
 export const KPIS = [

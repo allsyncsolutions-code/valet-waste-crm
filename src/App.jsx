@@ -1,27 +1,35 @@
 import { useEffect, useRef, useState } from 'react'
 import { useResponsive } from './useResponsive.js'
-import { LINES, MONO, fallbackReply } from './data.js'
-import Dashboard from './views/Dashboard.jsx'
+import { LINES, MONO } from './data.js'
+import { supabase } from './lib/supabaseClient.js'
 import RoutesView from './views/Routes.jsx'
-import Schedule from './views/Schedule.jsx'
-import Invoices from './views/Invoices.jsx'
 import Clients from './views/Clients.jsx'
-import Drivers from './views/Drivers.jsx'
-import Portal from './views/Portal.jsx'
-import Team from './views/Team.jsx'
+import Settings from './views/Settings.jsx'
 import AiDock from './AiDock.jsx'
+
+// Tabs not yet wired to Supabase show a clean placeholder (no sample data).
+function Placeholder({ title }) {
+  return (
+    <div style={{ maxWidth: 720, margin: '40px auto', textAlign: 'center', background: '#fff', border: '1px dashed #d8ddd6', borderRadius: 14, padding: '48px 28px' }}>
+      <div style={{ fontSize: 26, marginBottom: 10 }}>◦</div>
+      <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 6 }}>{title} isn’t connected to live data yet</div>
+      <div style={{ fontSize: 13, color: '#7c8a82' }}>This section will read from Supabase once it’s built out — like Clients and Routes & Dispatch already do.</div>
+    </div>
+  )
+}
 
 const NAV_MAIN = [
   { id: 'dashboard', glyph: '▦', label: 'Dashboard' },
-  { id: 'routes', glyph: '◔', label: 'Routes & Dispatch', badge: '6' },
+  { id: 'routes', glyph: '◔', label: 'Routes & Dispatch' },
   { id: 'schedule', glyph: '▤', label: 'Schedules' },
-  { id: 'invoices', glyph: '$', label: 'Invoicing', badge: '12' },
+  { id: 'invoices', glyph: '$', label: 'Invoicing' },
 ]
 const NAV_FIELD = [
   { id: 'clients', glyph: '◎', label: 'Clients' },
-  { id: 'drivers', glyph: '⛟', label: 'Drivers & Field', badge: '3' },
-  { id: 'team', glyph: '⚇', label: 'Team', badge: '9' },
+  { id: 'drivers', glyph: '⛟', label: 'Drivers & Field' },
+  { id: 'team', glyph: '⚇', label: 'Team' },
   { id: 'portal', glyph: '◫', label: 'Client Portal' },
+  { id: 'settings', glyph: '⚙', label: 'Settings' },
 ]
 const BOTTOM_NAV = [
   { id: 'dashboard', glyph: '▦', label: 'Home' },
@@ -35,7 +43,7 @@ export default function App() {
   const { isMobile, isTablet } = useResponsive()
 
   const [activeLine, setActiveLine] = useState('waste')
-  const [activeView, setActiveView] = useState('dashboard')
+  const [activeView, setActiveView] = useState('clients')
   const [lineMenuOpen, setLineMenuOpen] = useState(false)
   const [navOpen, setNavOpen] = useState(false) // mobile drawer
   const [commandText, setCommandText] = useState('')
@@ -48,8 +56,7 @@ export default function App() {
   const [aiMessages, setAiMessages] = useState([
     {
       role: 'ai',
-      text: "Morning, Rosa. 38 stops scheduled today across 3 trucks. Truck 7 is running ~22 min behind on the Maple Grove loop and Cedar Industrial just requested an extra pickup. Want me to re-sequence and slot it in?",
-      action: 'Re-optimize Route B and insert Cedar Industrial at stop 6',
+      text: "Hey, I'm Trashy Randy. Tell me to add a client — e.g. \"Add Northgate Retail, weekly Monday pickup, 6yd dumpster, invoice monthly\" — and I'll set them up with a pickup schedule and invoice schedule.",
     },
   ])
   const aiScrollRef = useRef(null)
@@ -72,14 +79,15 @@ export default function App() {
   const activeLineObj = LINES.find((l) => l.id === activeLine) || LINES[0]
 
   const VIEW_META = {
-    dashboard: ['Dispatch Overview', 'Tuesday, June 18 · 7:42 AM · ' + activeLineObj.name],
+    dashboard: ['Dispatch Overview', activeLineObj.name],
     routes: ['Routes & Dispatch', 'Live sequencing, GPS tracking and AI optimization'],
     schedule: ['Recurring Schedules', 'Set pickup cadence — nth weekday, alternating weeks'],
     invoices: ['Invoicing', 'Per-stop line items · monthly batch billing'],
-    clients: ['Clients', activeLineObj.meta],
+    clients: ['Clients', 'Add and manage your customers'],
     drivers: ['Drivers & Field', 'Check-in / check-out, photos and GPS'],
     team: ['Team', 'Members and their business-line assignments'],
     portal: ['Client Portal', 'What your clients see when they log in'],
+    settings: ['Settings', 'Manage tags and configuration'],
   }
   const [viewTitle, viewSubtitle] = VIEW_META[activeView] || VIEW_META.dashboard
 
@@ -98,34 +106,27 @@ export default function App() {
   async function runAi(text) {
     const clean = (text || '').trim()
     if (!clean) return
+    // Build conversation history for the edge function (role + text).
+    const history = aiMessages
+      .filter((m) => m.text)
+      .map((m) => ({ role: m.role === 'user' ? 'user' : 'assistant', text: m.text }))
+    history.push({ role: 'user', text: clean })
+
     setAiMessages((prev) => prev.concat([{ role: 'user', text: clean }]))
     setAiInput('')
     setCommandText('')
     setAiBusy(true)
     scrollAi()
-    let reply
     try {
-      if (typeof window !== 'undefined' && window.claude && window.claude.complete) {
-        const prompt =
-          "You are Trashy Randy, the friendly but no-nonsense dispatch assistant inside Valet Waste, a CRM for waste haulers (also junk removal & lawn care). You help route pickups, build recurring schedules (e.g. 1st & 3rd Monday, alternating weeks), set up per-stop and monthly batch invoicing, optimize live routes, and message field drivers. Be concise and operational (2-4 sentences), use realistic specifics. Current context: 38 stops today across Truck 14 (Marcus), Truck 7 (Dana), Truck 22 (Luis); Truck 7 is ~22 min behind. If the request implies a concrete action, put it on a final line formatted exactly as: ACTION: <short imperative label>. User: " +
-          clean
-        const raw = await window.claude.complete(prompt)
-        const lines = (raw || '').split(/\n+/)
-        let action = ''
-        const body = []
-        for (const ln of lines) {
-          const mm = ln.match(/^\s*ACTION:\s*(.+)$/i)
-          if (mm) action = mm[1].trim()
-          else if (ln.trim()) body.push(ln.trim())
-        }
-        reply = { text: body.join('\n') || raw, action }
-      } else {
-        reply = fallbackReply(clean)
-      }
+      const { data, error } = await supabase.functions.invoke('dispatch-ai', { body: { messages: history } })
+      if (error) throw error
+      setAiMessages((prev) => prev.concat([{ role: 'ai', text: (data && data.text) || 'Done.' }]))
     } catch (e) {
-      reply = fallbackReply(clean)
+      setAiMessages((prev) => prev.concat([{
+        role: 'ai',
+        text: "I couldn't reach the assistant service: " + ((e && e.message) || e) + '. (If this is the first run, make sure the ANTHROPIC_API_KEY secret is set in Supabase.)',
+      }]))
     }
-    setAiMessages((prev) => prev.concat([{ role: 'ai', text: reply.text, action: reply.action }]))
     setAiBusy(false)
     scrollAi()
   }
@@ -163,14 +164,15 @@ export default function App() {
   const app = { activeLine, activeLineObj, go, openAssistant, askAi, runAi, isMobile, isTablet }
 
   const views = {
-    dashboard: <Dashboard app={app} />,
+    dashboard: <Placeholder title="Dashboard" />,
     routes: <RoutesView app={app} />,
-    schedule: <Schedule app={app} />,
-    invoices: <Invoices app={app} />,
+    schedule: <Placeholder title="Schedules" />,
+    invoices: <Placeholder title="Invoicing" />,
     clients: <Clients app={app} />,
-    drivers: <Drivers app={app} />,
-    portal: <Portal app={app} />,
-    team: <Team app={app} />,
+    drivers: <Placeholder title="Drivers & Field" />,
+    portal: <Placeholder title="Client Portal" />,
+    team: <Placeholder title="Team" />,
+    settings: <Settings app={app} />,
   }
 
   const showInlineDock = aiOpen && !isMobile && !isTablet

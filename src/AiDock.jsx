@@ -6,9 +6,9 @@ const PALETTE = {
 }
 
 const CHIPS = [
-  { label: 'Optimize Route B', msg: 'Optimize Route B for me' },
-  { label: 'Bill this month', msg: 'Set up monthly batch billing for Northgate' },
-  { label: 'New recurring stop', msg: 'Create a recurring pickup every 1st & 3rd Monday' },
+  { label: 'Add a client', msg: 'Add Northgate Retail Park, weekly Monday pickup, 6yd dumpster, invoice monthly' },
+  { label: '1st & 3rd Monday', msg: 'Add Oakwood HOA on 1st & 3rd Monday pickups, 4yd dumpster, monthly billing' },
+  { label: 'Add a prospect', msg: 'Add Cedar Industrial as a prospect, on-call pickups, per-service billing' },
 ]
 
 export default function AiDock({ inline, mobile, aiMessages, aiBusy, aiInput, setAiInput, onSubmit, onClose, onConfirm, onDismiss, onChip, scrollRef }) {
