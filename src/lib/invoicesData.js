@@ -4,6 +4,9 @@
 // platform secret key stays server-side.
 import { supabase } from './supabaseClient.js'
 import { stripePaymentLink } from './stripeData.js'
+import { logActivity } from './activityData.js'
+
+const money = (v) => '$' + Number(v || 0).toFixed(2)
 
 export const INVOICE_STATUS = ['draft', 'sent', 'paid', 'void']
 
@@ -102,10 +105,11 @@ export async function createInvoice(payload) {
       subtotal,
       total,
     })
-    .select('id')
+    .select('id, number')
     .single()
   if (error) throw error
   await writeLineItems(data.id, payload.items)
+  logActivity({ type: 'invoice_created', summary: `Created invoice ${data.number} (${money(total)})`, entityType: 'invoice', entityId: data.id, meta: { total } })
   return data.id
 }
 
@@ -136,13 +140,15 @@ export async function setInvoiceStatus(id, status, extra = {}) {
   if (error) throw error
 }
 
-export async function markPaid(id) {
-  return setInvoiceStatus(id, 'paid', { paid_at: new Date().toISOString() })
+export async function markPaid(id, number) {
+  await setInvoiceStatus(id, 'paid', { paid_at: new Date().toISOString() })
+  logActivity({ type: 'invoice_paid', summary: `Marked invoice ${number || ''} paid`.replace('  ', ' ').trim(), entityType: 'invoice', entityId: id })
 }
 
-export async function deleteInvoice(id) {
+export async function deleteInvoice(id, number) {
   const { error } = await supabase.from('invoices').delete().eq('id', id)
   if (error) throw error
+  logActivity({ type: 'invoice_deleted', summary: `Deleted invoice ${number || ''}`.trim(), entityType: 'invoice' })
 }
 
 // Mint a Stripe checkout link for the invoice total, store it, and mark sent.
@@ -160,6 +166,7 @@ export async function sendInvoiceLink(invoice) {
     stripe_payment_url: d.url,
     sent_at: new Date().toISOString(),
   })
+  logActivity({ type: 'invoice_sent', summary: `Sent payment link for invoice ${invoice.number} (${money(invoice.total)})`, entityType: 'invoice', entityId: invoice.id })
   return d.url
 }
 

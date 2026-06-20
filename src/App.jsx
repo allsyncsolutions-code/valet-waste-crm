@@ -8,6 +8,7 @@ import Settings from './views/Settings.jsx'
 import Schedule from './views/Schedule.jsx'
 import Invoices from './views/Invoices.jsx'
 import Dashboard from './views/Dashboard.jsx'
+import Activity from './views/Activity.jsx'
 import AiDock from './AiDock.jsx'
 
 // Tabs not yet wired to Supabase show a clean placeholder (no sample data).
@@ -29,6 +30,7 @@ const NAV_MAIN = [
 ]
 const NAV_FIELD = [
   { id: 'clients', glyph: '◎', label: 'Clients' },
+  { id: 'activity', glyph: '◷', label: 'Activity Log' },
   { id: 'drivers', glyph: '⛟', label: 'Drivers & Field' },
   { id: 'team', glyph: '⚇', label: 'Team' },
   { id: 'portal', glyph: '◫', label: 'Client Portal' },
@@ -87,6 +89,7 @@ export default function App() {
     schedule: ['Recurring Schedules', 'Set pickup cadence — nth weekday, alternating weeks'],
     invoices: ['Invoicing', 'Per-stop line items · monthly batch billing'],
     clients: ['Clients', 'Add and manage your customers'],
+    activity: ['Activity Log', 'Everything you and Trashy Randy have done'],
     drivers: ['Drivers & Field', 'Check-in / check-out, photos and GPS'],
     team: ['Team', 'Members and their business-line assignments'],
     portal: ['Client Portal', 'What your clients see when they log in'],
@@ -172,6 +175,7 @@ export default function App() {
     schedule: <Schedule app={app} />,
     invoices: <Invoices app={app} />,
     clients: <Clients app={app} />,
+    activity: <Activity app={app} />,
     drivers: <Placeholder title="Drivers & Field" />,
     portal: <Placeholder title="Client Portal" />,
     team: <Placeholder title="Team" />,

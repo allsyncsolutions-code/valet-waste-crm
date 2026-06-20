@@ -207,6 +207,32 @@ async function sbPatch(path: string, body: unknown) {
 const enc = encodeURIComponent
 const round2 = (v: number) => Math.round(v * 100) / 100
 
+// Best-effort activity logging (actor = Trashy Randy). Never throws.
+async function logActivity(type: string, summary: string, entityType?: string, entityId?: string) {
+  try {
+    await sbPost("activity_log", {
+      type,
+      actor: "Trashy Randy",
+      summary,
+      entity_type: entityType ?? null,
+      entity_id: entityId ?? null,
+    })
+  } catch (_) { /* logging is non-critical */ }
+}
+
+function logForTool(name: string, out: any): Promise<void> | undefined {
+  switch (name) {
+    case "create_client": return logActivity("client_created", `Added client ${out.name}`, "customer", out.id)
+    case "update_client": return logActivity("client_updated", `Updated client ${out.name}`, "customer", out.id)
+    case "create_schedule": return logActivity("schedule_created", `Added a ${out.frequency} pickup`, "schedule", out.id)
+    case "tag_client": return logActivity("client_tagged", `Tagged a client "${out.tag}"`, "customer", out.customer_id)
+    case "create_invoice": return logActivity("invoice_created", `Created invoice ${out.number} ($${out.total})`, "invoice", out.id)
+    case "mark_invoice_paid": return logActivity("invoice_paid", `Marked invoice ${out.number} paid`, "invoice")
+    case "add_stop_to_route": return logActivity("stop_added", `Added ${out.stop_name} to route ${out.route}`, "route")
+    default: return undefined
+  }
+}
+
 async function geocode(address: string): Promise<{ lat: number; lng: number } | null> {
   try {
     const r = await fetch(
@@ -457,6 +483,7 @@ Deno.serve(async (req) => {
           const out = await runTool(block.name, block.input)
           if (block.name !== "find_clients" && block.name !== "get_overview") {
             actions.push({ tool: block.name, result: out })
+            await logForTool(block.name, out)
           }
           results.push({ type: "tool_result", tool_use_id: block.id, content: JSON.stringify(out) })
         } catch (e) {

@@ -118,7 +118,7 @@ export default function Clients({ app }) {
     if (!cur) return
     const id = cur.id
     try {
-      await deleteClient(id)
+      await deleteClient(id, cur.name)
       setConfirmDelete(false)
       setCustomers((cs) => cs.filter((c) => c.id !== id))
       setSelId(null)

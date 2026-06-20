@@ -2,6 +2,7 @@
 // Shared by the Clients view (form) and the AI assistant (edge function writes
 // to the same tables, so realtime keeps everything in sync).
 import { supabase } from './supabaseClient.js'
+import { logActivity } from './activityData.js'
 
 function mapCustomer(row) {
   const pickup = (row.pickup_schedules || [])[0] || null
@@ -72,6 +73,7 @@ export async function createClient(payload) {
     })
     if (error) throw error
   }
+  logActivity({ type: 'client_created', summary: `Added client ${customer.name}`, entityType: 'customer', entityId: customer.id })
   return customer.id
 }
 
@@ -92,9 +94,10 @@ export async function detachTag(customerId, tagId) {
 }
 
 // Delete a customer (schedules cascade via FK on delete cascade).
-export async function deleteClient(id) {
+export async function deleteClient(id, name) {
   const { error } = await supabase.from('customers').delete().eq('id', id)
   if (error) throw error
+  logActivity({ type: 'client_deleted', summary: `Deleted client ${name || ''}`.trim(), entityType: 'customer' })
 }
 
 // Live updates whenever any customer / schedule row changes (form or AI).

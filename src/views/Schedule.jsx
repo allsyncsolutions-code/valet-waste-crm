@@ -125,7 +125,7 @@ export default function Schedule({ app }) {
     setErr(null)
     try {
       if (editId) await updateSchedule(editId, form)
-      else await createSchedule(form)
+      else await createSchedule({ ...form, customerName: customers.find((c) => c.id === form.customerId)?.name })
       setShowForm(false)
       await refresh()
     } catch (e2) {

@@ -1,6 +1,7 @@
 // Data layer for recurring pickup schedules (one row per customer pickup).
 // Joined to the customer so the Schedules view can group/show context.
 import { supabase } from './supabaseClient.js'
+import { logActivity } from './activityData.js'
 
 export const FREQUENCIES = [
   ['weekly', 'Weekly'],
@@ -55,6 +56,7 @@ export async function createSchedule(payload) {
     .select('id')
     .single()
   if (error) throw error
+  logActivity({ type: 'schedule_created', summary: `Added ${freqLabel(payload.frequency || 'weekly')} pickup for ${payload.customerName || 'a client'}`, entityType: 'schedule', entityId: data.id })
   return data.id
 }
 

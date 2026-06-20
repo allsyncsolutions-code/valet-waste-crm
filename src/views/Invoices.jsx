@@ -141,13 +141,14 @@ export default function Invoices({ app }) {
       setBusy(false)
     }
   }
-  const onMarkPaid = () => action(() => markPaid(cur.id))
+  const onMarkPaid = () => action(() => markPaid(cur.id, cur.number))
   const onSend = () => action(async () => { await sendInvoiceLink(cur) })
   async function onDelete() {
     if (!cur || !window.confirm(`Delete invoice ${cur.number}? This can’t be undone.`)) return
     const id = cur.id
+    const number = cur.number
     await action(async () => {
-      await deleteInvoice(id)
+      await deleteInvoice(id, number)
       setSelId(null)
     })
   }
