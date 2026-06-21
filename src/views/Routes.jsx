@@ -29,6 +29,10 @@ import {
   addOneOffStop,
 } from '../lib/routesData.js'
 import { loadDrivers } from '../lib/teamData.js'
+import { loadCustomers } from '../lib/customersData.js'
+import { createInvoice } from '../lib/invoicesData.js'
+
+const BLANK_STOP = { name: '', address: '', service: '', customerId: '', customerName: '', description: '', price: '' }
 
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -204,29 +208,69 @@ export default function RoutesView({ app }) {
 
   // ---- one-off pickup modal ----
   const [showNewStop, setShowNewStop] = useState(false)
-  const [newStop, setNewStop] = useState({ name: '', address: '', service: '' })
+  const [newStop, setNewStop] = useState(BLANK_STOP)
   const [savingStop, setSavingStop] = useState(false)
+  const [customers, setCustomers] = useState([])
+  const [custOpen, setCustOpen] = useState(false)
+
+  function openNewStop() {
+    setNewStop(BLANK_STOP)
+    setCustOpen(false)
+    setShowNewStop(true)
+  }
 
   // Open the modal when the top-bar "+ New pickup" button bumps the tick.
   const pickupTickRef = useRef(app.newPickupTick)
   useEffect(() => {
     if (app.newPickupTick !== pickupTickRef.current) {
       pickupTickRef.current = app.newPickupTick
-      setNewStop({ name: '', address: '', service: '' })
-      setShowNewStop(true)
+      openNewStop()
     }
   }, [app.newPickupTick])
+
+  // Load the customer list the first time the modal is opened.
+  useEffect(() => {
+    if (showNewStop && customers.length === 0) {
+      loadCustomers().then(setCustomers).catch(() => {})
+    }
+  }, [showNewStop])
 
   async function submitNewStop(e) {
     e.preventDefault()
     if (savingStop) return
-    if (!newStop.address.trim()) { setErr('Enter an address for the pickup.'); return }
+    const addr = newStop.address.trim()
+    if (!addr) { setErr('Enter an address for the pickup.'); return }
+
+    // Resolve the customer (allow a typed exact-name match too).
+    let custId = newStop.customerId
+    if (!custId && newStop.customerName.trim()) {
+      const m = customers.find((c) => c.name.toLowerCase() === newStop.customerName.trim().toLowerCase())
+      if (m) custId = m.id
+    }
+    if (!custId) { setErr('Pick a customer from the list to tie this pickup to.'); return }
+
+    const price = parseFloat(newStop.price)
+    const hasPrice = !isNaN(price) && price > 0
+
     setSavingStop(true)
     setErr(null)
     try {
-      const res = await addOneOffStop(ROUTE_CODE, routeSel, newStop)
+      const res = await addOneOffStop(ROUTE_CODE, routeSel, {
+        name: newStop.name, address: addr, service: newStop.service, customerId: custId, price: hasPrice ? price : null,
+      })
+      if (hasPrice) {
+        await createInvoice({
+          customerId: custId,
+          status: 'draft',
+          items: [{
+            description: (newStop.description || '').trim() || newStop.service.trim() || 'One-off pickup',
+            quantity: 1,
+            unitPrice: price,
+          }],
+        })
+      }
       setShowNewStop(false)
-      setNewStop({ name: '', address: '', service: '' })
+      setNewStop(BLANK_STOP)
       await refresh(routeSel)
       if (!res.geocoded) {
         setErr("Added to the route, but I couldn't locate that address on the map — double-check the address if it should appear as a pin.")
@@ -329,7 +373,7 @@ export default function RoutesView({ app }) {
         )}
 
         <div style={{ flex: 1 }} />
-        <button onClick={() => { setNewStop({ name: '', address: '', service: '' }); setShowNewStop(true) }} style={ghostBtn}>+ New pickup</button>
+        <button onClick={openNewStop} style={ghostBtn}>+ New pickup</button>
         <button onClick={() => refresh().catch((e) => setErr(e.message))} style={ghostBtn}>Reload</button>
         <button onClick={handleBuildFromSchedules} disabled={building} style={{ ...ghostBtn, opacity: building ? 0.6 : 1 }}>{building ? 'Building…' : 'Build from schedules'}</button>
         <button onClick={handleOptimize} disabled={loading || !stops.length} style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'linear-gradient(135deg,#1f7a4d,#155e3a)', color: '#fff', border: 'none', borderRadius: 10, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: loading ? 'default' : 'pointer', opacity: loading || !stops.length ? 0.6 : 1 }}>
@@ -439,13 +483,45 @@ export default function RoutesView({ app }) {
               <div onClick={() => !savingStop && setShowNewStop(false)} style={{ cursor: 'pointer', color: '#7c8a82', fontSize: 18 }}>✕</div>
             </div>
             <div style={{ fontSize: 12.5, color: '#7c8a82', marginBottom: 16 }}>
-              Adds a single stop to Route {ROUTE_CODE} on <b>{prettyDate(routeSel)}</b> only — no recurring schedule.
+              Adds a single stop to Route {ROUTE_CODE} on <b>{prettyDate(routeSel)}</b> only — no recurring schedule. Add a price to also create a draft invoice for the customer.
             </div>
+
+            {/* customer combobox */}
+            <div style={{ position: 'relative', marginBottom: 12 }}>
+              <label style={mLbl}>Customer</label>
+              <input
+                value={newStop.customerName}
+                onChange={(e) => { setNewStop({ ...newStop, customerName: e.target.value, customerId: '' }); setCustOpen(true) }}
+                onFocus={() => setCustOpen(true)}
+                style={mInp}
+                placeholder="Search your customers…"
+                autoComplete="off"
+              />
+              {newStop.customerId && <div style={{ position: 'absolute', right: 11, top: 35, color: '#1f7a4d', fontSize: 14 }}>✓</div>}
+              {custOpen && (
+                <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 20, background: '#fff', border: '1px solid #dde2dd', borderRadius: 9, marginTop: 4, maxHeight: 184, overflowY: 'auto', boxShadow: '0 12px 28px rgba(15,30,20,.14)' }}>
+                  {customers.length === 0 && <div style={{ padding: '9px 11px', fontSize: 12, color: '#9aa69e' }}>Loading customers…</div>}
+                  {customers
+                    .filter((c) => !newStop.customerName.trim() || c.name.toLowerCase().includes(newStop.customerName.trim().toLowerCase()))
+                    .slice(0, 40)
+                    .map((c) => (
+                      <div key={c.id} onClick={() => { setNewStop((s) => ({ ...s, customerId: c.id, customerName: c.name, address: s.address || c.address || '' })); setCustOpen(false) }} style={{ padding: '8px 11px', cursor: 'pointer', borderBottom: '1px solid #f1f3f0' }}>
+                        <div style={{ fontWeight: 600, fontSize: 13 }}>{c.name}</div>
+                        {c.address && <div style={{ fontSize: 11, color: '#7c8a82', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.address}</div>}
+                      </div>
+                    ))}
+                  {customers.length > 0 && customers.filter((c) => !newStop.customerName.trim() || c.name.toLowerCase().includes(newStop.customerName.trim().toLowerCase())).length === 0 && (
+                    <div style={{ padding: '9px 11px', fontSize: 12, color: '#9aa69e' }}>No match — add the client in Clients first.</div>
+                  )}
+                </div>
+              )}
+            </div>
+
             <div style={{ marginBottom: 12 }}>
               <label style={mLbl}>Address</label>
-              <input autoFocus value={newStop.address} onChange={(e) => setNewStop({ ...newStop, address: e.target.value })} style={mInp} placeholder="123 Main St, St. Augustine, FL 32084" />
+              <input value={newStop.address} onChange={(e) => setNewStop({ ...newStop, address: e.target.value })} onFocus={() => setCustOpen(false)} style={mInp} placeholder="123 Main St, St. Augustine, FL 32084" />
             </div>
-            <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+            <div style={{ display: 'flex', gap: 12, marginBottom: 12 }}>
               <div style={{ flex: 1 }}>
                 <label style={mLbl}>Name / label <span style={{ color: '#9aa69e', fontWeight: 400 }}>(optional)</span></label>
                 <input value={newStop.name} onChange={(e) => setNewStop({ ...newStop, name: e.target.value })} style={mInp} placeholder="Defaults to the address" />
@@ -453,6 +529,19 @@ export default function RoutesView({ app }) {
               <div style={{ flex: 1 }}>
                 <label style={mLbl}>Service <span style={{ color: '#9aa69e', fontWeight: 400 }}>(optional)</span></label>
                 <input value={newStop.service} onChange={(e) => setNewStop({ ...newStop, service: e.target.value })} style={mInp} placeholder="e.g. Trash / Recycle" />
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+              <div style={{ flex: 2 }}>
+                <label style={mLbl}>Charge description <span style={{ color: '#9aa69e', fontWeight: 400 }}>(for the invoice)</span></label>
+                <input value={newStop.description} onChange={(e) => setNewStop({ ...newStop, description: e.target.value })} style={mInp} placeholder="Defaults to the service / “One-off pickup”" />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={mLbl}>Price <span style={{ color: '#9aa69e', fontWeight: 400 }}>(optional)</span></label>
+                <div style={{ position: 'relative' }}>
+                  <span style={{ position: 'absolute', left: 11, top: '50%', transform: 'translateY(-50%)', color: '#7c8a82', fontSize: 15 }}>$</span>
+                  <input value={newStop.price} onChange={(e) => setNewStop({ ...newStop, price: e.target.value })} inputMode="decimal" style={{ ...mInp, paddingLeft: 22 }} placeholder="0.00" />
+                </div>
               </div>
             </div>
             <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>

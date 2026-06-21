@@ -273,7 +273,7 @@ export async function ensureRoute(code, date) {
 // Add a brand-new ad-hoc stop (a one-off pickup) to a date's route: geocodes
 // the address, creates a property for it, and appends it as a stop. Does NOT
 // create a recurring schedule — it only lands on this one date's route.
-export async function addOneOffStop(code, date, { name, address, service } = {}) {
+export async function addOneOffStop(code, date, { name, address, service, customerId, price } = {}) {
   const addr = String(address || '').trim()
   if (!addr) throw new Error('An address is required.')
   if (!date) throw new Error('A date is required.')
@@ -288,6 +288,8 @@ export async function addOneOffStop(code, date, { name, address, service } = {})
       name: (name && name.trim()) || addr,
       address: addr,
       service: service || null,
+      customer_id: customerId || null,
+      price: price != null ? price : null,
       lat: loc ? loc.lat : null,
       lng: loc ? loc.lng : null,
     })
