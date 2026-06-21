@@ -29,6 +29,7 @@ import {
   addOneOffStop,
   loadRouteDefs,
   createRouteDef,
+  updateRouteDef,
   copyPreviousWeekday,
   moveStopToRoute,
   ensureRoute,
@@ -333,6 +334,18 @@ export default function RoutesView({ app }) {
     }
   }
 
+  async function renameRoute() {
+    const name = window.prompt('Rename this route', currentDef.name)
+    if (name == null || !name.trim()) return
+    setErr(null)
+    try {
+      await updateRouteDef(routeCode, { name: name.trim() })
+      setRouteDefs(await loadRouteDefs())
+    } catch (e) {
+      setErr(e.message || String(e))
+    }
+  }
+
   async function addRoute() {
     const name = window.prompt('New route name (e.g. "Route C" or "North Side")')
     if (name == null || !name.trim()) return
@@ -427,7 +440,10 @@ export default function RoutesView({ app }) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
             <div style={{ width: 30, height: 30, borderRadius: 8, background: '#1f7a4d', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontWeight: 600, fontSize: 13 }}>{currentDef.code}</div>
             <div style={{ lineHeight: 1.25 }}>
-              <div style={{ fontSize: 14, fontWeight: 700 }}>{currentDef.name}</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <div style={{ fontSize: 14, fontWeight: 700 }}>{currentDef.name}</div>
+                <span onClick={renameRoute} title="Rename this route" style={{ cursor: 'pointer', color: '#9aa69e', fontSize: 12 }}>✎</span>
+              </div>
               <div style={{ fontSize: 10.5, color: '#7c8a82' }}>{prettyDate(routeSel)} · {stops.length} stop{stops.length === 1 ? '' : 's'}</div>
             </div>
           </div>

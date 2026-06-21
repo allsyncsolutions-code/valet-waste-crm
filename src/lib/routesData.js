@@ -261,6 +261,14 @@ export async function loadRouteDefs() {
   return (data || []).map((d) => ({ ...d, name: d.name || `Route ${d.code}` }))
 }
 
+export async function updateRouteDef(code, patch) {
+  const fields = {}
+  for (const k of ['name', 'color', 'active', 'sort']) if (patch[k] !== undefined) fields[k] = patch[k]
+  fields.updated_at = new Date().toISOString()
+  const { error } = await supabase.from('route_defaults').update(fields).eq('code', code)
+  if (error) throw error
+}
+
 export async function createRouteDef({ code, name, color }) {
   const c = String(code || '').trim().toUpperCase()
   if (!c) throw new Error('A route code is required.')
