@@ -326,6 +326,39 @@ export async function copyPreviousWeekday(code, date) {
   return { copied: rows.length, sourceDate: match.service_date }
 }
 
+// Every service property with its owning customer — powers the mass-add picker.
+export async function loadAllProperties() {
+  const { data, error } = await supabase
+    .from('properties')
+    .select('id, name, address, service, lat, lng, customer_id, customers(name)')
+    .order('name', { ascending: true })
+  if (error) throw error
+  return (data || []).map((p) => ({
+    id: p.id, name: p.name, address: p.address || '', service: p.service || '',
+    lat: p.lat, lng: p.lng, customerId: p.customer_id, customerName: p.customers?.name || '',
+  }))
+}
+
+// Append many properties to a date's route in one shot (skips ones already on it).
+export async function addPropertiesToRoute(code, date, props) {
+  const list = (props || []).filter(Boolean)
+  if (!list.length) return { added: 0 }
+  const route = await ensureRoute(code, date)
+  const { data: existing, error: eErr } = await supabase
+    .from('route_stops').select('property_id, seq').eq('route_id', route.id)
+  if (eErr) throw eErr
+  const have = new Set((existing || []).map((e) => e.property_id))
+  let seq = (existing || []).reduce((m, e) => Math.max(m, e.seq || 0), 0)
+  const rows = list
+    .filter((p) => !have.has(p.id))
+    .map((p) => ({ route_id: route.id, property_id: p.id, seq: ++seq, status: 'pending', service: p.service || null, lat: p.lat, lng: p.lng }))
+  if (rows.length) {
+    const { error } = await supabase.from('route_stops').insert(rows)
+    if (error) throw error
+  }
+  return { added: rows.length, route }
+}
+
 // All routes (with their stops + driver) for a single date — powers the
 // Drivers & Field per-driver dispatch board.
 export async function loadDayDispatch(date) {

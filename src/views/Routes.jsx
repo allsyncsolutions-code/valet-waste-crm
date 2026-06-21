@@ -33,6 +33,8 @@ import {
   copyPreviousWeekday,
   moveStopToRoute,
   ensureRoute,
+  loadAllProperties,
+  addPropertiesToRoute,
 } from '../lib/routesData.js'
 import { loadDrivers } from '../lib/teamData.js'
 import { loadCustomers } from '../lib/customersData.js'
@@ -299,6 +301,58 @@ export default function RoutesView({ app }) {
     setSavingStop(false)
   }
 
+  // ---- mass-add modal ----
+  const [showMass, setShowMass] = useState(false)
+  const [allProps, setAllProps] = useState([])
+  const [massQuery, setMassQuery] = useState('')
+  const [massSel, setMassSel] = useState(() => new Set())
+  const [massLoading, setMassLoading] = useState(false)
+  const [massBusy, setMassBusy] = useState(false)
+
+  const onRouteIds = useMemo(() => new Set(stops.map((s) => s.propertyId)), [stops])
+  const massFiltered = useMemo(() => {
+    const q = massQuery.trim().toLowerCase()
+    return allProps.filter((p) =>
+      !onRouteIds.has(p.id) &&
+      (!q || `${p.name} ${p.address} ${p.customerName} ${p.service}`.toLowerCase().includes(q))
+    )
+  }, [allProps, massQuery, onRouteIds])
+
+  async function openMass() {
+    setMassSel(new Set())
+    setMassQuery('')
+    setShowMass(true)
+    setMassLoading(true)
+    try { setAllProps(await loadAllProperties()) } catch (e) { setErr(e.message || String(e)) }
+    setMassLoading(false)
+  }
+  function toggleMass(id) {
+    setMassSel((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
+  }
+  function toggleAllMass() {
+    setMassSel((prev) => {
+      const allOn = massFiltered.length > 0 && massFiltered.every((p) => prev.has(p.id))
+      const n = new Set(prev)
+      massFiltered.forEach((p) => (allOn ? n.delete(p.id) : n.add(p.id)))
+      return n
+    })
+  }
+  async function submitMass() {
+    if (massBusy) return
+    const chosen = allProps.filter((p) => massSel.has(p.id))
+    if (!chosen.length) { setShowMass(false); return }
+    setMassBusy(true)
+    setErr(null)
+    try {
+      await addPropertiesToRoute(routeCode, routeSel, chosen)
+      setShowMass(false)
+      await refresh(routeSel)
+    } catch (e) {
+      setErr(e.message || String(e))
+    }
+    setMassBusy(false)
+  }
+
   const [building, setBuilding] = useState(false)
   async function handleBuildFromSchedules() {
     if (building) return
@@ -469,6 +523,7 @@ export default function RoutesView({ app }) {
         <div style={{ flex: 1 }} />
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
           <button onClick={openNewStop} style={ghostBtn}>+ New pickup</button>
+          <button onClick={openMass} style={ghostBtn}>+ Add stops</button>
           <button onClick={handleCopyPrevious} disabled={copying} style={{ ...ghostBtn, opacity: copying ? 0.6 : 1 }}>{copying ? 'Copying…' : `Copy last ${selDow}`}</button>
           <button onClick={handleBuildFromSchedules} disabled={building} style={{ ...ghostBtn, opacity: building ? 0.6 : 1 }}>{building ? 'Building…' : 'Build from schedules'}</button>
           <button onClick={() => refresh().catch((e) => setErr(e.message))} style={ghostBtn}>Reload</button>
@@ -579,6 +634,57 @@ export default function RoutesView({ app }) {
           )}
         </div>
       </div>
+      {/* mass-add modal */}
+      {showMass && (
+        <div onClick={() => !massBusy && setShowMass(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(15,30,20,.42)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 500, padding: 16 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: '#fff', borderRadius: 14, width: 540, maxWidth: '100%', maxHeight: '86vh', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 60px rgba(15,30,20,.28)' }}>
+            <div style={{ padding: '18px 20px 12px', borderBottom: '1px solid #eef0ed' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+                <div style={{ fontWeight: 700, fontSize: 16, flex: 1 }}>Add stops to {currentDef.name}</div>
+                <div onClick={() => !massBusy && setShowMass(false)} style={{ cursor: 'pointer', color: '#7c8a82', fontSize: 18 }}>✕</div>
+              </div>
+              <div style={{ fontSize: 12.5, color: '#7c8a82', marginBottom: 12 }}>Pick properties to add to {currentDef.code} on <b>{prettyDate(routeSel)}</b>. Already-routed stops are hidden.</div>
+              <input value={massQuery} onChange={(e) => setMassQuery(e.target.value)} style={mInp} placeholder="Search by property, address, customer or service…" autoFocus />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12.5, fontWeight: 600, color: '#5d6b63', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={massFiltered.length > 0 && massFiltered.every((p) => massSel.has(p.id))} onChange={toggleAllMass} style={{ width: 15, height: 15, accentColor: '#1f7a4d' }} />
+                  Select all{massQuery ? ' matching' : ''} ({massFiltered.length})
+                </label>
+                <div style={{ flex: 1 }} />
+                <div style={{ fontSize: 12, color: '#1f7a4d', fontWeight: 600 }}>{massSel.size} selected</div>
+              </div>
+            </div>
+
+            <div style={{ flex: 1, overflowY: 'auto', padding: '6px 12px' }}>
+              {massLoading ? (
+                <div style={{ padding: 24, textAlign: 'center', color: '#9aa69e', fontSize: 13 }}>Loading properties…</div>
+              ) : massFiltered.length === 0 ? (
+                <div style={{ padding: 24, textAlign: 'center', color: '#9aa69e', fontSize: 13 }}>{allProps.length ? 'Nothing left to add — everything matching is already on this route.' : 'No properties yet. Add clients/properties first.'}</div>
+              ) : massFiltered.map((p) => {
+                const on = massSel.has(p.id)
+                return (
+                  <label key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '9px 8px', borderBottom: '1px solid #f1f3f0', cursor: 'pointer' }}>
+                    <input type="checkbox" checked={on} onChange={() => toggleMass(p.id)} style={{ width: 16, height: 16, accentColor: '#1f7a4d', flex: 'none' }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, fontSize: 13.5 }}>{p.name}</div>
+                      <div style={{ fontSize: 11.5, color: '#7c8a82', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {[p.customerName, p.address || p.service].filter(Boolean).join(' · ')}
+                      </div>
+                    </div>
+                    {p.lat == null && <span style={{ fontSize: 10, color: '#c08a2e', fontFamily: MONO, flex: 'none' }} title="No map location yet">no geo</span>}
+                  </label>
+                )
+              })}
+            </div>
+
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', padding: '12px 20px', borderTop: '1px solid #eef0ed' }}>
+              <button type="button" onClick={() => setShowMass(false)} disabled={massBusy} style={ghostBtn}>Cancel</button>
+              <button type="button" onClick={submitMass} disabled={massBusy || massSel.size === 0} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 10, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: massSel.size ? 'pointer' : 'default', opacity: massBusy || !massSel.size ? 0.6 : 1 }}>{massBusy ? 'Adding…' : `Add ${massSel.size || ''} to ${currentDef.code}`}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* one-off pickup modal */}
       {showNewStop && (
         <div onClick={() => !savingStop && setShowNewStop(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(15,30,20,.42)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 500, padding: 16 }}>
