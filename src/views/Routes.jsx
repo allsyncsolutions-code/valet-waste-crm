@@ -21,12 +21,21 @@ import {
   removeStopFromRoute,
   subscribeRouteStops,
   buildRouteFromSchedules,
+  loadActiveSchedules,
+  scheduleHitsDate,
 } from '../lib/routesData.js'
 
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-const TODAY_KEY = '2026-6-19'
 const ROUTE_CODE = 'B'
+
+const pad = (n) => String(n).padStart(2, '0')
+const iso = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+const TODAY_KEY = iso(new Date())
+const prettyDate = (key) => {
+  const d = new Date(key + 'T12:00:00')
+  return `${DOW[d.getDay()]}, ${MON[d.getMonth()]} ${d.getDate()}`
+}
 
 export default function RoutesView({ app }) {
   const isMobile = app.isMobile
@@ -42,20 +51,22 @@ export default function RoutesView({ app }) {
   const [optimized, setOptimized] = useState(false)
   const [saved, setSaved] = useState(null)
 
+  const [schedules, setSchedules] = useState([]) // active schedules, for the day dots
+
   const baselineRef = useRef(null) // metrics of the first-loaded order
   const writingRef = useRef(false) // suppress realtime reload during our own writes
 
-  async function refresh() {
-    const slice = await loadRouteSlice(ROUTE_CODE)
+  async function refresh(date = routeSel) {
+    const slice = await loadRouteSlice(ROUTE_CODE, date)
     setRoute(slice.route)
     setDepot(slice.depot)
     setStops(slice.stops)
     setUnrouted(slice.unrouted)
-    if (!baselineRef.current) baselineRef.current = routeMetrics(slice.stops, slice.depot)
+    baselineRef.current = routeMetrics(slice.stops, slice.depot)
     return slice
   }
 
-  // Initial load.
+  // Load the selected date's route (re-runs whenever the date changes).
   useEffect(() => {
     let alive = true
     if (!hasSupabase) {
@@ -63,12 +74,18 @@ export default function RoutesView({ app }) {
       setLoading(false)
       return
     }
-    refresh()
+    setLoading(true)
+    setSaved(null)
+    setOptimized(false)
+    refresh(routeSel)
       .catch((e) => alive && setErr(e.message || String(e)))
       .finally(() => alive && setLoading(false))
-    return () => {
-      alive = false
-    }
+    return () => { alive = false }
+  }, [routeSel])
+
+  // Active schedules drive the "service day" dots in the picker.
+  useEffect(() => {
+    loadActiveSchedules().then(setSchedules).catch(() => {})
   }, [])
 
   // Live updates: reload when another client (or driver) changes this route.
@@ -158,10 +175,9 @@ export default function RoutesView({ app }) {
     setBuilding(true)
     setErr(null)
     try {
-      const res = await buildRouteFromSchedules(ROUTE_CODE)
-      if (res.noSchedules) setErr('No active pickup schedules yet — add one on the Schedules tab first.')
-      baselineRef.current = null
-      await refresh()
+      const res = await buildRouteFromSchedules(ROUTE_CODE, routeSel)
+      if (res.noSchedules) setErr(`No pickups are scheduled for ${prettyDate(routeSel)}. Pick a date that matches a client's schedule.`)
+      await refresh(routeSel)
     } catch (e) {
       setErr(e.message || String(e))
     } finally {
@@ -169,15 +185,16 @@ export default function RoutesView({ app }) {
     }
   }
 
-  // ---- day picker (cosmetic) ----
-  const weekStart = new Date(2026, 5, 15 + weekOffset * 7)
+  // ---- day picker (real dates; dots mark days with a scheduled pickup) ----
+  const todayD = new Date()
+  const base = new Date(todayD.getFullYear(), todayD.getMonth(), todayD.getDate() - todayD.getDay() + 1 + weekOffset * 7) // Monday of the week
   const days = []
   for (let i = 0; i < 7; i++) {
-    const dt = new Date(weekStart.getFullYear(), weekStart.getMonth(), weekStart.getDate() + i)
-    const key = dt.getFullYear() + '-' + (dt.getMonth() + 1) + '-' + dt.getDate()
+    const dt = new Date(base.getFullYear(), base.getMonth(), base.getDate() + i)
+    const key = iso(dt)
     const selected = key === routeSel
     const isToday = key === TODAY_KEY
-    const hasStops = dt.getDay() >= 1 && dt.getDay() <= 6
+    const hasStops = schedules.some((s) => scheduleHitsDate(s, key))
     days.push({
       key, dow: DOW[dt.getDay()], day: String(dt.getDate()), selected, hasStops,
       stopDot: selected ? '#1f7a4d' : '#9fc7b1',
@@ -187,7 +204,7 @@ export default function RoutesView({ app }) {
       dayColor: selected ? '#15281d' : isToday ? '#1f7a4d' : '#3a463f',
     })
   }
-  const monthLabel = MON[weekStart.getMonth()] + ' ' + weekStart.getFullYear()
+  const monthLabel = MON[base.getMonth()] + ' ' + base.getFullYear()
 
   const doneCount = stops.filter((s) => s.status === 'done').length
 

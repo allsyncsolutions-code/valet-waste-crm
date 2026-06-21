@@ -6,6 +6,51 @@ import { loadSettings, settingsDepot } from './settingsData.js'
 
 const DEFAULT_DEPOT = { name: 'AllSync Yard', lat: 44.804, lng: -93.278 }
 
+const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
+
+// Parse 'YYYY-MM-DD' at local noon (avoids timezone-rollover surprises).
+function parseDate(s) {
+  const [y, m, d] = String(s).split('-').map(Number)
+  return new Date(y, m - 1, d, 12, 0, 0)
+}
+export function weekdayName(dateStr) {
+  return WEEKDAYS[parseDate(dateStr).getDay()]
+}
+// Which occurrence of this weekday within its month (1st, 2nd, ...).
+function nthWeekdayOfMonth(date) {
+  return Math.floor((date.getDate() - 1) / 7) + 1
+}
+
+// Does a recurring schedule fall on a specific calendar date?
+export function scheduleHitsDate(sched, dateStr) {
+  if (!sched || sched.active === false) return false
+  const date = parseDate(dateStr)
+  if (WEEKDAYS[date.getDay()] !== sched.day_of_week) return false
+  if (sched.start_date && parseDate(sched.start_date) > date) return false
+  const nth = nthWeekdayOfMonth(date)
+  switch (sched.frequency) {
+    case 'weekly': return true
+    case 'biweekly': {
+      if (!sched.start_date) return true
+      const weeks = Math.round((date - parseDate(sched.start_date)) / (7 * 864e5))
+      return weeks % 2 === 0
+    }
+    case 'monthly': return nth === 1
+    case '1st_3rd': return nth === 1 || nth === 3
+    case '2nd_4th': return nth === 2 || nth === 4
+    default: return false // on_call etc. never auto-populate
+  }
+}
+
+export async function loadActiveSchedules() {
+  const { data, error } = await supabase
+    .from('pickup_schedules')
+    .select('customer_id, day_of_week, frequency, start_date, active')
+    .eq('active', true)
+  if (error) throw error
+  return data || []
+}
+
 // DB row (with joined property) -> the shape the UI uses.
 function mapStop(row) {
   return {
@@ -22,17 +67,16 @@ function mapStop(row) {
 }
 
 // Load one route's depot, ordered stops, and the unrouted properties.
-export async function loadRouteSlice(code = 'B') {
+// A route is identified by code + service_date, so each day has its own route.
+export async function loadRouteSlice(code = 'B', date = null) {
   // The configured starting location (Settings) is the map home + optimizer
   // start, unless a specific route overrides it with its own depot.
   const settings = await loadSettings().catch(() => null)
   const homeDepot = settingsDepot(settings) || DEFAULT_DEPOT
 
-  const { data: route, error: rErr } = await supabase
-    .from('routes')
-    .select('*')
-    .eq('code', code)
-    .maybeSingle()
+  let rq = supabase.from('routes').select('*').eq('code', code)
+  rq = date ? rq.eq('service_date', date) : rq.is('service_date', null)
+  const { data: route, error: rErr } = await rq.maybeSingle()
   if (rErr) throw rErr
 
   // No route yet (e.g. fresh/empty database) — return an empty slice so the
@@ -102,28 +146,28 @@ export async function addStopToRoute(routeId, property, seq) {
   return data.id
 }
 
-// Populate a route from recurring schedules: every property whose client has
-// an active pickup schedule (optionally for a given weekday) is added as a
-// stop, skipping any already on the route. Returns how many were added.
-export async function buildRouteFromSchedules(code = 'B', day = null) {
-  // Ensure the route exists.
+// Populate the route FOR A SPECIFIC DATE from recurring schedules: every
+// property whose client has a schedule that lands on `date` (weekday + start
+// date + frequency) is added as a stop, skipping any already on the route.
+export async function buildRouteFromSchedules(code = 'B', date = null) {
+  if (!date) throw new Error('A date is required.')
+
+  // Which clients are due on this date?
+  const scheds = await loadActiveSchedules()
+  const due = scheds.filter((s) => scheduleHitsDate(s, date))
+  const custIds = [...new Set(due.map((s) => s.customer_id).filter(Boolean))]
+  if (!custIds.length) return { added: 0, route: null, noSchedules: true }
+
+  // Ensure the route for this date exists.
   let { data: route, error: rErr } = await supabase
-    .from('routes').select('id, code, name').eq('code', code).maybeSingle()
+    .from('routes').select('id, code, name').eq('code', code).eq('service_date', date).maybeSingle()
   if (rErr) throw rErr
   if (!route) {
     const { data: r, error } = await supabase
-      .from('routes').insert({ code, name: `Route ${code}` }).select('id, code, name').single()
+      .from('routes').insert({ code, name: `Route ${code}`, service_date: date }).select('id, code, name').single()
     if (error) throw error
     route = r
   }
-
-  // Clients with an active schedule (optionally only the given weekday).
-  let sq = supabase.from('pickup_schedules').select('customer_id').eq('active', true)
-  if (day) sq = sq.eq('day_of_week', day)
-  const { data: scheds, error: sErr } = await sq
-  if (sErr) throw sErr
-  const custIds = [...new Set((scheds || []).map((s) => s.customer_id).filter(Boolean))]
-  if (!custIds.length) return { added: 0, route, noSchedules: true }
 
   // Their properties.
   const { data: props, error: pErr } = await supabase
