@@ -32,7 +32,22 @@ async function rest(path: string, opts: { method?: string; body?: unknown; prefe
   return d
 }
 
-async function geocode(address: string) {
+// US Census geocoder — free, no key, real US street-address coverage (TIGER).
+// Much better than OSM for individual house numbers in smaller cities.
+async function geocodeCensus(address: string) {
+  try {
+    const url = `https://geocoding.geo.census.gov/geocoder/locations/onelineaddress?address=${enc(address)}&benchmark=Public_AR_Current&format=json`
+    const r = await fetch(url)
+    if (!r.ok) return null
+    const j = await r.json()
+    const m = j?.result?.addressMatches?.[0]
+    if (!m) return null
+    return { lat: Number(m.coordinates.y), lng: Number(m.coordinates.x) }
+  } catch { return null }
+}
+
+// OpenStreetMap fallback (better outside the US / for non-standard addresses).
+async function geocodeOSM(address: string) {
   try {
     const r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${enc(address)}`,
       { headers: { "User-Agent": "ValetWasteCRM/1.0 (geocode-pending)" } })
@@ -41,6 +56,10 @@ async function geocode(address: string) {
     if (!rows?.length) return null
     return { lat: Number(rows[0].lat), lng: Number(rows[0].lon) }
   } catch { return null }
+}
+
+async function geocode(address: string) {
+  return (await geocodeCensus(address)) || (await geocodeOSM(address))
 }
 
 // Eligible = no coords yet, has an address, and hasn't failed too many times.
@@ -69,7 +88,7 @@ Deno.serve(async (req) => {
     if (!["admin", "staff"].includes(prof?.[0]?.role)) return json({ error: "Staff only." }, 403)
 
     const body = await req.json().catch(() => ({}))
-    const limit = Math.min(Math.max(Number(body.limit) || 15, 1), 25)
+    const limit = Math.min(Math.max(Number(body.limit) || 20, 1), 40)
 
     // Least-tried first, so a few un-geocodable addresses never block the rest.
     const rows = await rest(`properties?${PENDING}&select=id,address,geocode_attempts&order=geocode_attempts.asc&limit=${limit}`)
@@ -83,7 +102,7 @@ Deno.serve(async (req) => {
         // Record the miss so this row drops out after a few tries.
         await rest(`properties?id=eq.${rows[i].id}`, { method: "PATCH", prefer: "return=minimal", body: { geocode_attempts: (rows[i].geocode_attempts || 0) + 1 } })
       }
-      if (i < rows.length - 1) await sleep(1100) // respect Nominatim's ~1 req/sec policy
+      if (i < rows.length - 1) await sleep(300) // light throttle (Census is fast; OSM is only a fallback)
     }
     const remaining = await countRemaining()
     return json({ processed: rows.length, updated, remaining })

@@ -77,6 +77,42 @@ export async function createClient(payload) {
   return customer.id
 }
 
+// Update a customer's core fields plus its (single) pickup + invoice schedule.
+export async function updateCustomer(id, payload) {
+  const { error: cErr } = await supabase
+    .from('customers')
+    .update({
+      name: payload.name,
+      contact_name: payload.contactName || null,
+      email: payload.email || null,
+      phone: payload.phone || null,
+      address: payload.address || null,
+      status: payload.status || 'active',
+      notes: payload.notes || null,
+    })
+    .eq('id', id)
+  if (cErr) throw cErr
+
+  if (payload.pickup) {
+    const { data: ex } = await supabase.from('pickup_schedules').select('id').eq('customer_id', id).limit(1)
+    const fields = {
+      service: payload.pickup.service || null,
+      frequency: payload.pickup.frequency || 'weekly',
+      day_of_week: payload.pickup.dayOfWeek || null,
+    }
+    if (ex && ex[0]) await supabase.from('pickup_schedules').update(fields).eq('id', ex[0].id)
+    else await supabase.from('pickup_schedules').insert({ customer_id: id, ...fields })
+  }
+
+  if (payload.invoice) {
+    const { data: ex } = await supabase.from('invoice_schedules').select('id').eq('customer_id', id).limit(1)
+    const fields = { cadence: payload.invoice.cadence || 'monthly', amount: payload.invoice.amount ?? null }
+    if (ex && ex[0]) await supabase.from('invoice_schedules').update(fields).eq('id', ex[0].id)
+    else await supabase.from('invoice_schedules').insert({ customer_id: id, ...fields })
+  }
+  logActivity({ type: 'client_updated', summary: `Updated client ${payload.name}`, entityType: 'customer', entityId: id })
+}
+
 // Properties (service locations) belonging to a customer.
 export async function loadProperties(customerId) {
   const { data, error } = await supabase

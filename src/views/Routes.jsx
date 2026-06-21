@@ -20,6 +20,7 @@ import {
   addStopToRoute,
   removeStopFromRoute,
   subscribeRouteStops,
+  buildRouteFromSchedules,
 } from '../lib/routesData.js'
 
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
@@ -151,6 +152,23 @@ export default function RoutesView({ app }) {
     })
   }
 
+  const [building, setBuilding] = useState(false)
+  async function handleBuildFromSchedules() {
+    if (building) return
+    setBuilding(true)
+    setErr(null)
+    try {
+      const res = await buildRouteFromSchedules(ROUTE_CODE)
+      if (res.noSchedules) setErr('No active pickup schedules yet — add one on the Schedules tab first.')
+      baselineRef.current = null
+      await refresh()
+    } catch (e) {
+      setErr(e.message || String(e))
+    } finally {
+      setBuilding(false)
+    }
+  }
+
   // ---- day picker (cosmetic) ----
   const weekStart = new Date(2026, 5, 15 + weekOffset * 7)
   const days = []
@@ -205,6 +223,7 @@ export default function RoutesView({ app }) {
         )}
         <div style={{ flex: 1 }} />
         <button onClick={() => refresh().catch((e) => setErr(e.message))} style={ghostBtn}>Reload</button>
+        <button onClick={handleBuildFromSchedules} disabled={building} style={{ ...ghostBtn, opacity: building ? 0.6 : 1 }}>{building ? 'Building…' : 'Build from schedules'}</button>
         <button onClick={handleOptimize} disabled={loading || !stops.length} style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'linear-gradient(135deg,#1f7a4d,#155e3a)', color: '#fff', border: 'none', borderRadius: 10, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: loading ? 'default' : 'pointer', opacity: loading || !stops.length ? 0.6 : 1 }}>
           <span>✦</span> Optimize route
         </button>

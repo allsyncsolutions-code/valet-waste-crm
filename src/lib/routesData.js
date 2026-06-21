@@ -102,6 +102,52 @@ export async function addStopToRoute(routeId, property, seq) {
   return data.id
 }
 
+// Populate a route from recurring schedules: every property whose client has
+// an active pickup schedule (optionally for a given weekday) is added as a
+// stop, skipping any already on the route. Returns how many were added.
+export async function buildRouteFromSchedules(code = 'B', day = null) {
+  // Ensure the route exists.
+  let { data: route, error: rErr } = await supabase
+    .from('routes').select('id, code, name').eq('code', code).maybeSingle()
+  if (rErr) throw rErr
+  if (!route) {
+    const { data: r, error } = await supabase
+      .from('routes').insert({ code, name: `Route ${code}` }).select('id, code, name').single()
+    if (error) throw error
+    route = r
+  }
+
+  // Clients with an active schedule (optionally only the given weekday).
+  let sq = supabase.from('pickup_schedules').select('customer_id').eq('active', true)
+  if (day) sq = sq.eq('day_of_week', day)
+  const { data: scheds, error: sErr } = await sq
+  if (sErr) throw sErr
+  const custIds = [...new Set((scheds || []).map((s) => s.customer_id).filter(Boolean))]
+  if (!custIds.length) return { added: 0, route, noSchedules: true }
+
+  // Their properties.
+  const { data: props, error: pErr } = await supabase
+    .from('properties').select('id, service, lat, lng').in('customer_id', custIds)
+  if (pErr) throw pErr
+
+  // Skip properties already on the route; append the rest.
+  const { data: existing, error: eErr } = await supabase
+    .from('route_stops').select('property_id, seq').eq('route_id', route.id)
+  if (eErr) throw eErr
+  const have = new Set((existing || []).map((e) => e.property_id))
+  let seq = (existing || []).reduce((m, e) => Math.max(m, e.seq || 0), 0)
+  const toAdd = (props || []).filter((p) => !have.has(p.id))
+  if (toAdd.length) {
+    const rows = toAdd.map((p) => ({
+      route_id: route.id, property_id: p.id, seq: ++seq,
+      status: 'pending', service: p.service || null, lat: p.lat, lng: p.lng,
+    }))
+    const { error } = await supabase.from('route_stops').insert(rows)
+    if (error) throw error
+  }
+  return { added: toAdd.length, route }
+}
+
 export async function removeStopFromRoute(stopId) {
   const { error } = await supabase.from('route_stops').delete().eq('id', stopId)
   if (error) throw error

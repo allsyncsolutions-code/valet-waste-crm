@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { MONO } from '../data.js'
-import { loadCustomers, createClient, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, updateProperty } from '../lib/customersData.js'
+import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, updateProperty } from '../lib/customersData.js'
 import { geocodeAll } from '../lib/importData.js'
 import { listTags, findOrCreateTag, subscribeTags } from '../lib/tagsData.js'
 import { stripeStatus, stripePaymentLink } from '../lib/stripeData.js'
@@ -42,6 +42,7 @@ export default function Clients({ app }) {
   const [selId, setSelId] = useState(null)
   const [search, setSearch] = useState('')
   const [showForm, setShowForm] = useState(false)
+  const [editingId, setEditingId] = useState(null)
   const [saving, setSaving] = useState(false)
   const [form, setForm] = useState(BLANK)
   const [tagInput, setTagInput] = useState('')
@@ -163,27 +164,50 @@ export default function Clients({ app }) {
     }
   }
 
+  function openEdit() {
+    if (!cur) return
+    setForm({
+      name: cur.name || '', address: cur.address || '', contactName: cur.contactName || '',
+      email: cur.email || '', phone: cur.phone || '', status: cur.status || 'active', notes: cur.notes || '',
+      service: cur.pickup?.service || '', frequency: cur.pickup?.frequency || 'weekly',
+      dayOfWeek: cur.pickup?.dayOfWeek || 'monday',
+      cadence: cur.invoice?.cadence || 'monthly', amount: cur.invoice?.amount ?? '',
+    })
+    setEditingId(cur.id)
+    setShowForm(true)
+  }
+
   async function submit(e) {
     e.preventDefault()
     if (!form.name.trim()) return
     setSaving(true)
     setErr(null)
+    const payload = {
+      name: form.name.trim(),
+      address: form.address.trim(),
+      contactName: form.contactName.trim(),
+      email: form.email.trim(),
+      phone: form.phone.trim(),
+      status: form.status,
+      notes: form.notes.trim(),
+      pickup: { service: form.service.trim(), frequency: form.frequency, dayOfWeek: form.frequency === 'on_call' ? null : form.dayOfWeek },
+      invoice: { cadence: form.cadence, amount: form.amount === '' ? null : Number(form.amount) },
+    }
     try {
-      const id = await createClient({
-        name: form.name.trim(),
-        address: form.address.trim(),
-        contactName: form.contactName.trim(),
-        email: form.email.trim(),
-        phone: form.phone.trim(),
-        status: form.status,
-        notes: form.notes.trim(),
-        pickup: { service: form.service.trim(), frequency: form.frequency, dayOfWeek: form.frequency === 'on_call' ? null : form.dayOfWeek },
-        invoice: { cadence: form.cadence, amount: form.amount === '' ? null : Number(form.amount) },
-      })
-      setShowForm(false)
-      setForm(BLANK)
-      await refresh()
-      setSelId(id)
+      if (editingId) {
+        await updateCustomer(editingId, payload)
+        setShowForm(false)
+        setEditingId(null)
+        setForm(BLANK)
+        await refresh()
+        setSelId(editingId)
+      } else {
+        const id = await createClient(payload)
+        setShowForm(false)
+        setForm(BLANK)
+        await refresh()
+        setSelId(id)
+      }
     } catch (e2) {
       setErr(e2.message || String(e2))
     } finally {
@@ -200,7 +224,7 @@ export default function Clients({ app }) {
             <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search clients…" style={searchInput} />
             <div style={searchIcon}>⌕</div>
           </div>
-          <button onClick={() => { setForm(BLANK); setShowForm(true) }} style={{ flex: 'none', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '0 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>+ Add</button>
+          <button onClick={() => { setForm(BLANK); setEditingId(null); setShowForm(true) }} style={{ flex: 'none', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '0 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>+ Add</button>
         </div>
 
         {loading && <div style={empty}>Loading…</div>}
@@ -240,6 +264,7 @@ export default function Clients({ app }) {
                   <div style={{ fontWeight: 700, fontSize: 18 }}>{cur.name}</div>
                   <div style={{ fontSize: 12.5, color: '#7c8a82' }}>{cur.address || 'No address'}</div>
                 </div>
+                <button onClick={openEdit} style={{ background: '#fff', border: '1px solid #dde2dd', color: '#1a2420', borderRadius: 9, padding: '9px 13px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', flex: 'none' }}>Edit</button>
                 <button onClick={app.openAssistant} style={{ background: '#fff', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 9, padding: '9px 13px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', flex: 'none' }}>✦ Ask AI</button>
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12, marginTop: 16 }}>
@@ -357,10 +382,10 @@ export default function Clients({ app }) {
       </div>
 
       {showForm && (
-        <div onClick={() => !saving && setShowForm(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(15,30,20,.45)', zIndex: 500, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '6vh 16px', overflowY: 'auto' }}>
+        <div onClick={() => !saving && (setShowForm(false), setEditingId(null))} style={{ position: 'fixed', inset: 0, background: 'rgba(15,30,20,.45)', zIndex: 500, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '6vh 16px', overflowY: 'auto' }}>
           <form onClick={(e) => e.stopPropagation()} onSubmit={submit} style={{ width: 520, maxWidth: '100%', background: '#fff', borderRadius: 14, padding: 22, boxShadow: '0 20px 60px rgba(0,0,0,.25)' }}>
-            <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 4 }}>Add client</div>
-            <div style={{ fontSize: 12, color: '#7c8a82', marginBottom: 16 }}>Creates the customer plus a pickup schedule and invoice schedule.</div>
+            <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 4 }}>{editingId ? 'Edit client' : 'Add client'}</div>
+            <div style={{ fontSize: 12, color: '#7c8a82', marginBottom: 16 }}>{editingId ? 'Update this client and its pickup / invoice schedule.' : 'Creates the customer plus a pickup schedule and invoice schedule.'}</div>
 
             <Field label="Business name *"><input autoFocus value={form.name} onChange={(e) => set({ name: e.target.value })} style={inp} placeholder="Acme Property Group" /></Field>
             <Field label="Address"><input value={form.address} onChange={(e) => set({ address: e.target.value })} style={inp} placeholder="123 Main St" /></Field>
@@ -401,8 +426,8 @@ export default function Clients({ app }) {
             </Field>
 
             <div style={{ display: 'flex', gap: 9, marginTop: 18 }}>
-              <button type="button" onClick={() => setShowForm(false)} disabled={saving} style={{ flex: 'none', background: '#fff', border: '1px solid #dde2dd', color: '#5d6b63', borderRadius: 9, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
-              <button type="submit" disabled={saving || !form.name.trim()} style={{ flex: 1, background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: saving ? 'default' : 'pointer', opacity: saving || !form.name.trim() ? 0.6 : 1 }}>{saving ? 'Saving…' : 'Create client'}</button>
+              <button type="button" onClick={() => { setShowForm(false); setEditingId(null) }} disabled={saving} style={{ flex: 'none', background: '#fff', border: '1px solid #dde2dd', color: '#5d6b63', borderRadius: 9, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
+              <button type="submit" disabled={saving || !form.name.trim()} style={{ flex: 1, background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: saving ? 'default' : 'pointer', opacity: saving || !form.name.trim() ? 0.6 : 1 }}>{saving ? 'Saving…' : (editingId ? 'Save changes' : 'Create client')}</button>
             </div>
           </form>
         </div>
