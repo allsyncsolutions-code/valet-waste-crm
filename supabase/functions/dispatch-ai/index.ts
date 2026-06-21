@@ -32,7 +32,8 @@ const SYSTEM = `You are Trashy Randy, the dispatch assistant inside Valet Waste,
 Guidelines:
 - When the user refers to a client by name, business, phone or email, call find_clients FIRST to resolve the exact customer_id before acting. If multiple match, ask which one. If none match and the action needs an existing client, say so.
 - Infer sensible defaults: weekly pickup on Monday, monthly invoicing. Invoices are created as drafts unless told otherwise.
-- You can create_client, update_client, create_schedule (pickup), tag_client, create_invoice, mark_invoice_paid, and add_stop_to_route. Use get_overview to answer questions about outstanding balance, today's pickups, or counts.
+- You can create_client, update_client, create_schedule (pickup), tag_client, create_invoice, mark_invoice_paid, add_stop_to_route, and assign_driver. Use get_overview to answer questions about outstanding balance, today's pickups, or counts.
+- assign_driver assigns a driver to a route on a given date (defaults to today, route 'B'). The driver must be a staff member flagged as a driver in the Team tab — if none match, tell the user to flag them as a driver first. Set set_default:true when the user wants that driver to be the regular/default driver for the route going forward.
 - When the user gives you MORE THAN ONE property/address for the same client (a pasted list, a vendor sheet, etc.), use bulk_add_properties ONCE with all of them — do not call add_stop_to_route in a loop. Pass every row in the properties array and report how many were added.
 - You cannot send payment links or charge cards — tell the user to use the "Send payment link" button on the invoice for that.
 - After making a change, confirm what you did in one short sentence.`
@@ -172,6 +173,22 @@ const tools = [
     },
   },
   {
+    name: "assign_driver",
+    description:
+      "Assign (or unassign) the driver for a route on a specific date. The driver must be a staff member flagged as a driver in the Team tab. Optionally set them as the carry-forward default for that route code, which auto-applies to newly built days.",
+    input_schema: {
+      type: "object",
+      properties: {
+        driver: { type: "string", description: "Driver's name or email. Use 'none' (or set unassign:true) to clear the driver." },
+        unassign: { type: "boolean", description: "Set true to remove the current driver from the route." },
+        route_code: { type: "string", description: "Route code/letter, e.g. 'B'. Defaults to 'B'." },
+        date: { type: "string", description: "Service date YYYY-MM-DD. Defaults to today." },
+        set_default: { type: "boolean", description: "If true, remember this driver as the default for the route code (auto-assigned to new days)." },
+      },
+      required: [],
+    },
+  },
+  {
     name: "bulk_add_properties",
     description:
       "Add MANY service properties for one client in a single call. Use this whenever the user pastes or lists more than one address/location for the same client (e.g. a vendor property list) — never loop add_stop_to_route for each. Resolves the client by name (creates it if new), batch-inserts every property, and optionally sets up one pickup schedule. Coordinates are filled in afterward by the geocoder, so you don't geocode here.",
@@ -263,6 +280,7 @@ function logForTool(name: string, out: any): Promise<void> | undefined {
     case "create_invoice": return logActivity("invoice_created", `Created invoice ${out.number} ($${out.total})`, "invoice", out.id)
     case "mark_invoice_paid": return logActivity("invoice_paid", `Marked invoice ${out.number} paid`, "invoice")
     case "add_stop_to_route": return logActivity("stop_added", `Added ${out.stop_name} to route ${out.route}`, "route")
+    case "assign_driver": return out.needs_clarification ? undefined : logActivity("driver_assigned", `Set ${out.driver} as driver for route ${out.route} (${out.date})`, "route")
     case "bulk_add_properties": return logActivity("properties_imported", `Imported ${out.inserted} properties for ${out.client}`, "customer", out.customer_id)
     default: return undefined
   }
@@ -448,6 +466,49 @@ async function addStopToRoute(a: any) {
   return { route: route.code, stop_name: property.name, seq: stop.seq }
 }
 
+async function assignDriverTool(a: any) {
+  const code = String(a.route_code ?? "B").trim() || "B"
+  const date = a.date ? String(a.date).trim() : new Date().toISOString().slice(0, 10)
+  const raw = a.driver == null ? "" : String(a.driver).trim()
+  const wantUnassign = a.unassign === true || raw.toLowerCase() === "none" || raw === ""
+
+  let driverId: string | null = null
+  let driverName: string | null = null
+  if (!wantUnassign) {
+    const like = `*${raw}*`
+    const or = `or=(full_name.ilike.${enc(like)},email.ilike.${enc(like)})`
+    const rows = await sbGet(`profiles?is_driver=eq.true&${or}&select=id,full_name,email&limit=5`)
+    if (!rows.length) {
+      throw new Error(`No driver matches "${raw}". Flag them as a driver in the Team tab first (or check the spelling).`)
+    }
+    if (rows.length > 1) {
+      return { needs_clarification: true, matches: rows.map((r: any) => ({ id: r.id, name: r.full_name || r.email })) }
+    }
+    driverId = rows[0].id
+    driverName = rows[0].full_name || rows[0].email
+  }
+
+  // Find or create the route for this code + date.
+  const routes = await sbGet(`routes?code=eq.${enc(code)}&service_date=eq.${enc(date)}&select=id&limit=1`)
+  if (routes[0]) {
+    await sbPatch(`routes?id=eq.${enc(routes[0].id)}`, { driver_id: driverId, driver: driverName })
+  } else {
+    await sbPost("routes", { code, name: `Route ${code}`, service_date: date, driver_id: driverId, driver: driverName })
+  }
+
+  let madeDefault = false
+  if (a.set_default) {
+    await fetch(`${REST}/route_defaults?on_conflict=code`, {
+      method: "POST",
+      headers: { ...HEADERS, Prefer: "resolution=merge-duplicates" },
+      body: JSON.stringify({ code, driver_id: driverId, updated_at: new Date().toISOString() }),
+    })
+    madeDefault = true
+  }
+
+  return { route: code, date, driver: driverName ?? "Unassigned", set_default: madeDefault }
+}
+
 async function bulkAddProperties(a: any) {
   const list = Array.isArray(a.properties) ? a.properties : []
   if (!list.length) throw new Error("No properties provided.")
@@ -490,6 +551,7 @@ async function runTool(name: string, input: any): Promise<unknown> {
     case "create_invoice": return await createInvoice(input)
     case "mark_invoice_paid": return await markInvoicePaid(input)
     case "add_stop_to_route": return await addStopToRoute(input)
+    case "assign_driver": return await assignDriverTool(input)
     case "bulk_add_properties": return await bulkAddProperties(input)
     default: throw new Error(`Unknown tool: ${name}`)
   }

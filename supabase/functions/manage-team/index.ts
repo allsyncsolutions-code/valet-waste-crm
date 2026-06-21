@@ -70,7 +70,7 @@ Deno.serve(async (req) => {
     const rows = await rest(`profiles?id=eq.${callerId}&select=role`)
     if (!rows?.[0] || rows[0].role !== "admin") return json({ error: "Admins only." }, 403)
 
-    const { action, email, full_name, role, password, id } = await req.json()
+    const { action, email, full_name, role, password, id, is_driver } = await req.json()
 
     if (action === "invite") {
       const cleanEmail = String(email || "").trim().toLowerCase()
@@ -97,6 +97,12 @@ Deno.serve(async (req) => {
       if (!id || !wantRole) return json({ error: "Bad request." }, 400)
       if (id === callerId && wantRole !== "admin") return json({ error: "You can't remove your own admin access." }, 400)
       await rest(`profiles?id=eq.${id}`, { method: "PATCH", prefer: "return=minimal", body: { role: wantRole } })
+      return json({ ok: true })
+    }
+
+    if (action === "set_driver") {
+      if (!id || typeof is_driver !== "boolean") return json({ error: "Bad request." }, 400)
+      await rest(`profiles?id=eq.${id}`, { method: "PATCH", prefer: "return=minimal", body: { is_driver } })
       return json({ ok: true })
     }
 
