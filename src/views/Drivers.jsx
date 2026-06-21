@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { MONO } from '../data.js'
 import { STATUS_META } from '../lib/routeModel.js'
 import { loadDayDispatch, checkInStop, checkOutStop, resetStopStatus } from '../lib/routesData.js'
+import { loadStopPhotos, uploadStopPhoto, deleteStopPhoto } from '../lib/photosData.js'
 import { loadDrivers } from '../lib/teamData.js'
 import { logActivity } from '../lib/activityData.js'
 import { supabase } from '../lib/supabaseClient.js'
@@ -48,6 +49,31 @@ export default function Drivers({ app }) {
   const [err, setErr] = useState(null)
   const [expanded, setExpanded] = useState({}) // driverId/route key -> bool
   const [busyStop, setBusyStop] = useState(null)
+  const [photos, setPhotos] = useState({}) // stopId -> [photo]
+  const [uploadingStop, setUploadingStop] = useState(null)
+
+  async function refreshPhotos(rts = routes) {
+    const ids = rts.flatMap((r) => r.stops.map((s) => s.id))
+    try { setPhotos(await loadStopPhotos(ids)) } catch (e) {}
+  }
+
+  async function addPhoto(stop, file) {
+    if (!file) return
+    setUploadingStop(stop.id)
+    setErr(null)
+    try {
+      const gps = await getGps()
+      await uploadStopPhoto(stop.id, file, gps)
+      logActivity({ type: 'photo_added', summary: `Added a photo at ${stop.name}`, entityType: 'route_stop', entityId: stop.id })
+      await refreshPhotos()
+    } catch (e) { setErr(e.message || String(e)) }
+    setUploadingStop(null)
+  }
+  async function removePhoto(photo) {
+    setErr(null)
+    try { await deleteStopPhoto(photo); await refreshPhotos() }
+    catch (e) { setErr(e.message || String(e)) }
+  }
 
   async function doCheckIn(stop) {
     setBusyStop(stop.id)
@@ -83,6 +109,7 @@ export default function Drivers({ app }) {
     const [drv, rts] = await Promise.all([loadDrivers(), loadDayDispatch(d)])
     setDrivers(drv)
     setRoutes(rts)
+    refreshPhotos(rts)
   }
 
   useEffect(() => {
@@ -176,7 +203,7 @@ export default function Drivers({ app }) {
                     {rts.length > 1 && <div style={{ fontFamily: MONO, fontSize: 11, color: '#7c8a82', margin: '6px 2px' }}>{r.code} · {r.name}</div>}
                     {r.stops.length === 0 ? (
                       <div style={{ fontSize: 12, color: '#9aa69e', padding: '6px 2px' }}>No stops on this route.</div>
-                    ) : r.stops.map((s) => <StopRow key={s.id} s={s} busy={busyStop === s.id} onCheckIn={() => doCheckIn(s)} onCheckOut={() => doCheckOut(s)} onUndo={() => doUndo(s)} />)}
+                    ) : r.stops.map((s) => <StopRow key={s.id} s={s} busy={busyStop === s.id} photos={photos[s.id] || []} uploading={uploadingStop === s.id} onCheckIn={() => doCheckIn(s)} onCheckOut={() => doCheckOut(s)} onUndo={() => doUndo(s)} onAddPhoto={(f) => addPhoto(s, f)} onDeletePhoto={removePhoto} />)}
                   </div>
                 ))}
               </div>
@@ -218,7 +245,7 @@ export default function Drivers({ app }) {
           )}
 
           <div style={{ fontSize: 11.5, color: '#9aa69e', textAlign: 'center', marginTop: 18 }}>
-            Check-in / check-out, photos and live GPS are coming to this tab next.
+            Expand a driver to check stops in/out, capture GPS, and attach photos.
           </div>
         </>
       )}
@@ -226,8 +253,9 @@ export default function Drivers({ app }) {
   )
 }
 
-function StopRow({ s, busy, onCheckIn, onCheckOut, onUndo }) {
+function StopRow({ s, busy, photos = [], uploading, onCheckIn, onCheckOut, onUndo, onAddPhoto, onDeletePhoto }) {
   const meta = STATUS_META[s.status] || STATUS_META.pending
+  const fileRef = useRef(null)
   return (
     <div style={{ padding: '8px 4px', borderTop: '1px solid #f1f3f0' }}>
       <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
@@ -259,6 +287,23 @@ function StopRow({ s, busy, onCheckIn, onCheckOut, onUndo }) {
             <button onClick={onUndo} disabled={busy} style={fieldBtnGhost} title="Reopen stop">undo</button>
           </>
         )}
+      </div>
+
+      {/* photos */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, marginLeft: 32, flexWrap: 'wrap' }}>
+        {photos.map((p) => (
+          <div key={p.id} style={{ position: 'relative', width: 46, height: 46 }}>
+            <a href={p.url} target="_blank" rel="noreferrer">
+              <img src={p.url} alt="stop" style={{ width: 46, height: 46, objectFit: 'cover', borderRadius: 8, border: '1px solid #e6eae6', display: 'block' }} />
+            </a>
+            <button onClick={() => onDeletePhoto(p)} title="Delete photo" style={{ position: 'absolute', top: -6, right: -6, width: 18, height: 18, borderRadius: '50%', background: '#c0492f', color: '#fff', border: '2px solid #fff', fontSize: 10, lineHeight: 1, cursor: 'pointer', padding: 0 }}>×</button>
+          </div>
+        ))}
+        <input ref={fileRef} type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={(e) => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) onAddPhoto(f) }} />
+        <button onClick={() => fileRef.current && fileRef.current.click()} disabled={uploading} style={{ width: 46, height: 46, borderRadius: 8, border: '1.5px dashed #c2ccc3', background: '#fff', color: '#9aa69e', fontSize: 18, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }} title="Add photo">
+          {uploading ? '…' : '+'}
+        </button>
+        {photos.length > 0 && <span style={{ fontSize: 10.5, color: '#9aa69e', fontFamily: MONO }}>{photos.length} photo{photos.length === 1 ? '' : 's'}</span>}
       </div>
     </div>
   )
