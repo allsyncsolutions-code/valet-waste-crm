@@ -2,7 +2,7 @@
 // views stay declarative. route_stops is the single source of truth shared by
 // dispatch and the driver view.
 import { supabase } from './supabaseClient.js'
-import { loadSettings, settingsDepot } from './settingsData.js'
+import { loadSettings, settingsDepot, geocodeAddress } from './settingsData.js'
 
 const DEFAULT_DEPOT = { name: 'AllSync Yard', lat: 44.804, lng: -93.278 }
 
@@ -250,6 +250,68 @@ export async function setRouteDefault(code, driverId) {
 export async function removeStopFromRoute(stopId) {
   const { error } = await supabase.from('route_stops').delete().eq('id', stopId)
   if (error) throw error
+}
+
+// Get the route for code+date, creating it (with the carry-forward default
+// driver) if it doesn't exist yet.
+export async function ensureRoute(code, date) {
+  let rq = supabase.from('routes').select('id, code, name, driver_id, service_date').eq('code', code)
+  rq = date ? rq.eq('service_date', date) : rq.is('service_date', null)
+  const { data: route, error } = await rq.maybeSingle()
+  if (error) throw error
+  if (route) return route
+  const defDriver = await getRouteDefault(code).catch(() => null)
+  const defName = await driverDisplayName(defDriver)
+  const { data: r, error: cErr } = await supabase
+    .from('routes')
+    .insert({ code, name: `Route ${code}`, service_date: date, driver_id: defDriver, driver: defName })
+    .select('id, code, name, driver_id, service_date').single()
+  if (cErr) throw cErr
+  return r
+}
+
+// Add a brand-new ad-hoc stop (a one-off pickup) to a date's route: geocodes
+// the address, creates a property for it, and appends it as a stop. Does NOT
+// create a recurring schedule — it only lands on this one date's route.
+export async function addOneOffStop(code, date, { name, address, service } = {}) {
+  const addr = String(address || '').trim()
+  if (!addr) throw new Error('An address is required.')
+  if (!date) throw new Error('A date is required.')
+
+  // Best-effort geocode (the stop is still added if it can't be located).
+  let loc = null
+  try { loc = await geocodeAddress(addr) } catch (e) { loc = null }
+
+  const { data: prop, error: pErr } = await supabase
+    .from('properties')
+    .insert({
+      name: (name && name.trim()) || addr,
+      address: addr,
+      service: service || null,
+      lat: loc ? loc.lat : null,
+      lng: loc ? loc.lng : null,
+    })
+    .select('id, name, service, lat, lng').single()
+  if (pErr) throw pErr
+
+  const route = await ensureRoute(code, date)
+  const { data: existing, error: eErr } = await supabase
+    .from('route_stops').select('seq').eq('route_id', route.id)
+  if (eErr) throw eErr
+  const seq = (existing || []).reduce((m, e) => Math.max(m, e.seq || 0), 0) + 1
+
+  const { error: sErr } = await supabase.from('route_stops').insert({
+    route_id: route.id,
+    property_id: prop.id,
+    seq,
+    status: 'pending',
+    service: service || prop.service || null,
+    lat: prop.lat,
+    lng: prop.lng,
+  })
+  if (sErr) throw sErr
+
+  return { route, property: prop, geocoded: !!loc }
 }
 
 // Live updates: fire cb whenever any stop on this route changes.

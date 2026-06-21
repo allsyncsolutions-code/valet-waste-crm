@@ -26,6 +26,7 @@ import {
   assignDriver,
   getRouteDefault,
   setRouteDefault,
+  addOneOffStop,
 } from '../lib/routesData.js'
 import { loadDrivers } from '../lib/teamData.js'
 
@@ -201,6 +202,41 @@ export default function RoutesView({ app }) {
     })
   }
 
+  // ---- one-off pickup modal ----
+  const [showNewStop, setShowNewStop] = useState(false)
+  const [newStop, setNewStop] = useState({ name: '', address: '', service: '' })
+  const [savingStop, setSavingStop] = useState(false)
+
+  // Open the modal when the top-bar "+ New pickup" button bumps the tick.
+  const pickupTickRef = useRef(app.newPickupTick)
+  useEffect(() => {
+    if (app.newPickupTick !== pickupTickRef.current) {
+      pickupTickRef.current = app.newPickupTick
+      setNewStop({ name: '', address: '', service: '' })
+      setShowNewStop(true)
+    }
+  }, [app.newPickupTick])
+
+  async function submitNewStop(e) {
+    e.preventDefault()
+    if (savingStop) return
+    if (!newStop.address.trim()) { setErr('Enter an address for the pickup.'); return }
+    setSavingStop(true)
+    setErr(null)
+    try {
+      const res = await addOneOffStop(ROUTE_CODE, routeSel, newStop)
+      setShowNewStop(false)
+      setNewStop({ name: '', address: '', service: '' })
+      await refresh(routeSel)
+      if (!res.geocoded) {
+        setErr("Added to the route, but I couldn't locate that address on the map — double-check the address if it should appear as a pin.")
+      }
+    } catch (e2) {
+      setErr(e2.message || String(e2))
+    }
+    setSavingStop(false)
+  }
+
   const [building, setBuilding] = useState(false)
   async function handleBuildFromSchedules() {
     if (building) return
@@ -293,6 +329,7 @@ export default function RoutesView({ app }) {
         )}
 
         <div style={{ flex: 1 }} />
+        <button onClick={() => { setNewStop({ name: '', address: '', service: '' }); setShowNewStop(true) }} style={ghostBtn}>+ New pickup</button>
         <button onClick={() => refresh().catch((e) => setErr(e.message))} style={ghostBtn}>Reload</button>
         <button onClick={handleBuildFromSchedules} disabled={building} style={{ ...ghostBtn, opacity: building ? 0.6 : 1 }}>{building ? 'Building…' : 'Build from schedules'}</button>
         <button onClick={handleOptimize} disabled={loading || !stops.length} style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'linear-gradient(135deg,#1f7a4d,#155e3a)', color: '#fff', border: 'none', borderRadius: 10, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: loading ? 'default' : 'pointer', opacity: loading || !stops.length ? 0.6 : 1 }}>
@@ -393,6 +430,38 @@ export default function RoutesView({ app }) {
           )}
         </div>
       </div>
+      {/* one-off pickup modal */}
+      {showNewStop && (
+        <div onClick={() => !savingStop && setShowNewStop(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(15,30,20,.42)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 500, padding: 16 }}>
+          <form onClick={(e) => e.stopPropagation()} onSubmit={submitNewStop} style={{ background: '#fff', borderRadius: 14, padding: 22, width: 440, maxWidth: '100%', boxShadow: '0 24px 60px rgba(15,30,20,.28)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+              <div style={{ fontWeight: 700, fontSize: 16, flex: 1 }}>New one-off pickup</div>
+              <div onClick={() => !savingStop && setShowNewStop(false)} style={{ cursor: 'pointer', color: '#7c8a82', fontSize: 18 }}>✕</div>
+            </div>
+            <div style={{ fontSize: 12.5, color: '#7c8a82', marginBottom: 16 }}>
+              Adds a single stop to Route {ROUTE_CODE} on <b>{prettyDate(routeSel)}</b> only — no recurring schedule.
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              <label style={mLbl}>Address</label>
+              <input autoFocus value={newStop.address} onChange={(e) => setNewStop({ ...newStop, address: e.target.value })} style={mInp} placeholder="123 Main St, St. Augustine, FL 32084" />
+            </div>
+            <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+              <div style={{ flex: 1 }}>
+                <label style={mLbl}>Name / label <span style={{ color: '#9aa69e', fontWeight: 400 }}>(optional)</span></label>
+                <input value={newStop.name} onChange={(e) => setNewStop({ ...newStop, name: e.target.value })} style={mInp} placeholder="Defaults to the address" />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={mLbl}>Service <span style={{ color: '#9aa69e', fontWeight: 400 }}>(optional)</span></label>
+                <input value={newStop.service} onChange={(e) => setNewStop({ ...newStop, service: e.target.value })} style={mInp} placeholder="e.g. Trash / Recycle" />
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <button type="button" onClick={() => setShowNewStop(false)} disabled={savingStop} style={ghostBtn}>Cancel</button>
+              <button type="submit" disabled={savingStop} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 10, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: savingStop ? 0.7 : 1 }}>{savingStop ? 'Adding…' : 'Add to route'}</button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   )
 }
@@ -410,3 +479,5 @@ const Divider = () => <div style={{ width: 1, height: 28, background: '#2c4435' 
 const navBtn = { width: 30, height: 30, flex: 'none', borderRadius: 8, border: '1px solid #e6eae6', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: '#5d6b63', fontSize: 15 }
 const ghostBtn = { background: '#fff', color: '#5d6b63', border: '1px solid #e6eae6', borderRadius: 10, padding: '10px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }
 const miniBtn = { background: '#f3f5f2', border: '1px solid #e6eae6', borderRadius: 6, padding: '3px 8px', fontSize: 11.5, fontWeight: 600, color: '#5d6b63', cursor: 'pointer', lineHeight: 1.4 }
+const mLbl = { display: 'block', fontSize: 12, fontWeight: 600, color: '#5d6b63', marginBottom: 6 }
+const mInp = { width: '100%', boxSizing: 'border-box', border: '1px solid #dde2dd', background: '#f7f9f7', borderRadius: 9, padding: '10px 12px', fontSize: 15, color: '#1a2420', outline: 'none' }

@@ -66,6 +66,7 @@ export default function App({ user, onSignOut }) {
   const [navOpen, setNavOpen] = useState(false) // mobile drawer
   const [commandText, setCommandText] = useState('')
   const [logoSrc, setLogoSrc] = useState(null)
+  const [newPickupTick, setNewPickupTick] = useState(0) // bumps to open the one-off pickup modal in Routes
 
   // AI dock
   const [aiOpen, setAiOpen] = useState(!isMobile)
@@ -74,7 +75,7 @@ export default function App({ user, onSignOut }) {
   const [aiMessages, setAiMessages] = useState([
     {
       role: 'ai',
-      text: "Hey, I'm Trashy Randy. Tell me to add a client — e.g. \"Add Northgate Retail, weekly Monday pickup, 6yd dumpster, invoice monthly\" — and I'll set them up with a pickup schedule and invoice schedule.",
+      text: "Hey, I'm Trashy Randy. I can add clients, schedule pickups, assign drivers, build invoices, and answer questions about your routes and billing. Just tell me what you need — e.g. \"what's scheduled today?\" or \"add a one-off pickup at 12 Main St to today's route.\"",
     },
   ])
   const aiScrollRef = useRef(null)
@@ -180,8 +181,13 @@ export default function App({ user, onSignOut }) {
     reader.readAsDataURL(file)
   }
 
+  function startNewPickup() {
+    go('routes')
+    setNewPickupTick((t) => t + 1)
+  }
+
   // bag passed to views
-  const app = { activeLine, activeLineObj, go, openAssistant, askAi, runAi, isMobile, isTablet, user }
+  const app = { activeLine, activeLineObj, go, openAssistant, askAi, runAi, isMobile, isTablet, user, newPickupTick }
 
   const views = {
     dashboard: <Dashboard app={app} />,
@@ -319,7 +325,7 @@ export default function App({ user, onSignOut }) {
             <div style={{ flex: 1, minWidth: 120, maxWidth: 520 }}>
               <form onSubmit={(e) => { e.preventDefault(); if (commandText.trim()) askAi(commandText) }} style={{ position: 'relative' }}>
                 <div style={{ position: 'absolute', left: 13, top: '50%', transform: 'translateY(-50%)', color: '#1f7a4d', fontSize: 13, pointerEvents: 'none' }}>✦</div>
-                <input value={commandText} onChange={(e) => setCommandText(e.target.value)} placeholder="Ask Trashy Randy — “route the new Cedar Industrial pickup”…" style={{ width: '100%', border: '1px solid #dde2dd', background: '#f7f9f7', borderRadius: 10, padding: '9px 13px 9px 36px', fontSize: 16, color: '#1a2420', outline: 'none' }} />
+                <input value={commandText} onChange={(e) => setCommandText(e.target.value)} placeholder="Ask Trashy Randy — “what’s scheduled today?”…" style={{ width: '100%', border: '1px solid #dde2dd', background: '#f7f9f7', borderRadius: 10, padding: '9px 13px 9px 36px', fontSize: 16, color: '#1a2420', outline: 'none' }} />
                 <div style={{ position: 'absolute', right: 9, top: '50%', transform: 'translateY(-50%)', fontFamily: MONO, fontSize: 10, color: '#9aa69e', border: '1px solid #e3e6e2', borderRadius: 5, padding: '2px 6px', pointerEvents: 'none' }}>⌘K</div>
               </form>
             </div>
@@ -334,7 +340,7 @@ export default function App({ user, onSignOut }) {
               <div style={{ position: 'absolute', top: 7, right: 8, width: 7, height: 7, borderRadius: '50%', background: '#c0492f', border: '1.5px solid #fff' }} />
             </div>
             {!isMobile && (
-              <button onClick={() => askAi('Route a new pickup for Cedar Industrial and set up its billing')} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '9px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 7, whiteSpace: 'nowrap' }}>
+              <button onClick={startNewPickup} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '9px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 7, whiteSpace: 'nowrap' }}>
                 <span style={{ fontSize: 15, lineHeight: 1 }}>+</span> New pickup
               </button>
             )}

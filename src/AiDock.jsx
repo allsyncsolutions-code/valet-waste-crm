@@ -5,10 +5,12 @@ const PALETTE = {
   ai: ['#f1f4f1', '#1a2420', '1px solid #e6eae6', 'flex-start'],
 }
 
+// Safe, read-only starters — they ask about real data instead of fabricating a
+// sample client. (Mutations should come from explicit user instructions.)
 const CHIPS = [
-  { label: 'Add a client', msg: 'Add Northgate Retail Park, weekly Monday pickup, 6yd dumpster, invoice monthly' },
-  { label: '1st & 3rd Monday', msg: 'Add Oakwood HOA on 1st & 3rd Monday pickups, 4yd dumpster, monthly billing' },
-  { label: 'Add a prospect', msg: 'Add Cedar Industrial as a prospect, on-call pickups, per-service billing' },
+  { label: "Today's pickups", msg: 'What pickups are scheduled for today?' },
+  { label: 'Business overview', msg: 'Give me a quick business overview — clients, outstanding balance, and drafts.' },
+  { label: 'Outstanding balance', msg: "What's our total outstanding invoice balance right now?" },
 ]
 
 export default function AiDock({ inline, mobile, aiMessages, aiBusy, aiInput, setAiInput, onSubmit, onClose, onConfirm, onDismiss, onChip, scrollRef }) {
