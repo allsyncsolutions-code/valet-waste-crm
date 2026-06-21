@@ -247,6 +247,88 @@ export async function setRouteDefault(code, driverId) {
   if (error) throw error
 }
 
+// --- route catalog (the set of routes the business runs) --------------------
+// route_defaults doubles as the catalog: one row per route code, with its
+// carry-forward default driver (driver_id) plus name/color/sort.
+export async function loadRouteDefs() {
+  const { data, error } = await supabase
+    .from('route_defaults')
+    .select('code, name, color, driver_id, active, sort')
+    .eq('active', true)
+    .order('sort', { ascending: true })
+    .order('code', { ascending: true })
+  if (error) throw error
+  return (data || []).map((d) => ({ ...d, name: d.name || `Route ${d.code}` }))
+}
+
+export async function createRouteDef({ code, name, color }) {
+  const c = String(code || '').trim().toUpperCase()
+  if (!c) throw new Error('A route code is required.')
+  const { data, error } = await supabase
+    .from('route_defaults')
+    .insert({ code: c, name: (name && name.trim()) || `Route ${c}`, color: color || null })
+    .select('code, name, color, driver_id, active, sort')
+    .single()
+  if (error) {
+    if (error.code === '23505') throw new Error(`Route ${c} already exists.`)
+    throw error
+  }
+  return data
+}
+
+// Copy the most recent prior route of the same code that fell on the SAME
+// weekday (e.g. last Monday onto this Monday). Skips stops already present.
+export async function copyPreviousWeekday(code, date) {
+  if (!date) throw new Error('A date is required.')
+  const dow = parseDate(date).getDay()
+  const { data: prior, error } = await supabase
+    .from('routes')
+    .select('id, service_date')
+    .eq('code', code)
+    .lt('service_date', date)
+    .not('service_date', 'is', null)
+    .order('service_date', { ascending: false })
+    .limit(60)
+  if (error) throw error
+  const match = (prior || []).find((r) => parseDate(r.service_date).getDay() === dow)
+  if (!match) return { copied: 0, noSource: true }
+
+  const { data: srcStops, error: sErr } = await supabase
+    .from('route_stops')
+    .select('property_id, service, time_window, lat, lng, seq')
+    .eq('route_id', match.id)
+    .order('seq', { ascending: true })
+  if (sErr) throw sErr
+  if (!srcStops || !srcStops.length) return { copied: 0, sourceDate: match.service_date }
+
+  const route = await ensureRoute(code, date)
+  const { data: existing } = await supabase.from('route_stops').select('property_id, seq').eq('route_id', route.id)
+  const have = new Set((existing || []).map((e) => e.property_id))
+  let seq = (existing || []).reduce((m, e) => Math.max(m, e.seq || 0), 0)
+  const rows = srcStops
+    .filter((s) => !have.has(s.property_id))
+    .map((s) => ({
+      route_id: route.id, property_id: s.property_id, seq: ++seq, status: 'pending',
+      service: s.service, time_window: s.time_window, lat: s.lat, lng: s.lng,
+    }))
+  if (rows.length) {
+    const { error: iErr } = await supabase.from('route_stops').insert(rows)
+    if (iErr) throw iErr
+  }
+  return { copied: rows.length, sourceDate: match.service_date }
+}
+
+// Move a stop to another route on the same date (creating that route if needed).
+// The destination route's driver effectively "takes" the stop.
+export async function moveStopToRoute(stopId, targetCode, date) {
+  const target = await ensureRoute(targetCode, date)
+  const { data: existing } = await supabase.from('route_stops').select('seq').eq('route_id', target.id)
+  const seq = (existing || []).reduce((m, e) => Math.max(m, e.seq || 0), 0) + 1
+  const { error } = await supabase.from('route_stops').update({ route_id: target.id, seq }).eq('id', stopId)
+  if (error) throw error
+  return { route: target }
+}
+
 export async function removeStopFromRoute(stopId) {
   const { error } = await supabase.from('route_stops').delete().eq('id', stopId)
   if (error) throw error

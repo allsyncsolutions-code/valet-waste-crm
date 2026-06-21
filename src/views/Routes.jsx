@@ -27,6 +27,11 @@ import {
   getRouteDefault,
   setRouteDefault,
   addOneOffStop,
+  loadRouteDefs,
+  createRouteDef,
+  copyPreviousWeekday,
+  moveStopToRoute,
+  ensureRoute,
 } from '../lib/routesData.js'
 import { loadDrivers } from '../lib/teamData.js'
 import { loadCustomers } from '../lib/customersData.js'
@@ -36,7 +41,6 @@ const BLANK_STOP = { name: '', address: '', service: '', customerId: '', custome
 
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-const ROUTE_CODE = 'B'
 
 const pad = (n) => String(n).padStart(2, '0')
 const iso = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
@@ -50,6 +54,8 @@ export default function RoutesView({ app }) {
   const isMobile = app.isMobile
   const [routeSel, setRouteSel] = useState(TODAY_KEY)
   const [weekOffset, setWeekOffset] = useState(0)
+  const [routeDefs, setRouteDefs] = useState([]) // catalog of routes (A/B/C…)
+  const [routeCode, setRouteCode] = useState('B') // which route is being viewed
 
   const [route, setRoute] = useState(null)
   const [depot, setDepot] = useState(FALLBACK_DEPOT)
@@ -68,7 +74,7 @@ export default function RoutesView({ app }) {
   const writingRef = useRef(false) // suppress realtime reload during our own writes
 
   async function refresh(date = routeSel) {
-    const slice = await loadRouteSlice(ROUTE_CODE, date)
+    const slice = await loadRouteSlice(routeCode, date)
     setRoute(slice.route)
     setDepot(slice.depot)
     setStops(slice.stops)
@@ -92,21 +98,30 @@ export default function RoutesView({ app }) {
       .catch((e) => alive && setErr(e.message || String(e)))
       .finally(() => alive && setLoading(false))
     return () => { alive = false }
-  }, [routeSel])
+  }, [routeSel, routeCode])
 
-  // Active schedules drive the "service day" dots in the picker.
+  // Active schedules drive the "service day" dots in the picker; load the
+  // driver list and the route catalog once.
   useEffect(() => {
     loadActiveSchedules().then(setSchedules).catch(() => {})
     loadDrivers().then(setDrivers).catch(() => {})
-    getRouteDefault(ROUTE_CODE).then(setDefaultDriverId).catch(() => {})
+    loadRouteDefs().then((defs) => {
+      setRouteDefs(defs)
+      if (defs.length && !defs.some((d) => d.code === routeCode)) setRouteCode(defs[0].code)
+    }).catch(() => {})
   }, [])
+
+  // Track the carry-forward default driver of whichever route is selected.
+  useEffect(() => {
+    getRouteDefault(routeCode).then(setDefaultDriverId).catch(() => {})
+  }, [routeCode])
 
   // Change the driver assigned to the selected date's route.
   async function handleDriverChange(e) {
     const driverId = e.target.value || null
     setErr(null)
     try {
-      await assignDriver(ROUTE_CODE, routeSel, driverId)
+      await assignDriver(routeCode, routeSel, driverId)
       await refresh(routeSel)
     } catch (e2) { setErr(e2.message || String(e2)) }
   }
@@ -117,13 +132,14 @@ export default function RoutesView({ app }) {
     const driverId = route?.driver_id || null
     setErr(null)
     try {
-      await setRouteDefault(ROUTE_CODE, on ? driverId : null)
+      await setRouteDefault(routeCode, on ? driverId : null)
       setDefaultDriverId(on ? driverId : null)
     } catch (e2) { setErr(e2.message || String(e2)) }
   }
 
   const assignedDriverId = route?.driver_id || ''
   const isDefault = !!defaultDriverId && defaultDriverId === (route?.driver_id || null)
+  const currentDef = routeDefs.find((d) => d.code === routeCode) || { code: routeCode, name: `Route ${routeCode}` }
 
   // Live updates: reload when another client (or driver) changes this route.
   useEffect(() => {
@@ -201,7 +217,8 @@ export default function RoutesView({ app }) {
     setStops((s) => addLocal(s, propStop))
     setOptimized(false)
     withWrite(async () => {
-      await addStopToRoute(route.id, propStop, seq)
+      const r = route || await ensureRoute(routeCode, routeSel) // create the route for this date if needed
+      await addStopToRoute(r.id, propStop, seq)
       await refresh()
     })
   }
@@ -255,7 +272,7 @@ export default function RoutesView({ app }) {
     setSavingStop(true)
     setErr(null)
     try {
-      const res = await addOneOffStop(ROUTE_CODE, routeSel, {
+      const res = await addOneOffStop(routeCode, routeSel, {
         name: newStop.name, address: addr, service: newStop.service, customerId: custId, price: hasPrice ? price : null,
       })
       if (hasPrice) {
@@ -287,7 +304,7 @@ export default function RoutesView({ app }) {
     setBuilding(true)
     setErr(null)
     try {
-      const res = await buildRouteFromSchedules(ROUTE_CODE, routeSel)
+      const res = await buildRouteFromSchedules(routeCode, routeSel)
       if (res.noSchedules) setErr(`No pickups are scheduled for ${prettyDate(routeSel)}. Pick a date that matches a client's schedule.`)
       await refresh(routeSel)
     } catch (e) {
@@ -295,6 +312,53 @@ export default function RoutesView({ app }) {
     } finally {
       setBuilding(false)
     }
+  }
+
+  const selDow = DOW[new Date(routeSel + 'T12:00:00').getDay()]
+
+  const [copying, setCopying] = useState(false)
+  async function handleCopyPrevious() {
+    if (copying) return
+    setCopying(true)
+    setErr(null)
+    try {
+      const res = await copyPreviousWeekday(routeCode, routeSel)
+      if (res.noSource) setErr(`No earlier ${selDow} found for ${currentDef.name} to copy from.`)
+      else if (res.copied === 0) setErr(`Nothing new to copy — those stops are already on ${prettyDate(routeSel)}.`)
+      await refresh(routeSel)
+    } catch (e) {
+      setErr(e.message || String(e))
+    } finally {
+      setCopying(false)
+    }
+  }
+
+  async function addRoute() {
+    const name = window.prompt('New route name (e.g. "Route C" or "North Side")')
+    if (name == null || !name.trim()) return
+    const used = new Set(routeDefs.map((r) => r.code))
+    let suggested = ''
+    for (const ch of 'ABCDEFGHIJKLMNOPQRSTUVWXYZ') { if (!used.has(ch)) { suggested = ch; break } }
+    const code = window.prompt('Short route code (1–3 characters)', suggested || (name.trim()[0] || 'R').toUpperCase())
+    if (code == null || !code.trim()) return
+    setErr(null)
+    try {
+      const def = await createRouteDef({ code, name })
+      setRouteDefs(await loadRouteDefs())
+      setRouteCode(def.code)
+    } catch (e) {
+      setErr(e.message || String(e))
+    }
+  }
+
+  function handleMoveToRoute(stopId, targetCode) {
+    if (!targetCode) return
+    setStops((prev) => prev.filter((s) => s.id !== stopId)) // optimistic
+    setErr(null)
+    withWrite(async () => {
+      await moveStopToRoute(stopId, targetCode, routeSel)
+      await refresh(routeSel)
+    })
   }
 
   // ---- day picker (real dates; dots mark days with a scheduled pickup) ----
@@ -339,46 +403,63 @@ export default function RoutesView({ app }) {
         {!isMobile && <div onClick={() => { setWeekOffset(0); setRouteSel(TODAY_KEY) }} style={{ flex: 'none', fontSize: 12, fontWeight: 600, color: '#1f7a4d', border: '1px solid #cfe0d5', borderRadius: 8, padding: '7px 12px', cursor: 'pointer' }}>Today</div>}
       </div>
 
-      {/* route header + optimize */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14, flexWrap: 'wrap' }}>
-        {route && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '8px 13px', borderRadius: 10, border: '1px solid #cfe0d5', background: '#f3faf5' }}>
-            <div style={{ width: 26, height: 26, borderRadius: 7, background: '#1f7a4d', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontWeight: 600, fontSize: 12 }}>{route.code || '•'}</div>
-            <div>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>{route.name || 'Route'}</div>
-              <div style={{ fontSize: 10.5, color: '#7c8a82' }}>{prettyDate(routeSel)}</div>
+      {/* route selector (one tab per route; shows its driver) */}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'stretch', marginBottom: 12 }}>
+        {routeDefs.map((rd) => {
+          const sel = rd.code === routeCode
+          const drv = drivers.find((d) => d.id === rd.driver_id)
+          return (
+            <div key={rd.code} onClick={() => setRouteCode(rd.code)} style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '8px 13px', borderRadius: 10, cursor: 'pointer', border: `1px solid ${sel ? '#1f7a4d' : '#e6eae6'}`, background: sel ? '#e7f1eb' : '#fff' }}>
+              <div style={{ width: 26, height: 26, borderRadius: 7, background: sel ? '#1f7a4d' : '#7c8a82', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontWeight: 600, fontSize: 12 }}>{rd.code}</div>
+              <div style={{ lineHeight: 1.2 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: sel ? '#15281d' : '#3a463f' }}>{rd.name}</div>
+                <div style={{ fontSize: 10.5, color: '#7c8a82' }}>{drv ? (drv.full_name || drv.email) : 'No default driver'}</div>
+              </div>
+            </div>
+          )
+        })}
+        <div onClick={addRoute} title="Add a route" style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 13px', borderRadius: 10, cursor: 'pointer', border: '1px dashed #cdd6cf', color: '#5d6b63', fontSize: 13, fontWeight: 600 }}>+ Add route</div>
+      </div>
+
+      {/* selected route: driver lives in the card; actions on the right */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 14, flexWrap: 'wrap' }}>
+        <div style={{ padding: '10px 14px', borderRadius: 12, border: '1px solid #cfe0d5', background: '#f3faf5', minWidth: 240 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+            <div style={{ width: 30, height: 30, borderRadius: 8, background: '#1f7a4d', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontWeight: 600, fontSize: 13 }}>{currentDef.code}</div>
+            <div style={{ lineHeight: 1.25 }}>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>{currentDef.name}</div>
+              <div style={{ fontSize: 10.5, color: '#7c8a82' }}>{prettyDate(routeSel)} · {stops.length} stop{stops.length === 1 ? '' : 's'}</div>
             </div>
           </div>
-        )}
-
-        {/* driver assignment */}
-        {drivers.length > 0 ? (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 11px', borderRadius: 10, border: '1px solid #e6eae6', background: '#fff', flexWrap: 'wrap' }}>
-            <span style={{ fontSize: 11, fontFamily: MONO, color: '#7c8a82' }}>🚛 Driver</span>
-            <select value={assignedDriverId} onChange={handleDriverChange} style={{ border: '1px solid #dde2dd', background: '#f7f9f7', borderRadius: 8, padding: '7px 9px', fontSize: 13, color: '#1a2420', outline: 'none', fontWeight: 600 }}>
-              <option value="">— Unassigned —</option>
-              {drivers.map((d) => (
-                <option key={d.id} value={d.id}>{d.full_name || d.email}</option>
-              ))}
-            </select>
-            <label title={assignedDriverId ? `Auto-assign this driver to newly built ${ROUTE_CODE} routes` : 'Assign a driver first'} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11.5, color: '#5d6b63', cursor: assignedDriverId ? 'pointer' : 'not-allowed', opacity: assignedDriverId ? 1 : 0.5 }}>
-              <input type="checkbox" checked={isDefault} disabled={!assignedDriverId} onChange={handleDefaultToggle} style={{ width: 14, height: 14, accentColor: '#1f7a4d', cursor: 'inherit' }} />
-              Default
-            </label>
-          </div>
-        ) : (
-          <div style={{ fontSize: 11.5, color: '#9aa69e', fontStyle: 'italic' }}>
-            No drivers yet — flag staff as drivers in Team.
-          </div>
-        )}
+          {drivers.length > 0 ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 11, flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 12, fontFamily: MONO, color: '#7c8a82' }}>🚛</span>
+              <select value={assignedDriverId} onChange={handleDriverChange} style={{ flex: 1, minWidth: 130, border: '1px solid #dde2dd', background: '#fff', borderRadius: 8, padding: '7px 9px', fontSize: 13, color: '#1a2420', outline: 'none', fontWeight: 600 }}>
+                <option value="">— Unassigned —</option>
+                {drivers.map((d) => (
+                  <option key={d.id} value={d.id}>{d.full_name || d.email}</option>
+                ))}
+              </select>
+              <label title={assignedDriverId ? `Auto-assign to new ${currentDef.code} routes` : 'Assign a driver first'} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11.5, color: '#5d6b63', cursor: assignedDriverId ? 'pointer' : 'not-allowed', opacity: assignedDriverId ? 1 : 0.5 }}>
+                <input type="checkbox" checked={isDefault} disabled={!assignedDriverId} onChange={handleDefaultToggle} style={{ width: 14, height: 14, accentColor: '#1f7a4d', cursor: 'inherit' }} />
+                Default
+              </label>
+            </div>
+          ) : (
+            <div style={{ fontSize: 11.5, color: '#9aa69e', fontStyle: 'italic', marginTop: 10 }}>No drivers yet — flag staff as drivers in Team.</div>
+          )}
+        </div>
 
         <div style={{ flex: 1 }} />
-        <button onClick={openNewStop} style={ghostBtn}>+ New pickup</button>
-        <button onClick={() => refresh().catch((e) => setErr(e.message))} style={ghostBtn}>Reload</button>
-        <button onClick={handleBuildFromSchedules} disabled={building} style={{ ...ghostBtn, opacity: building ? 0.6 : 1 }}>{building ? 'Building…' : 'Build from schedules'}</button>
-        <button onClick={handleOptimize} disabled={loading || !stops.length} style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'linear-gradient(135deg,#1f7a4d,#155e3a)', color: '#fff', border: 'none', borderRadius: 10, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: loading ? 'default' : 'pointer', opacity: loading || !stops.length ? 0.6 : 1 }}>
-          <span>✦</span> Optimize route
-        </button>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <button onClick={openNewStop} style={ghostBtn}>+ New pickup</button>
+          <button onClick={handleCopyPrevious} disabled={copying} style={{ ...ghostBtn, opacity: copying ? 0.6 : 1 }}>{copying ? 'Copying…' : `Copy last ${selDow}`}</button>
+          <button onClick={handleBuildFromSchedules} disabled={building} style={{ ...ghostBtn, opacity: building ? 0.6 : 1 }}>{building ? 'Building…' : 'Build from schedules'}</button>
+          <button onClick={() => refresh().catch((e) => setErr(e.message))} style={ghostBtn}>Reload</button>
+          <button onClick={handleOptimize} disabled={loading || !stops.length} style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'linear-gradient(135deg,#1f7a4d,#155e3a)', color: '#fff', border: 'none', borderRadius: 10, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: loading ? 'default' : 'pointer', opacity: loading || !stops.length ? 0.6 : 1 }}>
+            <span>✦</span> Optimize
+          </button>
+        </div>
       </div>
 
       {/* metrics bar */}
@@ -447,6 +528,14 @@ export default function RoutesView({ app }) {
                         <button onClick={() => handleMove(st.id, -1)} style={miniBtn} title="Move up">↑</button>
                         <button onClick={() => handleMove(st.id, 1)} style={miniBtn} title="Move down">↓</button>
                         <a href={`https://www.google.com/maps/dir/?api=1&destination=${st.lat},${st.lng}`} target="_blank" rel="noreferrer" style={{ ...miniBtn, textDecoration: 'none', color: '#1f7a4d' }} title="Navigate">➤ Nav</a>
+                        {routeDefs.length > 1 && (
+                          <select value="" onChange={(e) => handleMoveToRoute(st.id, e.target.value)} title="Move to another route (hands it to that route's driver)" style={{ ...miniBtn, paddingRight: 4, cursor: 'pointer' }}>
+                            <option value="">→ Route…</option>
+                            {routeDefs.filter((rd) => rd.code !== routeCode).map((rd) => (
+                              <option key={rd.code} value={rd.code}>{rd.code} · {rd.name}</option>
+                            ))}
+                          </select>
+                        )}
                         <div style={{ flex: 1 }} />
                         <button onClick={() => handleRemove(st.id)} style={{ ...miniBtn, color: '#c0492f' }} title="Remove from route">×</button>
                       </div>
@@ -483,7 +572,7 @@ export default function RoutesView({ app }) {
               <div onClick={() => !savingStop && setShowNewStop(false)} style={{ cursor: 'pointer', color: '#7c8a82', fontSize: 18 }}>✕</div>
             </div>
             <div style={{ fontSize: 12.5, color: '#7c8a82', marginBottom: 16 }}>
-              Adds a single stop to Route {ROUTE_CODE} on <b>{prettyDate(routeSel)}</b> only — no recurring schedule. Add a price to also create a draft invoice for the customer.
+              Adds a single stop to Route {routeCode} on <b>{prettyDate(routeSel)}</b> only — no recurring schedule. Add a price to also create a draft invoice for the customer.
             </div>
 
             {/* customer combobox */}
