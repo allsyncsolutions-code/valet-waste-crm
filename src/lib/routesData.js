@@ -326,6 +326,31 @@ export async function copyPreviousWeekday(code, date) {
   return { copied: rows.length, sourceDate: match.service_date }
 }
 
+// All routes (with their stops + driver) for a single date — powers the
+// Drivers & Field per-driver dispatch board.
+export async function loadDayDispatch(date) {
+  if (!date) throw new Error('A date is required.')
+  const { data, error } = await supabase
+    .from('routes')
+    .select('id, code, name, driver_id, route_stops(id, seq, status, service, time_window, lat, lng, properties(name, address))')
+    .eq('service_date', date)
+    .order('code', { ascending: true })
+  if (error) throw error
+  return (data || []).map((r) => ({
+    id: r.id,
+    code: r.code,
+    name: r.name || `Route ${r.code}`,
+    driverId: r.driver_id,
+    stops: (r.route_stops || [])
+      .slice()
+      .sort((a, b) => (a.seq || 0) - (b.seq || 0))
+      .map((s) => ({
+        id: s.id, seq: s.seq, status: s.status, service: s.service, window: s.time_window,
+        lat: s.lat, lng: s.lng, name: s.properties?.name || '—', address: s.properties?.address || '',
+      })),
+  }))
+}
+
 // Move a stop to another route on the same date (creating that route if needed).
 // The destination route's driver effectively "takes" the stop.
 export async function moveStopToRoute(stopId, targetCode, date) {

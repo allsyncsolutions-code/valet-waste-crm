@@ -9,6 +9,7 @@ import Schedule from './views/Schedule.jsx'
 import Invoices from './views/Invoices.jsx'
 import Dashboard from './views/Dashboard.jsx'
 import Activity from './views/Activity.jsx'
+import Drivers from './views/Drivers.jsx'
 import Team from './views/Team.jsx'
 import Import from './views/Import.jsx'
 import AiDock from './AiDock.jsx'
@@ -197,7 +198,7 @@ export default function App({ user, onSignOut }) {
     clients: <Clients app={app} />,
     import: <Import app={app} />,
     activity: <Activity app={app} />,
-    drivers: <Placeholder title="Drivers & Field" />,
+    drivers: <Drivers app={app} />,
     portal: <Placeholder title="Client Portal" />,
     team: <Team app={app} />,
     settings: <Settings app={app} />,
