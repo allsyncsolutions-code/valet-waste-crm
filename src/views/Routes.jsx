@@ -23,7 +23,11 @@ import {
   buildRouteFromSchedules,
   loadActiveSchedules,
   scheduleHitsDate,
+  assignDriver,
+  getRouteDefault,
+  setRouteDefault,
 } from '../lib/routesData.js'
+import { loadDrivers } from '../lib/teamData.js'
 
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -52,6 +56,8 @@ export default function RoutesView({ app }) {
   const [saved, setSaved] = useState(null)
 
   const [schedules, setSchedules] = useState([]) // active schedules, for the day dots
+  const [drivers, setDrivers] = useState([]) // staff flagged is_driver
+  const [defaultDriverId, setDefaultDriverId] = useState(null) // carry-forward default
 
   const baselineRef = useRef(null) // metrics of the first-loaded order
   const writingRef = useRef(false) // suppress realtime reload during our own writes
@@ -86,7 +92,33 @@ export default function RoutesView({ app }) {
   // Active schedules drive the "service day" dots in the picker.
   useEffect(() => {
     loadActiveSchedules().then(setSchedules).catch(() => {})
+    loadDrivers().then(setDrivers).catch(() => {})
+    getRouteDefault(ROUTE_CODE).then(setDefaultDriverId).catch(() => {})
   }, [])
+
+  // Change the driver assigned to the selected date's route.
+  async function handleDriverChange(e) {
+    const driverId = e.target.value || null
+    setErr(null)
+    try {
+      await assignDriver(ROUTE_CODE, routeSel, driverId)
+      await refresh(routeSel)
+    } catch (e2) { setErr(e2.message || String(e2)) }
+  }
+
+  // Toggle "remember this driver as the default for new days".
+  async function handleDefaultToggle(e) {
+    const on = e.target.checked
+    const driverId = route?.driver_id || null
+    setErr(null)
+    try {
+      await setRouteDefault(ROUTE_CODE, on ? driverId : null)
+      setDefaultDriverId(on ? driverId : null)
+    } catch (e2) { setErr(e2.message || String(e2)) }
+  }
+
+  const assignedDriverId = route?.driver_id || ''
+  const isDefault = !!defaultDriverId && defaultDriverId === (route?.driver_id || null)
 
   // Live updates: reload when another client (or driver) changes this route.
   useEffect(() => {
@@ -234,10 +266,32 @@ export default function RoutesView({ app }) {
             <div style={{ width: 26, height: 26, borderRadius: 7, background: '#1f7a4d', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontWeight: 600, fontSize: 12 }}>{route.code || '•'}</div>
             <div>
               <div style={{ fontSize: 13, fontWeight: 600 }}>{route.name || 'Route'}</div>
-              {route.driver && <div style={{ fontSize: 10.5, color: '#7c8a82' }}>{route.driver}</div>}
+              <div style={{ fontSize: 10.5, color: '#7c8a82' }}>{prettyDate(routeSel)}</div>
             </div>
           </div>
         )}
+
+        {/* driver assignment */}
+        {drivers.length > 0 ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 11px', borderRadius: 10, border: '1px solid #e6eae6', background: '#fff', flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 11, fontFamily: MONO, color: '#7c8a82' }}>🚛 Driver</span>
+            <select value={assignedDriverId} onChange={handleDriverChange} style={{ border: '1px solid #dde2dd', background: '#f7f9f7', borderRadius: 8, padding: '7px 9px', fontSize: 13, color: '#1a2420', outline: 'none', fontWeight: 600 }}>
+              <option value="">— Unassigned —</option>
+              {drivers.map((d) => (
+                <option key={d.id} value={d.id}>{d.full_name || d.email}</option>
+              ))}
+            </select>
+            <label title={assignedDriverId ? `Auto-assign this driver to newly built ${ROUTE_CODE} routes` : 'Assign a driver first'} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11.5, color: '#5d6b63', cursor: assignedDriverId ? 'pointer' : 'not-allowed', opacity: assignedDriverId ? 1 : 0.5 }}>
+              <input type="checkbox" checked={isDefault} disabled={!assignedDriverId} onChange={handleDefaultToggle} style={{ width: 14, height: 14, accentColor: '#1f7a4d', cursor: 'inherit' }} />
+              Default
+            </label>
+          </div>
+        ) : (
+          <div style={{ fontSize: 11.5, color: '#9aa69e', fontStyle: 'italic' }}>
+            No drivers yet — flag staff as drivers in Team.
+          </div>
+        )}
+
         <div style={{ flex: 1 }} />
         <button onClick={() => refresh().catch((e) => setErr(e.message))} style={ghostBtn}>Reload</button>
         <button onClick={handleBuildFromSchedules} disabled={building} style={{ ...ghostBtn, opacity: building ? 0.6 : 1 }}>{building ? 'Building…' : 'Build from schedules'}</button>

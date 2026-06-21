@@ -163,8 +163,13 @@ export async function buildRouteFromSchedules(code = 'B', date = null) {
     .from('routes').select('id, code, name').eq('code', code).eq('service_date', date).maybeSingle()
   if (rErr) throw rErr
   if (!route) {
+    // Carry the remembered default driver forward onto this new date's route.
+    const defDriver = await getRouteDefault(code).catch(() => null)
+    const defName = await driverDisplayName(defDriver)
     const { data: r, error } = await supabase
-      .from('routes').insert({ code, name: `Route ${code}`, service_date: date }).select('id, code, name').single()
+      .from('routes')
+      .insert({ code, name: `Route ${code}`, service_date: date, driver_id: defDriver, driver: defName })
+      .select('id, code, name').single()
     if (error) throw error
     route = r
   }
@@ -190,6 +195,56 @@ export async function buildRouteFromSchedules(code = 'B', date = null) {
     if (error) throw error
   }
   return { added: toAdd.length, route }
+}
+
+// --- driver assignment -----------------------------------------------------
+
+// Display name for a driver profile (full name, else email).
+async function driverDisplayName(driverId) {
+  if (!driverId) return null
+  const { data } = await supabase
+    .from('profiles').select('full_name, email').eq('id', driverId).maybeSingle()
+  return data ? (data.full_name || data.email || null) : null
+}
+
+// Assign (or clear, driverId=null) the driver for one date's route. Creates the
+// route row for that date if it doesn't exist yet. Keeps the legacy `driver`
+// text column in sync for display / mobile reads.
+export async function assignDriver(code, date, driverId) {
+  const driverName = await driverDisplayName(driverId)
+
+  let rq = supabase.from('routes').select('id').eq('code', code)
+  rq = date ? rq.eq('service_date', date) : rq.is('service_date', null)
+  const { data: existing, error: fErr } = await rq.maybeSingle()
+  if (fErr) throw fErr
+
+  if (existing?.id) {
+    const { error } = await supabase
+      .from('routes').update({ driver_id: driverId, driver: driverName }).eq('id', existing.id)
+    if (error) throw error
+    return { routeId: existing.id, driverName }
+  }
+  const { data: r, error } = await supabase
+    .from('routes')
+    .insert({ code, name: `Route ${code}`, service_date: date, driver_id: driverId, driver: driverName })
+    .select('id').single()
+  if (error) throw error
+  return { routeId: r.id, driverName }
+}
+
+// Carry-forward default driver per route code (route_defaults table).
+export async function getRouteDefault(code) {
+  const { data, error } = await supabase
+    .from('route_defaults').select('driver_id').eq('code', code).maybeSingle()
+  if (error) throw error
+  return data?.driver_id || null
+}
+
+export async function setRouteDefault(code, driverId) {
+  const { error } = await supabase
+    .from('route_defaults')
+    .upsert({ code, driver_id: driverId, updated_at: new Date().toISOString() }, { onConflict: 'code' })
+  if (error) throw error
 }
 
 export async function removeStopFromRoute(stopId) {

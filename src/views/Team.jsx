@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { MONO } from '../data.js'
-import { loadTeam, inviteMember, setMemberRole, removeMember, subscribeTeam } from '../lib/teamData.js'
+import { loadTeam, inviteMember, setMemberRole, setMemberDriver, removeMember, subscribeTeam } from '../lib/teamData.js'
 
 const ROLE_STYLE = {
   admin: ['#1f7a4d', '#e7f1eb', 'Admin'],
@@ -56,6 +56,14 @@ export default function Team({ app }) {
     setErr('')
     try { await setMemberRole(m.id, role); refresh() }
     catch (e) { setErr((e && e.message) || String(e)) }
+  }
+
+  async function toggleDriver(m) {
+    setErr('')
+    // optimistic flip
+    setMembers((list) => list.map((x) => (x.id === m.id ? { ...x, is_driver: !x.is_driver } : x)))
+    try { await setMemberDriver(m.id, !m.is_driver); refresh() }
+    catch (e) { setErr((e && e.message) || String(e)); refresh() }
   }
 
   async function remove(m) {
@@ -137,17 +145,26 @@ export default function Team({ app }) {
                     </div>
                     <div style={{ fontSize: 12, color: '#7c8a82', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.email}</div>
                   </div>
-                  <div style={{ flex: 'none', fontSize: 10.5, fontWeight: 600, fontFamily: MONO, color: rc, background: rb, padding: '3px 9px', borderRadius: 20 }}>{rlabel}</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-end', flex: 'none' }}>
+                    <div style={{ fontSize: 10.5, fontWeight: 600, fontFamily: MONO, color: rc, background: rb, padding: '3px 9px', borderRadius: 20 }}>{rlabel}</div>
+                    {m.is_driver && <div style={{ fontSize: 10.5, fontWeight: 600, fontFamily: MONO, color: '#1f7a4d', background: '#e7f1eb', padding: '3px 9px', borderRadius: 20 }}>🚛 Driver</div>}
+                  </div>
                 </div>
 
                 {isAdmin && (
-                  <div style={{ display: 'flex', gap: 8, marginTop: 14, alignItems: 'center' }}>
-                    <select value={m.role} onChange={(e) => changeRole(m, e.target.value)} disabled={isMe} style={{ ...inp, padding: '7px 9px', flex: 1, opacity: isMe ? 0.6 : 1 }}>
-                      <option value="admin">Admin</option>
-                      <option value="staff">Staff</option>
-                      <option value="pending">Pending (no access)</option>
-                    </select>
-                    <button onClick={() => remove(m)} disabled={isMe} title={isMe ? "You can't remove yourself" : 'Remove'} style={{ ...btnGhost, color: isMe ? '#bbb' : '#c0492f', borderColor: isMe ? '#eee' : '#f0d4cd', cursor: isMe ? 'not-allowed' : 'pointer' }}>Remove</button>
+                  <div style={{ marginTop: 14 }}>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <select value={m.role} onChange={(e) => changeRole(m, e.target.value)} disabled={isMe} style={{ ...inp, padding: '7px 9px', flex: 1, opacity: isMe ? 0.6 : 1 }}>
+                        <option value="admin">Admin</option>
+                        <option value="staff">Staff</option>
+                        <option value="pending">Pending (no access)</option>
+                      </select>
+                      <button onClick={() => remove(m)} disabled={isMe} title={isMe ? "You can't remove yourself" : 'Remove'} style={{ ...btnGhost, color: isMe ? '#bbb' : '#c0492f', borderColor: isMe ? '#eee' : '#f0d4cd', cursor: isMe ? 'not-allowed' : 'pointer' }}>Remove</button>
+                    </div>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, fontSize: 12.5, color: '#5d6b63', cursor: m.role === 'pending' ? 'not-allowed' : 'pointer', opacity: m.role === 'pending' ? 0.5 : 1 }} title={m.role === 'pending' ? 'Give them access first' : 'Show this person in the route driver list'}>
+                      <input type="checkbox" checked={!!m.is_driver} disabled={m.role === 'pending'} onChange={() => toggleDriver(m)} style={{ width: 15, height: 15, accentColor: '#1f7a4d', cursor: 'inherit' }} />
+                      Can be assigned to routes (driver)
+                    </label>
                   </div>
                 )}
               </div>
