@@ -365,7 +365,7 @@ export async function loadDayDispatch(date) {
   if (!date) throw new Error('A date is required.')
   const { data, error } = await supabase
     .from('routes')
-    .select('id, code, name, driver_id, route_stops(id, seq, status, service, time_window, lat, lng, properties(name, address))')
+    .select('id, code, name, driver_id, route_stops(id, seq, status, service, time_window, lat, lng, check_in, check_out, properties(name, address))')
     .eq('service_date', date)
     .order('code', { ascending: true })
   if (error) throw error
@@ -379,9 +379,34 @@ export async function loadDayDispatch(date) {
       .sort((a, b) => (a.seq || 0) - (b.seq || 0))
       .map((s) => ({
         id: s.id, seq: s.seq, status: s.status, service: s.service, window: s.time_window,
-        lat: s.lat, lng: s.lng, name: s.properties?.name || '—', address: s.properties?.address || '',
+        lat: s.lat, lng: s.lng, checkIn: s.check_in, checkOut: s.check_out,
+        name: s.properties?.name || '—', address: s.properties?.address || '',
       })),
   }))
+}
+
+// --- field ops: driver check-in / check-out (with best-effort GPS) ----------
+export async function checkInStop(stopId, gps) {
+  const patch = { status: 'enroute', check_in: new Date().toISOString() }
+  if (gps) { patch.check_in_lat = gps.lat; patch.check_in_lng = gps.lng }
+  const { error } = await supabase.from('route_stops').update(patch).eq('id', stopId)
+  if (error) throw error
+}
+
+export async function checkOutStop(stopId, gps) {
+  const patch = { status: 'done', check_out: new Date().toISOString() }
+  if (gps) { patch.check_out_lat = gps.lat; patch.check_out_lng = gps.lng }
+  const { error } = await supabase.from('route_stops').update(patch).eq('id', stopId)
+  if (error) throw error
+}
+
+// Undo: back to pending and clear the check-in/out trail.
+export async function resetStopStatus(stopId) {
+  const { error } = await supabase.from('route_stops').update({
+    status: 'pending', check_in: null, check_out: null,
+    check_in_lat: null, check_in_lng: null, check_out_lat: null, check_out_lng: null,
+  }).eq('id', stopId)
+  if (error) throw error
 }
 
 // Move a stop to another route on the same date (creating that route if needed).

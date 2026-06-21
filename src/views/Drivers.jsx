@@ -1,9 +1,23 @@
 import { useEffect, useMemo, useState } from 'react'
 import { MONO } from '../data.js'
 import { STATUS_META } from '../lib/routeModel.js'
-import { loadDayDispatch } from '../lib/routesData.js'
+import { loadDayDispatch, checkInStop, checkOutStop, resetStopStatus } from '../lib/routesData.js'
 import { loadDrivers } from '../lib/teamData.js'
+import { logActivity } from '../lib/activityData.js'
 import { supabase } from '../lib/supabaseClient.js'
+
+// Best-effort browser geolocation — resolves null if unavailable/denied.
+function getGps() {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) return resolve(null)
+    navigator.geolocation.getCurrentPosition(
+      (p) => resolve({ lat: p.coords.latitude, lng: p.coords.longitude }),
+      () => resolve(null),
+      { enableHighAccuracy: true, timeout: 8000 },
+    )
+  })
+}
+const hhmm = (ts) => (ts ? new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '')
 
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -33,6 +47,37 @@ export default function Drivers({ app }) {
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState(null)
   const [expanded, setExpanded] = useState({}) // driverId/route key -> bool
+  const [busyStop, setBusyStop] = useState(null)
+
+  async function doCheckIn(stop) {
+    setBusyStop(stop.id)
+    setErr(null)
+    try {
+      const gps = await getGps()
+      await checkInStop(stop.id, gps)
+      logActivity({ type: 'check_in', summary: `Checked in at ${stop.name}`, entityType: 'route_stop', entityId: stop.id })
+      await refresh()
+    } catch (e) { setErr(e.message || String(e)) }
+    setBusyStop(null)
+  }
+  async function doCheckOut(stop) {
+    setBusyStop(stop.id)
+    setErr(null)
+    try {
+      const gps = await getGps()
+      await checkOutStop(stop.id, gps)
+      logActivity({ type: 'check_out', summary: `Checked out of ${stop.name}`, entityType: 'route_stop', entityId: stop.id })
+      await refresh()
+    } catch (e) { setErr(e.message || String(e)) }
+    setBusyStop(null)
+  }
+  async function doUndo(stop) {
+    setBusyStop(stop.id)
+    setErr(null)
+    try { await resetStopStatus(stop.id); await refresh() }
+    catch (e) { setErr(e.message || String(e)) }
+    setBusyStop(null)
+  }
 
   async function refresh(d = date) {
     const [drv, rts] = await Promise.all([loadDrivers(), loadDayDispatch(d)])
@@ -131,7 +176,7 @@ export default function Drivers({ app }) {
                     {rts.length > 1 && <div style={{ fontFamily: MONO, fontSize: 11, color: '#7c8a82', margin: '6px 2px' }}>{r.code} · {r.name}</div>}
                     {r.stops.length === 0 ? (
                       <div style={{ fontSize: 12, color: '#9aa69e', padding: '6px 2px' }}>No stops on this route.</div>
-                    ) : r.stops.map((s) => <StopRow key={s.id} s={s} />)}
+                    ) : r.stops.map((s) => <StopRow key={s.id} s={s} busy={busyStop === s.id} onCheckIn={() => doCheckIn(s)} onCheckOut={() => doCheckOut(s)} onUndo={() => doUndo(s)} />)}
                   </div>
                 ))}
               </div>
@@ -181,22 +226,46 @@ export default function Drivers({ app }) {
   )
 }
 
-function StopRow({ s }) {
+function StopRow({ s, busy, onCheckIn, onCheckOut, onUndo }) {
   const meta = STATUS_META[s.status] || STATUS_META.pending
   return (
-    <div style={{ display: 'flex', gap: 10, padding: '7px 4px', borderTop: '1px solid #f1f3f0', alignItems: 'center' }}>
-      <div style={{ width: 22, height: 22, flex: 'none', borderRadius: '50%', background: meta.bg, color: meta.fg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontSize: 10.5, fontWeight: 600 }}>{s.seq}</div>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontWeight: 600, fontSize: 13 }}>{s.name}</div>
-        <div style={{ fontSize: 11.5, color: '#7c8a82', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.address || s.service}</div>
+    <div style={{ padding: '8px 4px', borderTop: '1px solid #f1f3f0' }}>
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+        <div style={{ width: 22, height: 22, flex: 'none', borderRadius: '50%', background: meta.bg, color: meta.fg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontSize: 10.5, fontWeight: 600 }}>{s.seq}</div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontWeight: 600, fontSize: 13 }}>{s.name}</div>
+          <div style={{ fontSize: 11.5, color: '#7c8a82', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.address || s.service}</div>
+        </div>
+        <div style={{ fontFamily: MONO, fontSize: 10, fontWeight: 600, color: meta.color, flex: 'none' }}>{meta.label}</div>
+        {s.lat != null && s.lng != null && (
+          <a href={`https://www.google.com/maps/dir/?api=1&destination=${s.lat},${s.lng}`} target="_blank" rel="noreferrer" style={{ fontSize: 11.5, fontWeight: 600, color: '#1f7a4d', textDecoration: 'none', flex: 'none' }} title="Navigate">➤</a>
+        )}
       </div>
-      <div style={{ fontFamily: MONO, fontSize: 10, fontWeight: 600, color: meta.color, flex: 'none' }}>{meta.label}</div>
-      {s.lat != null && s.lng != null && (
-        <a href={`https://www.google.com/maps/dir/?api=1&destination=${s.lat},${s.lng}`} target="_blank" rel="noreferrer" style={{ fontSize: 11.5, fontWeight: 600, color: '#1f7a4d', textDecoration: 'none', flex: 'none' }} title="Navigate">➤</a>
-      )}
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 7, marginLeft: 32, flexWrap: 'wrap' }}>
+        {s.status === 'pending' && (
+          <button onClick={onCheckIn} disabled={busy} style={fieldBtn('#1f7a4d')}>{busy ? '…' : 'Check in'}</button>
+        )}
+        {s.status === 'enroute' && (
+          <>
+            <span style={{ fontSize: 11, color: '#7c8a82' }}>In {hhmm(s.checkIn)}</span>
+            <button onClick={onCheckOut} disabled={busy} style={fieldBtn('#155e3a')}>{busy ? '…' : 'Check out'}</button>
+            <button onClick={onUndo} disabled={busy} style={fieldBtnGhost} title="Undo check-in">undo</button>
+          </>
+        )}
+        {s.status === 'done' && (
+          <>
+            <span style={{ fontSize: 11, color: '#1f7a4d', fontWeight: 600 }}>✓ {hhmm(s.checkIn)}–{hhmm(s.checkOut)}</span>
+            <button onClick={onUndo} disabled={busy} style={fieldBtnGhost} title="Reopen stop">undo</button>
+          </>
+        )}
+      </div>
     </div>
   )
 }
+
+const fieldBtn = (bg) => ({ background: bg, color: '#fff', border: 'none', borderRadius: 8, padding: '6px 13px', fontSize: 12, fontWeight: 600, cursor: 'pointer' })
+const fieldBtnGhost = { background: '#fff', color: '#9aa69e', border: '1px solid #e6eae6', borderRadius: 8, padding: '5px 10px', fontSize: 11, fontWeight: 600, cursor: 'pointer' }
 
 const navBtn = { width: 30, height: 30, flex: 'none', borderRadius: 8, border: '1px solid #e6eae6', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: '#5d6b63', fontSize: 15 }
 const card = { background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '14px 16px', marginBottom: 12 }
