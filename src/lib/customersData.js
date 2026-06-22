@@ -117,7 +117,7 @@ export async function updateCustomer(id, payload) {
 export async function loadProperties(customerId) {
   const { data, error } = await supabase
     .from('properties')
-    .select('id, code, name, address, service, notes, price, lat, lng, pickup_days, pickup_frequency, pickup_start_date')
+    .select('id, code, name, address, service, notes, price, lat, lng, pickup_days, pickup_frequency, pickup_start_date, needs_review')
     .eq('customer_id', customerId)
     .order('created_at', { ascending: true })
   if (error) throw error
@@ -128,7 +128,7 @@ export async function loadProperties(customerId) {
 // geocode-attempt counter so it gets re-geocoded on the next pass.
 export async function updateProperty(id, patch) {
   const fields = {}
-  for (const k of ['code', 'name', 'address', 'service', 'notes', 'price', 'pickup_days', 'pickup_frequency']) {
+  for (const k of ['code', 'name', 'address', 'service', 'notes', 'price', 'pickup_days', 'pickup_frequency', 'needs_review']) {
     if (patch[k] !== undefined) fields[k] = patch[k]
   }
   if (patch.pickup_start_date !== undefined) fields.pickup_start_date = patch.pickup_start_date || null

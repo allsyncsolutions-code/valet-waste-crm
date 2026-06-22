@@ -15,6 +15,7 @@ export default function Import({ app }) {
   const [createSchedule, setCreateSchedule] = useState(true)
   const [pickupDay, setPickupDay] = useState('monday')
   const [pickupFreq, setPickupFreq] = useState('weekly')
+  const [markReview, setMarkReview] = useState(false)
   const [text, setText] = useState('')
 
   const [busy, setBusy] = useState(false)
@@ -54,6 +55,7 @@ export default function Import({ app }) {
         create_schedule: createSchedule,
         pickup_day: pickupDay,
         pickup_freq: pickupFreq,
+        needs_review: markReview,
         properties: rows,
       })
       setResult({ inserted: res?.inserted ?? 0 })
@@ -81,6 +83,9 @@ export default function Import({ app }) {
     <div style={{ maxWidth: 900, margin: '0 auto' }}>
       <div style={{ fontSize: 13, color: '#5d6b63', marginBottom: 16 }}>
         Paste a property list (or upload a file) to add many service locations to one client at once. Coordinates are filled in automatically after import.
+        <div style={{ marginTop: 6 }}>
+          The pickup day you choose below is applied to every property in this batch. For a client with addresses on different days (e.g. some Monday, some Thursday), import each day as a separate batch.
+        </div>
       </div>
 
       {err && <div style={banner('#c0492f', '#fbeae6')}>{err}</div>}
@@ -122,6 +127,13 @@ export default function Import({ app }) {
             </div>
           </div>
         </div>
+
+        <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginTop: 12, cursor: 'pointer' }}>
+          <input type="checkbox" checked={markReview} onChange={(e) => setMarkReview(e.target.checked)} style={{ marginTop: 2 }} />
+          <span style={{ fontSize: 13, color: '#5d6b63' }}>
+            <b style={{ color: '#c0492f' }}>Mark all as “Needs review.”</b> Use this for messy data — every property in this batch comes in flagged so the owner can go over the pricing/schedule. You (or Trashy Randy) clear the flag once each is correct.
+          </span>
+        </label>
 
         <div style={{ marginTop: 14 }}>
           <label style={lbl}>Properties</label>

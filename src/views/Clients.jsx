@@ -162,6 +162,20 @@ export default function Clients({ app }) {
     }
   }
 
+  async function toggleReview(p) {
+    if (pBusy) return
+    setPBusy(true)
+    setErr(null)
+    try {
+      await updateProperty(p.id, { needs_review: !p.needs_review })
+      setProps(await loadProperties(selId))
+    } catch (e) {
+      setErr(e.message || String(e))
+    } finally {
+      setPBusy(false)
+    }
+  }
+
   async function doDelete() {
     if (!cur) return
     const id = cur.id
@@ -361,7 +375,7 @@ export default function Clients({ app }) {
                             <div style={{ fontSize: 12, color: '#7c8a82' }}>
                               {[p.service, p.notes].filter(Boolean).join(' · ') || '—'}
                             </div>
-                            <div style={{ marginTop: 4 }}>
+                            <div style={{ marginTop: 4, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
                               {p.pickup_days && p.pickup_days.length ? (
                                 <span style={{ fontSize: 11, fontWeight: 700, fontFamily: MONO, color: '#1f7a4d', background: '#e7f1eb', padding: '2px 8px', borderRadius: 6, letterSpacing: '.04em' }}>
                                   {daysLabel(p.pickup_days)}{p.pickup_frequency && p.pickup_frequency !== 'weekly' ? ` · ${freqLabel(p.pickup_frequency)}` : ''}
@@ -369,9 +383,13 @@ export default function Clients({ app }) {
                               ) : (
                                 <span style={{ fontSize: 11, fontWeight: 600, fontFamily: MONO, color: '#c08a2e', background: '#fbf3e2', padding: '2px 8px', borderRadius: 6 }}>No pickup day</span>
                               )}
+                              {p.needs_review && (
+                                <span style={{ fontSize: 11, fontWeight: 700, fontFamily: MONO, color: '#c0492f', background: '#fbeae6', padding: '2px 8px', borderRadius: 6, letterSpacing: '.03em' }}>⚠ Needs review</span>
+                              )}
                             </div>
                           </div>
                           {p.price != null && <div style={{ fontSize: 12.5, color: '#5d6b63', flex: 'none' }}>${Number(p.price).toFixed(2)}</div>}
+                          <button onClick={() => toggleReview(p)} disabled={pBusy} title={p.needs_review ? 'Clear the review flag' : 'Flag this property for the owner to review'} style={{ flex: 'none', background: 'none', border: 'none', color: p.needs_review ? '#1f7a4d' : '#c0492f', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px', opacity: pBusy ? 0.6 : 1 }}>{p.needs_review ? 'Mark reviewed' : 'Needs review'}</button>
                           <button onClick={() => startEditProp(p)} style={{ flex: 'none', background: 'none', border: 'none', color: '#1f7a4d', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>Edit</button>
                         </div>
                       )}

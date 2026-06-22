@@ -12,10 +12,12 @@ import {
 
 const DAY_ORDER = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
 const DAY_ABBR = { monday: 'Mon', tuesday: 'Tue', wednesday: 'Wed', thursday: 'Thu', friday: 'Fri', saturday: 'Sat', sunday: 'Sun' }
-const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s)
 const orderDays = (days) => DAY_ORDER.filter((d) => (days || []).includes(d))
-const initialsOf = (name) =>
-  (name || '?').split(/\s+/).slice(0, 2).map((w) => w[0]).join('').toUpperCase()
+// Sort key: earliest pickup weekday (unscheduled sinks to the bottom), then address.
+const dayRank = (days) => {
+  const o = orderDays(days)
+  return o.length ? DAY_ORDER.indexOf(o[0]) : 99
+}
 
 export default function Schedule({ app }) {
   const isMobile = app.isMobile
@@ -23,6 +25,7 @@ export default function Schedule({ app }) {
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState(null)
   const [search, setSearch] = useState('')
+  const [selId, setSelId] = useState(null) // clicked row → reveals Edit days
   const [editId, setEditId] = useState(null)
   const [form, setForm] = useState({ days: [], frequency: 'weekly' })
   const [saving, setSaving] = useState(false)
@@ -43,24 +46,16 @@ export default function Schedule({ app }) {
   }, [])
 
   const q = search.toLowerCase().trim()
-  const filtered = useMemo(
-    () => (q ? pickups.filter((p) => (p.customerName + ' ' + p.address + ' ' + p.service).toLowerCase().includes(q)) : pickups),
-    [pickups, q]
-  )
-
-  // A property appears under EACH day it runs; ones with no day go to "Unscheduled".
-  const groups = useMemo(() => {
-    const byDay = {}
-    const none = []
-    for (const p of filtered) {
-      const days = orderDays(p.days)
-      if (!days.length) { none.push(p); continue }
-      for (const d of days) (byDay[d] = byDay[d] || []).push(p)
-    }
-    const ordered = DAY_ORDER.filter((d) => byDay[d]).map((d) => ({ key: d, label: cap(d), items: byDay[d] }))
-    if (none.length) ordered.push({ key: 'none', label: 'Unscheduled', items: none })
-    return ordered
-  }, [filtered])
+  const rows = useMemo(() => {
+    const list = q
+      ? pickups.filter((p) => (p.customerName + ' ' + p.address + ' ' + p.service).toLowerCase().includes(q))
+      : pickups
+    return list.slice().sort((a, b) => {
+      const dr = dayRank(a.days) - dayRank(b.days)
+      if (dr) return dr
+      return (a.address || a.name).localeCompare(b.address || b.name)
+    })
+  }, [pickups, q])
 
   const scheduledCount = pickups.filter((p) => orderDays(p.days).length).length
 
@@ -87,9 +82,11 @@ export default function Schedule({ app }) {
   }
 
   const editing = pickups.find((p) => p.id === editId)
+  // Columns: Address | Client | Service | Days | Freq | Action. Trim on mobile.
+  const cols = isMobile ? '1fr 116px 96px' : 'minmax(0,2.1fr) minmax(0,1.3fr) minmax(0,1fr) 122px 84px 92px'
 
   return (
-    <div style={{ maxWidth: 1080, margin: '0 auto' }}>
+    <div style={{ maxWidth: 1180, margin: '0 auto' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6, flexWrap: 'wrap' }}>
         <div style={{ position: 'relative', flex: 1, minWidth: 180 }}>
           <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search by client, address or service…" style={searchInput} />
@@ -97,13 +94,13 @@ export default function Schedule({ app }) {
         </div>
         <div style={{ fontFamily: MONO, fontSize: 11.5, color: '#7c8a82', flex: 'none' }}>{scheduledCount} scheduled · {pickups.length} addresses</div>
       </div>
-      <div style={{ fontSize: 12, color: '#7c8a82', margin: '0 2px 14px' }}>
-        Pickup days live on each address — an address can run more than one day a week. Set them here or from a client’s property list.
+      <div style={{ fontSize: 12, color: '#7c8a82', margin: '0 2px 12px' }}>
+        Pickup days live on each address — click a row to set them (an address can run more than one day a week).
       </div>
 
       {err && <div style={errorBox}>{err}</div>}
-
       {loading && <div style={empty}>Loading schedules…</div>}
+
       {!loading && !pickups.length && (
         <div style={{ background: '#fff', border: '1px dashed #d8ddd6', borderRadius: 13, padding: '44px 24px', textAlign: 'center' }}>
           <div style={{ fontSize: 24, marginBottom: 8 }}>▤</div>
@@ -112,43 +109,52 @@ export default function Schedule({ app }) {
         </div>
       )}
 
-      {!loading && !!pickups.length && !filtered.length && <div style={empty}>No addresses match “{search}”.</div>}
+      {!loading && !!pickups.length && !rows.length && <div style={empty}>No addresses match “{search}”.</div>}
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-        {groups.map((g) => (
-          <div key={g.key}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 9, margin: '0 2px 8px' }}>
-              <div style={{ fontFamily: MONO, fontSize: 11, letterSpacing: '.1em', color: g.key === 'none' ? '#c08a2e' : '#1f7a4d', fontWeight: 600 }}>{g.label.toUpperCase()}</div>
-              <div style={{ flex: 1, height: 1, background: '#e6eae6' }} />
-              <div style={{ fontFamily: MONO, fontSize: 10.5, color: '#9aa69e' }}>{g.items.length}</div>
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 10 }}>
-              {g.items.map((p) => (
-                <div key={p.id + g.key} style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 12, padding: '13px 15px', opacity: p.customerStatus === 'paused' ? 0.6 : 1 }}>
-                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 11 }}>
-                    <div style={{ width: 36, height: 36, flex: 'none', borderRadius: 9, background: '#e7f1eb', color: '#1f7a4d', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontWeight: 600, fontSize: 12 }}>{initialsOf(p.customerName)}</div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontWeight: 600, fontSize: 13.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.address || p.name}</div>
-                      <div style={{ fontSize: 11.5, color: '#7c8a82', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.customerName}{p.service ? ' · ' + p.service : ''}</div>
-                    </div>
-                    <span style={{ flex: 'none', fontFamily: MONO, fontSize: 10, color: '#1f7a4d', background: '#e7f1eb', padding: '2px 8px', borderRadius: 6 }}>{freqLabel(p.frequency)}</span>
+      {!loading && !!rows.length && (
+        <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 12, overflow: 'hidden' }}>
+          {/* header */}
+          <div style={{ display: 'grid', gridTemplateColumns: cols, gap: 10, padding: '9px 14px', borderBottom: '1px solid #e6eae6', background: '#f7f9f7', fontFamily: MONO, fontSize: 10, letterSpacing: '.08em', color: '#7c8a82' }}>
+            <div>ADDRESS</div>
+            {!isMobile && <div>CLIENT</div>}
+            {!isMobile && <div>SERVICE</div>}
+            <div>DAYS</div>
+            {!isMobile && <div>FREQ</div>}
+            <div />
+          </div>
+          {/* rows */}
+          <div style={{ maxHeight: '64vh', overflowY: 'auto' }}>
+            {rows.map((p) => {
+              const sel = selId === p.id
+              const days = orderDays(p.days)
+              return (
+                <div
+                  key={p.id}
+                  onClick={() => setSelId(sel ? null : p.id)}
+                  style={{ display: 'grid', gridTemplateColumns: cols, gap: 10, padding: '8px 14px', borderBottom: '1px solid #f1f3f0', alignItems: 'center', cursor: 'pointer', background: sel ? '#eef5f0' : '#fff', fontSize: 13 }}
+                >
+                  <div style={{ minWidth: 0, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.address || p.name}</div>
+                  {!isMobile && <div style={{ minWidth: 0, color: '#5d6b63', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.customerName}</div>}
+                  {!isMobile && <div style={{ minWidth: 0, color: '#7c8a82', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.service || '—'}</div>}
+                  <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+                    {days.length ? days.map((d) => (
+                      <span key={d} style={{ fontFamily: MONO, fontSize: 10, fontWeight: 700, color: '#1f7a4d', background: '#eef5f0', border: '1px solid #d6e6dc', padding: '1px 5px', borderRadius: 4 }}>{DAY_ABBR[d]}</span>
+                    )) : <span style={{ fontSize: 11.5, color: '#c08a2e' }}>None</span>}
                   </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 11 }}>
-                    <div style={{ display: 'flex', gap: 4 }}>
-                      {orderDays(p.days).map((d) => (
-                        <span key={d} style={{ fontFamily: MONO, fontSize: 10, fontWeight: 700, color: '#1f7a4d', background: '#eef5f0', border: '1px solid #d6e6dc', padding: '2px 6px', borderRadius: 5 }}>{DAY_ABBR[d]}</span>
-                      ))}
-                      {!orderDays(p.days).length && <span style={{ fontSize: 11.5, color: '#c08a2e' }}>No pickup day</span>}
-                    </div>
-                    <div style={{ flex: 1 }} />
-                    <button onClick={() => openEdit(p)} style={miniBtn}>Edit days</button>
+                  {!isMobile && <div style={{ color: '#7c8a82', fontSize: 12 }}>{freqLabel(p.frequency)}</div>}
+                  <div style={{ textAlign: 'right' }}>
+                    {sel ? (
+                      <button onClick={(e) => { e.stopPropagation(); openEdit(p) }} style={editBtn}>Edit days</button>
+                    ) : (
+                      <span style={{ color: '#c2cabf', fontSize: 14 }}>›</span>
+                    )}
                   </div>
                 </div>
-              ))}
-            </div>
+              )
+            })}
           </div>
-        ))}
-      </div>
+        </div>
+      )}
 
       {editId && editing && (
         <div onClick={() => !saving && setEditId(null)} style={overlay}>
@@ -185,7 +191,7 @@ export default function Schedule({ app }) {
 const inp = { width: '100%', border: '1px solid #dde2dd', background: '#fff', borderRadius: 9, padding: '9px 11px', fontSize: 15, outline: 'none', boxSizing: 'border-box' }
 const empty = { padding: '22px 14px', textAlign: 'center', color: '#9aa69e', fontSize: 12.5 }
 const errorBox = { marginBottom: 14, background: '#fdecea', border: '1px solid #f3b7b0', color: '#9a2c1e', borderRadius: 11, padding: '10px 14px', fontSize: 12.5 }
-const miniBtn = { background: '#f3f5f2', border: '1px solid #e6eae6', borderRadius: 7, padding: '5px 11px', fontSize: 12, fontWeight: 600, color: '#5d6b63', cursor: 'pointer' }
+const editBtn = { background: '#1f7a4d', border: 'none', borderRadius: 7, padding: '5px 11px', fontSize: 12, fontWeight: 600, color: '#fff', cursor: 'pointer', whiteSpace: 'nowrap' }
 const overlay = { position: 'fixed', inset: 0, background: 'rgba(15,30,20,.45)', zIndex: 500, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '6vh 16px', overflowY: 'auto' }
 const modal = { width: 460, maxWidth: '100%', background: '#fff', borderRadius: 14, padding: 22, boxShadow: '0 20px 60px rgba(0,0,0,.25)' }
 const cancelBtn = { flex: 'none', background: '#fff', border: '1px solid #dde2dd', color: '#5d6b63', borderRadius: 9, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }

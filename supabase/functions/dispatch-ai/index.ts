@@ -38,6 +38,8 @@ Guidelines:
 - move_stops moves matching stops from one route to another on a date (from_route_code → to_route_code), which hands them to the other route's driver. Pick which stops by_customer or address_contains.
 - assign_driver assigns (or unassigns) a driver for a route on a date; the driver must be flagged in the Team tab. set_default:true makes them the route's default. create_route adds a new route (code + name).
 - When the user gives you MORE THAN ONE property/address for the same client (a pasted list, a vendor sheet, etc.), use bulk_add_properties ONCE with all of them — do not call add_stop_to_route in a loop. Pass every row in the properties array and report how many were added.
+- Staff flag uncertain imported properties as "Needs review" (e.g. unclear pricing or pickup frequency). Use list_needs_review to report what's flagged ("what needs review?"). Use edit_property to fix ONE property the owner is reviewing — set price/service/pickup_days/notes — and pass mark_reviewed:true to clear the flag once it's right. Find the property by address (add client_name if the address is ambiguous); if edit_property returns needs_clarification, ask the user which match they mean.
+- Use flag_properties to flag or unflag MANY properties at once by client, tag, or address (e.g. "flag everything for Staylah for review" → by_customer:"Staylah"; "clear review on all Palm Coast properties" → address_contains:"Palm Coast", needs_review:false). It defaults to flagging; pass needs_review:false to clear.
 - You cannot send payment links or charge cards — tell the user to use the "Send payment link" button on the invoice for that.
 - After making a change, confirm what you did in one short sentence.`
 
@@ -272,6 +274,52 @@ const tools = [
       required: ["properties"],
     },
   },
+  {
+    name: "list_needs_review",
+    description:
+      "List properties flagged 'Needs review'. Staff flag messy/uncertain imports (e.g. unclear pricing or frequency) so the owner can go over them. Returns each flagged property with its client, address, price, service, and pickup days. Use this when the user asks what needs review / what needs fixing / what's flagged. Optionally narrow to one client.",
+    input_schema: {
+      type: "object",
+      properties: {
+        client_name: { type: "string", description: "Optional — only show flagged properties for this client." },
+      },
+    },
+  },
+  {
+    name: "edit_property",
+    description:
+      "Edit ONE existing property and/or clear its 'Needs review' flag. Find it by address (and optionally the client name to disambiguate). Use this to fix a flagged property the owner is reviewing — set the price, service, pickup day(s), or notes, and set mark_reviewed:true to clear the flag once it's correct. Set needs_review:true to flag a property for review.",
+    input_schema: {
+      type: "object",
+      properties: {
+        address: { type: "string", description: "Address (or part of it) of the property to edit. Required unless property_id is given." },
+        property_id: { type: "string", description: "Exact property id, if known. Use instead of address." },
+        client_name: { type: "string", description: "Optional — the owning client, to disambiguate a shared address." },
+        price: { type: "number", description: "New price for this property." },
+        service: { type: "string", description: "New service, e.g. 'Trash / Recycle'." },
+        notes: { type: "string", description: "New bin-placement / access note." },
+        pickup_days: { type: "array", items: { type: "string" }, description: "Full lowercase day names, e.g. ['monday','thursday']. Replaces the property's pickup days." },
+        pickup_freq: { type: "string", description: "weekly | biweekly | monthly | on_call." },
+        mark_reviewed: { type: "boolean", description: "True to clear the Needs review flag (property is now correct)." },
+        needs_review: { type: "boolean", description: "True to flag this property for review. Ignored if mark_reviewed is set." },
+      },
+    },
+  },
+  {
+    name: "flag_properties",
+    description:
+      "Flag (or unflag) MANY existing properties for review in one shot, selected by client, tag, or address text. Use for bulk review actions like 'flag everything for Staylah for review' or 'clear the review flag on all Palm Coast properties'. To change or clear a SINGLE property's details, use edit_property instead. Provide at least one selector.",
+    input_schema: {
+      type: "object",
+      properties: {
+        by_customer: { type: "string", description: "Client/business name — affects all of that client's properties." },
+        by_tag: { type: "string", description: "Tag name — affects properties of clients carrying this tag." },
+        address_contains: { type: "string", description: "Match properties whose address or name contains this text (e.g. a city or street)." },
+        needs_review: { type: "boolean", description: "True to flag for review (default), false to clear the flag." },
+      },
+      required: [],
+    },
+  },
 ]
 
 // ---- PostgREST helpers (service role) ----
@@ -336,6 +384,8 @@ function logForTool(name: string, out: any): Promise<void> | undefined {
     case "assemble_route": return out.added ? logActivity("route_assembled", `Added ${out.added} stop${out.added === 1 ? "" : "s"} to route ${out.route} (${out.date})`, "route") : undefined
     case "move_stops": return out.moved ? logActivity("stops_moved", `Moved ${out.moved} stop${out.moved === 1 ? "" : "s"} ${out.from}→${out.to} (${out.date})`, "route") : undefined
     case "bulk_add_properties": return logActivity("properties_imported", `Imported ${out.inserted} properties for ${out.client}`, "customer", out.customer_id)
+    case "edit_property": return out.needs_clarification ? undefined : logActivity("property_updated", `Updated property ${out.address}${out.needs_review === false ? " (reviewed)" : ""}`, "property", out.id)
+    case "flag_properties": return out.changed ? logActivity("properties_flagged", `${out.needs_review ? "Flagged" : "Cleared review on"} ${out.changed} propert${out.changed === 1 ? "y" : "ies"}`, "customer") : undefined
     default: return undefined
   }
 }
@@ -711,9 +761,98 @@ async function bulkAddProperties(a: any) {
   }
 }
 
+async function listNeedsReview(a: any) {
+  let custIds: string[] | null = null
+  if (a.client_name) {
+    const custs = await sbGet(`customers?name=ilike.${enc(`*${a.client_name}*`)}&select=id&limit=25`)
+    custIds = custs.map((c: any) => c.id)
+    if (!custIds.length) return { count: 0, properties: [] }
+  }
+  let path = `properties?needs_review=is.true&select=id,address,name,price,service,pickup_days,pickup_frequency,customer_id&order=created_at.asc&limit=200`
+  if (custIds) path += `&customer_id=in.(${custIds.join(",")})`
+  const rows = await sbGet(path)
+  // Attach client names.
+  const ids = [...new Set(rows.map((r: any) => r.customer_id).filter(Boolean))]
+  const nameById: Record<string, string> = {}
+  if (ids.length) {
+    const cs = await sbGet(`customers?id=in.(${ids.join(",")})&select=id,name`)
+    for (const c of cs) nameById[c.id] = c.name
+  }
+  return {
+    count: rows.length,
+    properties: rows.map((r: any) => ({
+      id: r.id,
+      client: nameById[r.customer_id] || null,
+      address: r.address || r.name,
+      price: r.price,
+      service: r.service,
+      pickup_days: r.pickup_days || [],
+      pickup_frequency: r.pickup_frequency,
+    })),
+  }
+}
+
+async function editProperty(a: any) {
+  // Resolve the target property.
+  let propId = a.property_id as string | undefined
+  if (!propId) {
+    if (!a.address) throw new Error("Provide an address (or property_id) of the property to edit.")
+    const like = enc(`*${a.address}*`)
+    let path = `properties?or=(address.ilike.${like},name.ilike.${like})&select=id,address,name,customer_id&limit=10`
+    let rows = await sbGet(path)
+    if (a.client_name && rows.length > 1) {
+      const custs = await sbGet(`customers?name=ilike.${enc(`*${a.client_name}*`)}&select=id&limit=25`)
+      const cset = new Set(custs.map((c: any) => c.id))
+      rows = rows.filter((r: any) => cset.has(r.customer_id))
+    }
+    if (!rows.length) throw new Error(`No property matches "${a.address}".`)
+    if (rows.length > 1) {
+      return { needs_clarification: true, matches: rows.map((r: any) => ({ id: r.id, address: r.address || r.name })) }
+    }
+    propId = rows[0].id
+  }
+  // Build the patch.
+  const patch: Record<string, unknown> = {}
+  if (a.price !== undefined) patch.price = a.price
+  if (a.service !== undefined) patch.service = a.service
+  if (a.notes !== undefined) patch.notes = a.notes
+  if (Array.isArray(a.pickup_days)) patch.pickup_days = a.pickup_days
+  if (a.pickup_freq !== undefined) patch.pickup_frequency = a.pickup_freq
+  if (a.mark_reviewed === true) patch.needs_review = false
+  else if (a.needs_review !== undefined) patch.needs_review = a.needs_review
+  if (Object.keys(patch).length === 0) throw new Error("Nothing to change — specify a field to update or mark_reviewed.")
+  const [row] = await sbPatch(`properties?id=eq.${enc(propId)}`, patch)
+  if (!row) throw new Error("Property not found.")
+  return {
+    id: row.id,
+    address: row.address || row.name,
+    updated: Object.keys(patch),
+    needs_review: row.needs_review,
+  }
+}
+
+async function flagProperties(a: any) {
+  if (!a.by_customer && !a.by_customer_id && !a.by_tag && !a.address_contains) {
+    throw new Error("Tell me which properties to flag — by client, tag, or address.")
+  }
+  const ids = await resolvePropertyIds(a)
+  const want = a.needs_review !== false // default true
+  if (!ids.length) return { matched: 0, changed: 0, needs_review: want }
+  let changed = 0
+  for (let i = 0; i < ids.length; i += 100) {
+    const chunk = ids.slice(i, i + 100)
+    const rows = await sbPatch(`properties?id=in.(${chunk.join(",")})`, { needs_review: want })
+    changed += rows.length
+  }
+  return { matched: ids.length, changed, needs_review: want }
+}
+
 async function runTool(name: string, input: any): Promise<unknown> {
   switch (name) {
     case "find_clients": return await findClients(input)
+    case "list_needs_review": return await listNeedsReview(input)
+    case "edit_property": return await editProperty(input)
+    case "flag_properties": return await flagProperties(input)
     case "get_overview": return await getOverview()
     case "create_client": return await createClient(input)
     case "update_client": return await updateClient(input)
@@ -798,7 +937,7 @@ Deno.serve(async (req) => {
         if (block.type !== "tool_use") continue
         try {
           const out = await runTool(block.name, block.input)
-          if (block.name !== "find_clients" && block.name !== "get_overview" && block.name !== "list_routes") {
+          if (block.name !== "find_clients" && block.name !== "get_overview" && block.name !== "list_routes" && block.name !== "list_needs_review") {
             actions.push({ tool: block.name, result: out })
             await logForTool(block.name, out)
           }
