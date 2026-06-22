@@ -112,12 +112,17 @@ export async function loadRouteSlice(code = 'B', date = null) {
 
   const { data: props, error: pErr } = await supabase
     .from('properties')
-    .select('id, name, service, lat, lng')
+    .select('id, name, service, lat, lng, pickup_days, pickup_frequency, pickup_start_date')
   if (pErr) throw pErr
 
   const onRoute = new Set(stops.map((s) => s.propertyId))
+  // "Unrouted" means due on THIS date but not yet placed on the route — not the
+  // whole customer base. Properties scheduled for other days are added on demand
+  // via "+ Add stops". After a clean build this list is empty.
+  const isDue = (p) => (p.pickup_days || []).some((d) =>
+    scheduleHitsDate({ day_of_week: d, frequency: p.pickup_frequency || 'weekly', start_date: p.pickup_start_date || null, active: true }, date))
   const unrouted = props
-    .filter((p) => !onRoute.has(p.id))
+    .filter((p) => date && !onRoute.has(p.id) && isDue(p))
     .map((p) => ({
       id: `prop:${p.id}`,
       propertyId: p.id,
