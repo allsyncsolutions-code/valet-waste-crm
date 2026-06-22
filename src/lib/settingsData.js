@@ -30,6 +30,22 @@ export async function saveDepot({ name, address, lat, lng }) {
   if (error) throw error
 }
 
+// Save the editable SMS message templates (non-secret app_settings columns).
+export async function saveSmsTemplates(t) {
+  const { error } = await supabase
+    .from('app_settings')
+    .update({
+      company_name: (t.company_name || '').trim() || null,
+      sms_checkin_template: t.sms_checkin_template ?? null,
+      sms_checkout_template: t.sms_checkout_template ?? null,
+      sms_reminder_template: t.sms_reminder_template ?? null,
+      sms_invoice_template: t.sms_invoice_template ?? null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', 1)
+  if (error) throw error
+}
+
 // Free geocoding via OpenStreetMap Nominatim (no key). For light use only.
 export async function geocodeAddress(q) {
   const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`

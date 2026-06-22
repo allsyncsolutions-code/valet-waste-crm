@@ -88,8 +88,42 @@ export async function deleteSchedule(id) {
 export function subscribeSchedules(cb) {
   const channel = supabase
     .channel('schedules-live')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'properties' }, cb)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'pickup_schedules' }, cb)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'customers' }, cb)
     .subscribe()
   return () => supabase.removeChannel(channel)
+}
+
+// --- per-property pickup days (the source of truth for routing) --------------
+// The Schedules view and Dashboard read these so a single address can be
+// serviced on more than one weekday.
+export async function loadPropertyPickups() {
+  const { data, error } = await supabase
+    .from('properties')
+    .select('id, name, address, service, pickup_days, pickup_frequency, pickup_start_date, customer_id, customers(name,status)')
+    .order('name', { ascending: true })
+  if (error) throw error
+  return (data || []).map((p) => ({
+    id: p.id,
+    name: p.name,
+    address: p.address || '',
+    service: p.service || '',
+    days: p.pickup_days || [],
+    frequency: p.pickup_frequency || 'weekly',
+    startDate: p.pickup_start_date || null,
+    customerId: p.customer_id,
+    customerName: p.customers?.name || 'Unknown',
+    customerStatus: p.customers?.status || 'active',
+  }))
+}
+
+export async function savePropertyPickup(id, { days, frequency }) {
+  const ordered = DAYS.filter((d) => (days || []).includes(d))
+  const { error } = await supabase
+    .from('properties')
+    .update({ pickup_days: ordered, pickup_frequency: frequency || 'weekly' })
+    .eq('id', id)
+  if (error) throw error
+  logActivity({ type: 'schedule_updated', summary: `Updated pickup days`, entityType: 'property', entityId: id })
 }

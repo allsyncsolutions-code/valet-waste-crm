@@ -5,6 +5,10 @@
 import { supabase } from './supabaseClient.js'
 import { stripePaymentLink } from './stripeData.js'
 import { logActivity } from './activityData.js'
+import { loadSettings } from './settingsData.js'
+import { sendSms, renderTemplate } from './smsData.js'
+
+const DEFAULT_INVOICE_TPL = 'Hi {customerName}, invoice {invoiceNumber} for {total} is ready. Pay here: {payLink} — {companyName}'
 
 const money = (v) => '$' + Number(v || 0).toFixed(2)
 
@@ -39,6 +43,7 @@ function mapInvoice(row) {
     customerId: row.customer_id,
     customerName: row.customers?.name || '',
     customerEmail: row.customers?.email || '',
+    customerPhone: row.customers?.phone || '',
     customerAddress: row.customers?.address || '',
     number: row.number,
     status: row.status,
@@ -56,7 +61,7 @@ function mapInvoice(row) {
   }
 }
 
-const SELECT = '*, customers(name,email,address), invoice_line_items(*)'
+const SELECT = '*, customers(name,email,phone,address), invoice_line_items(*)'
 
 export async function loadInvoices() {
   const { data, error } = await supabase
@@ -168,6 +173,35 @@ export async function sendInvoiceLink(invoice) {
   })
   logActivity({ type: 'invoice_sent', summary: `Sent payment link for invoice ${invoice.number} (${money(invoice.total)})`, entityType: 'invoice', entityId: invoice.id })
   return d.url
+}
+
+// Text the customer their invoice: ensure a pay link exists, render the
+// invoice SMS template from settings, send via the sms edge function, and
+// mark the invoice sent. Mirrors the old app's purpose:"invoice" trigger.
+export async function textInvoice(invoice, customMessage) {
+  if (!invoice.customerPhone) throw new Error('This customer has no phone number on file.')
+
+  // Reuse the stored pay link, or mint one (also marks the invoice sent).
+  let payUrl = invoice.stripePaymentUrl
+  if (!payUrl) payUrl = await sendInvoiceLink(invoice)
+
+  const settings = await loadSettings().catch(() => null)
+  const tpl = (customMessage && customMessage.trim()) || settings?.sms_invoice_template || DEFAULT_INVOICE_TPL
+  const body = renderTemplate(tpl, {
+    customerName: invoice.customerName || 'there',
+    invoiceNumber: invoice.number,
+    total: money(invoice.total),
+    payLink: payUrl,
+    companyName: settings?.company_name || 'Valet Waste FL',
+  })
+
+  const r = await sendSms(invoice.customerPhone, body, { customerId: invoice.customerId, purpose: 'invoice' })
+
+  if (invoice.status === 'draft') {
+    await setInvoiceStatus(invoice.id, 'sent', { sent_at: new Date().toISOString() })
+  }
+  logActivity({ type: 'invoice_texted', summary: `Texted invoice ${invoice.number} to ${invoice.customerName || 'customer'}`, entityType: 'invoice', entityId: invoice.id })
+  return r
 }
 
 export function subscribeInvoices(cb) {

@@ -14,6 +14,10 @@ const FREQ = [
   ['on_call', 'On call'],
 ]
 const DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+const DAY_ABBR = { monday: 'Mon', tuesday: 'Tue', wednesday: 'Wed', thursday: 'Thu', friday: 'Fri', saturday: 'Sat', sunday: 'Sun' }
+// Order a property's days Mon→Sun for display.
+const orderDays = (days) => DAYS.filter((d) => (days || []).includes(d))
+const daysLabel = (days) => orderDays(days).map((d) => DAY_ABBR[d]).join(' · ')
 const CADENCE = [
   ['monthly', 'Monthly batch'],
   ['per_service', 'Per service'],
@@ -54,7 +58,7 @@ export default function Clients({ app }) {
   const [payErr, setPayErr] = useState(null)
   const [props, setProps] = useState([])
   const [editPid, setEditPid] = useState(null)
-  const [editP, setEditP] = useState({ address: '', service: '', notes: '' })
+  const [editP, setEditP] = useState({ address: '', service: '', notes: '', days: [], frequency: 'weekly' })
   const [pBusy, setPBusy] = useState(false)
 
   // Load the selected client's service properties.
@@ -130,14 +134,21 @@ export default function Clients({ app }) {
   }
   function startEditProp(p) {
     setEditPid(p.id)
-    setEditP({ address: p.address || '', service: p.service || '', notes: p.notes || '' })
+    setEditP({ address: p.address || '', service: p.service || '', notes: p.notes || '', days: p.pickup_days || [], frequency: p.pickup_frequency || 'weekly' })
   }
+  const toggleDay = (d) =>
+    setEditP((e) => ({ ...e, days: e.days.includes(d) ? e.days.filter((x) => x !== d) : [...e.days, d] }))
   async function saveProp(p) {
     if (pBusy) return
     setPBusy(true)
     setErr(null)
     try {
-      const patch = { service: editP.service.trim(), notes: editP.notes.trim() }
+      const patch = {
+        service: editP.service.trim(),
+        notes: editP.notes.trim(),
+        pickup_days: orderDays(editP.days),
+        pickup_frequency: editP.frequency,
+      }
       const addrChanged = editP.address.trim() !== (p.address || '')
       if (addrChanged) patch.address = editP.address.trim()
       await updateProperty(p.id, patch)
@@ -190,7 +201,7 @@ export default function Clients({ app }) {
       phone: form.phone.trim(),
       status: form.status,
       notes: form.notes.trim(),
-      pickup: { service: form.service.trim(), frequency: form.frequency, dayOfWeek: form.frequency === 'on_call' ? null : form.dayOfWeek },
+      pickup: { service: form.service.trim(), frequency: form.frequency, dayOfWeek: null },
       invoice: { cadence: form.cadence, amount: form.amount === '' ? null : Number(form.amount) },
     }
     try {
@@ -268,7 +279,7 @@ export default function Clients({ app }) {
                 <button onClick={app.openAssistant} style={{ background: '#fff', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 9, padding: '9px 13px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', flex: 'none' }}>✦ Ask AI</button>
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12, marginTop: 16 }}>
-                <Stat label="Pickup" value={cur.pickup ? `${freqLabel(cur.pickup.frequency)}${cur.pickup.dayOfWeek ? ' · ' + cap(cur.pickup.dayOfWeek) : ''}` : '—'} />
+                <Stat label="Pickup days" value={(() => { const ds = daysLabel([...new Set(props.flatMap((p) => p.pickup_days || []))]); return ds || '—' })()} />
                 <Stat label="Billing" value={cur.invoice ? cadenceLabel(cur.invoice.cadence) : '—'} />
                 <Stat label="Rate" value={cur.invoice && cur.invoice.amount != null ? `$${Number(cur.invoice.amount).toFixed(2)}` : '—'} mono />
               </div>
@@ -322,6 +333,18 @@ export default function Clients({ app }) {
                             <input value={editP.service} onChange={(e) => setEditP({ ...editP, service: e.target.value })} style={{ ...inp, fontSize: 13 }} placeholder="Service" />
                             <input value={editP.notes} onChange={(e) => setEditP({ ...editP, notes: e.target.value })} style={{ ...inp, fontSize: 13 }} placeholder="Bin location / notes" />
                           </div>
+                          <div style={{ fontSize: 10.5, color: '#7c8a82', fontFamily: MONO, letterSpacing: '.06em', marginTop: 2 }}>PICKUP DAYS</div>
+                          <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+                            {DAYS.map((d) => {
+                              const on = editP.days.includes(d)
+                              return (
+                                <button type="button" key={d} onClick={() => toggleDay(d)} style={{ flex: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 600, padding: '5px 9px', borderRadius: 7, border: `1px solid ${on ? '#1f7a4d' : '#dde2dd'}`, background: on ? '#e7f1eb' : '#fff', color: on ? '#1f7a4d' : '#7c8a82' }}>{DAY_ABBR[d]}</button>
+                              )
+                            })}
+                          </div>
+                          <select value={editP.frequency} onChange={(e) => setEditP({ ...editP, frequency: e.target.value })} style={{ ...inp, fontSize: 13 }}>
+                            {FREQ.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                          </select>
                           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
                             <button onClick={() => setEditPid(null)} disabled={pBusy} style={{ background: '#fff', border: '1px solid #dde2dd', color: '#5d6b63', borderRadius: 8, padding: '6px 12px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
                             <button onClick={() => saveProp(p)} disabled={pBusy} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 8, padding: '6px 14px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', opacity: pBusy ? 0.6 : 1 }}>{pBusy ? 'Saving…' : 'Save & re-geocode'}</button>
@@ -337,6 +360,15 @@ export default function Clients({ app }) {
                             </div>
                             <div style={{ fontSize: 12, color: '#7c8a82' }}>
                               {[p.service, p.notes].filter(Boolean).join(' · ') || '—'}
+                            </div>
+                            <div style={{ marginTop: 4 }}>
+                              {p.pickup_days && p.pickup_days.length ? (
+                                <span style={{ fontSize: 11, fontWeight: 700, fontFamily: MONO, color: '#1f7a4d', background: '#e7f1eb', padding: '2px 8px', borderRadius: 6, letterSpacing: '.04em' }}>
+                                  {daysLabel(p.pickup_days)}{p.pickup_frequency && p.pickup_frequency !== 'weekly' ? ` · ${freqLabel(p.pickup_frequency)}` : ''}
+                                </span>
+                              ) : (
+                                <span style={{ fontSize: 11, fontWeight: 600, fontFamily: MONO, color: '#c08a2e', background: '#fbf3e2', padding: '2px 8px', borderRadius: 6 }}>No pickup day</span>
+                              )}
                             </div>
                           </div>
                           {p.price != null && <div style={{ fontSize: 12.5, color: '#5d6b63', flex: 'none' }}>${Number(p.price).toFixed(2)}</div>}
@@ -395,19 +427,15 @@ export default function Clients({ app }) {
             </div>
             <Field label="Email"><input value={form.email} onChange={(e) => set({ email: e.target.value })} style={inp} type="email" /></Field>
 
-            <Divider>Pickup schedule</Divider>
+            <Divider>Pickup defaults</Divider>
             <Field label="Service"><input value={form.service} onChange={(e) => set({ service: e.target.value })} style={inp} placeholder="4yd dumpster x2" /></Field>
-            <div style={twoCol}>
-              <Field label="Frequency">
-                <select value={form.frequency} onChange={(e) => set({ frequency: e.target.value })} style={inp}>
-                  {FREQ.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-                </select>
-              </Field>
-              <Field label="Day">
-                <select value={form.dayOfWeek} onChange={(e) => set({ dayOfWeek: e.target.value })} style={inp} disabled={form.frequency === 'on_call'}>
-                  {DAYS.map((d) => <option key={d} value={d}>{cap(d)}</option>)}
-                </select>
-              </Field>
+            <Field label="Default frequency">
+              <select value={form.frequency} onChange={(e) => set({ frequency: e.target.value })} style={inp}>
+                {FREQ.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+              </select>
+            </Field>
+            <div style={{ fontSize: 11.5, color: '#7c8a82', margin: '-4px 0 6px', lineHeight: 1.5 }}>
+              Pickup <b>days</b> are set per address — open the client and use <b>Edit</b> on each property (an address can run more than one day a week).
             </div>
 
             <Divider>Invoice schedule</Divider>

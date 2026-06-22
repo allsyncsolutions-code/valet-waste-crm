@@ -42,13 +42,30 @@ export function scheduleHitsDate(sched, dateStr) {
   }
 }
 
+// The pickup day(s) now live on each property (properties.pickup_days), so a
+// property can be serviced on more than one weekday. This returns one synthetic
+// schedule row per (property, day) — the shape scheduleHitsDate expects — so the
+// day dots, "build from schedules", and dashboard counts all stay property-aware.
 export async function loadActiveSchedules() {
   const { data, error } = await supabase
-    .from('pickup_schedules')
-    .select('customer_id, day_of_week, frequency, start_date, active')
-    .eq('active', true)
+    .from('properties')
+    .select('id, customer_id, service, pickup_days, pickup_frequency, pickup_start_date')
   if (error) throw error
-  return data || []
+  const rows = []
+  for (const p of data || []) {
+    for (const day of p.pickup_days || []) {
+      rows.push({
+        property_id: p.id,
+        customer_id: p.customer_id,
+        service: p.service || '',
+        day_of_week: day,
+        frequency: p.pickup_frequency || 'weekly',
+        start_date: p.pickup_start_date || null,
+        active: true,
+      })
+    }
+  }
+  return rows
 }
 
 // DB row (with joined property) -> the shape the UI uses.
@@ -147,36 +164,25 @@ export async function addStopToRoute(routeId, property, seq) {
 }
 
 // Populate the route FOR A SPECIFIC DATE from recurring schedules: every
-// property whose client has a schedule that lands on `date` (weekday + start
-// date + frequency) is added as a stop, skipping any already on the route.
+// property whose own pickup day(s) land on `date` (weekday + start date +
+// frequency) is added as a stop, skipping any already on the route. Because the
+// day lives on the property, a client's Tuesday and Friday addresses correctly
+// split across the Tuesday and Friday routes.
 export async function buildRouteFromSchedules(code = 'B', date = null) {
   if (!date) throw new Error('A date is required.')
 
-  // Which clients are due on this date?
+  // Which properties are due on this date?
   const scheds = await loadActiveSchedules()
   const due = scheds.filter((s) => scheduleHitsDate(s, date))
-  const custIds = [...new Set(due.map((s) => s.customer_id).filter(Boolean))]
-  if (!custIds.length) return { added: 0, route: null, noSchedules: true }
+  const propIds = [...new Set(due.map((s) => s.property_id).filter(Boolean))]
+  if (!propIds.length) return { added: 0, route: null, noSchedules: true }
 
-  // Ensure the route for this date exists.
-  let { data: route, error: rErr } = await supabase
-    .from('routes').select('id, code, name').eq('code', code).eq('service_date', date).maybeSingle()
-  if (rErr) throw rErr
-  if (!route) {
-    // Carry the remembered default driver forward onto this new date's route.
-    const defDriver = await getRouteDefault(code).catch(() => null)
-    const defName = await driverDisplayName(defDriver)
-    const { data: r, error } = await supabase
-      .from('routes')
-      .insert({ code, name: `Route ${code}`, service_date: date, driver_id: defDriver, driver: defName })
-      .select('id, code, name').single()
-    if (error) throw error
-    route = r
-  }
+  // Ensure the route for this date exists (carries the default driver forward).
+  const route = await ensureRoute(code, date)
 
-  // Their properties.
+  // The due properties (with coords for the map / optimizer).
   const { data: props, error: pErr } = await supabase
-    .from('properties').select('id, service, lat, lng').in('customer_id', custIds)
+    .from('properties').select('id, service, lat, lng').in('id', propIds)
   if (pErr) throw pErr
 
   // Skip properties already on the route; append the rest.

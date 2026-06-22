@@ -3,7 +3,14 @@ import { MONO } from '../data.js'
 import { hasSupabase } from '../lib/supabaseClient.js'
 import { loadCustomers, subscribeCustomers } from '../lib/customersData.js'
 import { loadInvoices, subscribeInvoices, round2 } from '../lib/invoicesData.js'
-import { loadSchedules, subscribeSchedules, freqLabel } from '../lib/schedulesData.js'
+import { loadPropertyPickups, subscribeSchedules, freqLabel } from '../lib/schedulesData.js'
+import { scheduleHitsDate } from '../lib/routesData.js'
+
+// Local YYYY-MM-DD for "today" (matches how routes key their service_date).
+const todayKey = () => {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
 
 const money = (v) => '$' + Number(v || 0).toFixed(2)
 const initialsOf = (name) =>
@@ -27,7 +34,7 @@ export default function Dashboard({ app }) {
   const [err, setErr] = useState(null)
 
   async function refresh() {
-    const [c, i, s] = await Promise.all([loadCustomers(), loadInvoices(), loadSchedules()])
+    const [c, i, s] = await Promise.all([loadCustomers(), loadInvoices(), loadPropertyPickups()])
     setCustomers(c)
     setInvoices(i)
     setSchedules(s)
@@ -50,8 +57,12 @@ export default function Dashboard({ app }) {
 
   const stats = useMemo(() => {
     const activeClients = customers.filter((c) => c.status === 'active').length
-    const todayDow = DOW[new Date().getDay()]
-    const todayPickups = schedules.filter((s) => s.active && s.dayOfWeek === todayDow)
+    const today = todayKey()
+    // A property is due today if any of its pickup days lands on today's date
+    // (respecting frequency / start date) and its client isn't paused.
+    const todayPickups = schedules.filter(
+      (p) => p.customerStatus !== 'paused' && (p.days || []).some((d) => scheduleHitsDate({ day_of_week: d, frequency: p.frequency, start_date: p.startDate, active: true }, today))
+    )
     const outstanding = round2(invoices.filter((i) => i.status === 'sent').reduce((a, i) => a + i.total, 0))
     const collected = round2(invoices.filter((i) => i.status === 'paid').reduce((a, i) => a + i.total, 0))
     const drafts = invoices.filter((i) => i.status === 'draft').length
@@ -95,7 +106,7 @@ export default function Dashboard({ app }) {
                   <div style={avatar}>{initialsOf(s.customerName)}</div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.customerName}</div>
-                    <div style={{ fontSize: 11.5, color: '#7c8a82', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.service || 'Pickup'}</div>
+                    <div style={{ fontSize: 11.5, color: '#7c8a82', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.address || s.service || 'Pickup'}</div>
                   </div>
                   <span style={{ flex: 'none', fontFamily: MONO, fontSize: 10, color: '#1f7a4d', background: '#e7f1eb', padding: '2px 8px', borderRadius: 6 }}>{freqLabel(s.frequency)}</span>
                 </div>

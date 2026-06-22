@@ -1,8 +1,19 @@
 import { useEffect, useState } from 'react'
 import { MONO } from '../data.js'
 import { listTags, createTag, updateTag, deleteTag, tagUsageCounts, subscribeTags, TAG_COLORS } from '../lib/tagsData.js'
-import { loadSettings, saveDepot, geocodeAddress, subscribeSettings } from '../lib/settingsData.js'
+import { loadSettings, saveDepot, geocodeAddress, subscribeSettings, saveSmsTemplates } from '../lib/settingsData.js'
 import { stripeStatus, stripeOnboard } from '../lib/stripeData.js'
+import { getSmsConfig, saveSmsConfig, sendTestSms, listSmsSubscriptions, ensureSmsSubscription } from '../lib/smsData.js'
+
+const EMPTY_SMS = {
+  sms_enabled: false,
+  sms_from_number: '',
+  rc_server_url: 'https://platform.ringcentral.com',
+  rc_client_id: '',
+  rc_client_secret: '',
+  rc_jwt: '',
+  rc_webhook_verification_token: '',
+}
 
 export default function Settings({ app }) {
   const isMobile = app.isMobile
@@ -19,6 +30,17 @@ export default function Settings({ app }) {
   const [geoBusy, setGeoBusy] = useState(false)
   const [depotSaving, setDepotSaving] = useState(false)
   const [stripe, setStripe] = useState({ loading: true, data: null, busy: false, err: null })
+  const [sms, setSms] = useState(EMPTY_SMS)
+  const [smsFlags, setSmsFlags] = useState({ rc_secret_set: false, rc_jwt_set: false, rc_webhook_token_set: false })
+  const [smsWebhookUrl, setSmsWebhookUrl] = useState('')
+  const [smsMsg, setSmsMsg] = useState(null)
+  const [smsSaving, setSmsSaving] = useState(false)
+  const [smsTestTo, setSmsTestTo] = useState('')
+  const [smsTesting, setSmsTesting] = useState(false)
+  const [smsSub, setSmsSub] = useState({ loading: false, list: [], busy: false })
+  const [tpl, setTpl] = useState({ company_name: '', sms_checkin_template: '', sms_checkout_template: '', sms_reminder_template: '', sms_invoice_template: '' })
+  const [tplSaving, setTplSaving] = useState(false)
+  const [tplMsg, setTplMsg] = useState(null)
 
   async function refresh() {
     const [t, c] = await Promise.all([listTags(), tagUsageCounts()])
@@ -33,7 +55,16 @@ export default function Settings({ app }) {
 
   useEffect(() => {
     const load = () => loadSettings().then((s) => {
-      if (s) setDepot({ name: s.depot_name || '', address: s.depot_address || '', lat: s.depot_lat ?? '', lng: s.depot_lng ?? '' })
+      if (s) {
+        setDepot({ name: s.depot_name || '', address: s.depot_address || '', lat: s.depot_lat ?? '', lng: s.depot_lng ?? '' })
+        setTpl({
+          company_name: s.company_name || '',
+          sms_checkin_template: s.sms_checkin_template || '',
+          sms_checkout_template: s.sms_checkout_template || '',
+          sms_reminder_template: s.sms_reminder_template || '',
+          sms_invoice_template: s.sms_invoice_template || '',
+        })
+      }
     }).catch(() => {})
     load()
     const unsub = subscribeSettings(load)
@@ -97,6 +128,90 @@ export default function Settings({ app }) {
       else throw new Error('Could not start Stripe onboarding.')
     } catch (e) {
       setStripe((s) => ({ ...s, busy: false, err: e.message || String(e) }))
+    }
+  }
+
+  useEffect(() => {
+    getSmsConfig().then((c) => {
+      setSms({
+        sms_enabled: !!c.sms_enabled,
+        sms_from_number: c.sms_from_number || '',
+        rc_server_url: c.rc_server_url || 'https://platform.ringcentral.com',
+        rc_client_id: c.rc_client_id || '',
+        rc_client_secret: '',
+        rc_jwt: '',
+        rc_webhook_verification_token: '',
+      })
+      setSmsFlags({ rc_secret_set: !!c.rc_secret_set, rc_jwt_set: !!c.rc_jwt_set, rc_webhook_token_set: !!c.rc_webhook_token_set })
+      setSmsWebhookUrl(c.webhook_url || '')
+      if (c.sms_enabled) refreshSmsSubs()
+    }).catch((e) => setSmsMsg({ type: 'err', text: e.message || String(e) }))
+  }, [])
+
+  async function saveSms(e) {
+    e.preventDefault()
+    setSmsSaving(true)
+    setSmsMsg(null)
+    try {
+      await saveSmsConfig(sms)
+      setSmsMsg({ type: 'ok', text: 'Saved.' })
+      // re-pull so the masked/“saved” placeholders reflect what's now stored
+      const c = await getSmsConfig()
+      setSmsFlags({ rc_secret_set: !!c.rc_secret_set, rc_jwt_set: !!c.rc_jwt_set, rc_webhook_token_set: !!c.rc_webhook_token_set })
+      setSms((s) => ({ ...s, rc_client_secret: '', rc_jwt: '' }))
+    } catch (e2) {
+      setSmsMsg({ type: 'err', text: e2.message || String(e2) })
+    } finally {
+      setSmsSaving(false)
+    }
+  }
+  async function refreshSmsSubs() {
+    setSmsSub((s) => ({ ...s, loading: true }))
+    try {
+      const r = await listSmsSubscriptions()
+      setSmsSub((s) => ({ ...s, loading: false, list: r.subscriptions || [] }))
+    } catch (e) {
+      setSmsSub((s) => ({ ...s, loading: false }))
+      setSmsMsg({ type: 'err', text: e.message || String(e) })
+    }
+  }
+  async function connectInbound() {
+    setSmsSub((s) => ({ ...s, busy: true }))
+    setSmsMsg(null)
+    try {
+      await ensureSmsSubscription()
+      setSmsMsg({ type: 'ok', text: 'Inbound replies connected — RingCentral will now POST customer texts to your webhook.' })
+      await refreshSmsSubs()
+    } catch (e) {
+      setSmsMsg({ type: 'err', text: e.message || String(e) })
+    } finally {
+      setSmsSub((s) => ({ ...s, busy: false }))
+    }
+  }
+  async function saveTemplates() {
+    setTplSaving(true)
+    setTplMsg(null)
+    try {
+      await saveSmsTemplates(tpl)
+      setTplMsg({ type: 'ok', text: 'Templates saved.' })
+    } catch (e) {
+      setTplMsg({ type: 'err', text: e.message || String(e) })
+    } finally {
+      setTplSaving(false)
+    }
+  }
+  async function testSms() {
+    const to = smsTestTo.trim()
+    if (!to) { setSmsMsg({ type: 'err', text: 'Enter a number to send a test to.' }); return }
+    setSmsTesting(true)
+    setSmsMsg(null)
+    try {
+      const r = await sendTestSms(to)
+      setSmsMsg({ type: 'ok', text: `Test sent via ${r.provider || 'SMS'}.` })
+    } catch (e) {
+      setSmsMsg({ type: 'err', text: e.message || String(e) })
+    } finally {
+      setSmsTesting(false)
     }
   }
 
@@ -185,6 +300,104 @@ export default function Settings({ app }) {
         )}
       </div>
 
+      {/* text messaging (SMS) */}
+      <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '20px 22px', marginBottom: 16 }}>
+        <div style={{ fontWeight: 700, fontSize: 16 }}>Text messaging (SMS)</div>
+        <div style={{ fontSize: 12.5, color: '#7c8a82', marginTop: 3, marginBottom: 16 }}>
+          Connect your RingCentral developer app to send reminders, invoices, and check-in texts — and receive customer replies. When enabled, RingCentral takes priority over Telnyx for all outbound SMS.
+        </div>
+        {smsMsg && (
+          <div style={{ background: smsMsg.type === 'ok' ? '#eef7f1' : '#fdecea', border: '1px solid ' + (smsMsg.type === 'ok' ? '#cfe7da' : '#f3b7b0'), color: smsMsg.type === 'ok' ? '#1f7a4d' : '#9a2c1e', borderRadius: 10, padding: '9px 12px', fontSize: 12.5, marginBottom: 14 }}>{smsMsg.text}</div>
+        )}
+        <form onSubmit={saveSms}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, cursor: 'pointer' }}>
+            <span
+              onClick={() => setSms((s) => ({ ...s, sms_enabled: !s.sms_enabled }))}
+              style={{ width: 42, height: 24, borderRadius: 12, background: sms.sms_enabled ? '#22b06b' : '#cfd6d0', position: 'relative', flex: 'none', transition: 'background .15s' }}
+            >
+              <span style={{ position: 'absolute', top: 3, left: sms.sms_enabled ? 21 : 3, width: 18, height: 18, borderRadius: '50%', background: '#fff', transition: 'left .15s' }} />
+            </span>
+            <span style={{ fontSize: 13.5, fontWeight: 600 }}>Enable RingCentral SMS</span>
+          </label>
+
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 11 }}>
+            <SField label="From Number"><input value={sms.sms_from_number} onChange={(e) => setSms((s) => ({ ...s, sms_from_number: e.target.value }))} style={inp} placeholder="(904) 902-7767" /></SField>
+            <SField label="Server URL">
+              <select value={sms.rc_server_url} onChange={(e) => setSms((s) => ({ ...s, rc_server_url: e.target.value }))} style={inp}>
+                <option value="https://platform.ringcentral.com">Production (platform.ringcentral.com)</option>
+                <option value="https://platform.devtest.ringcentral.com">Sandbox (platform.devtest.ringcentral.com)</option>
+              </select>
+            </SField>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 11 }}>
+            <SField label="Client ID"><input value={sms.rc_client_id} onChange={(e) => setSms((s) => ({ ...s, rc_client_id: e.target.value }))} style={inp} placeholder="Client ID" /></SField>
+            <SField label="Client Secret"><input type="password" value={sms.rc_client_secret} onChange={(e) => setSms((s) => ({ ...s, rc_client_secret: e.target.value }))} style={inp} placeholder={smsFlags.rc_secret_set ? 'Secret saved — enter new value to replace' : 'Client Secret'} /></SField>
+          </div>
+
+          <SField label="JWT Token">
+            <textarea value={sms.rc_jwt} onChange={(e) => setSms((s) => ({ ...s, rc_jwt: e.target.value }))} style={{ ...inp, minHeight: 84, fontFamily: MONO, fontSize: 12.5, resize: 'vertical' }} placeholder={smsFlags.rc_jwt_set ? 'JWT saved — paste a new one to replace' : 'Paste your RingCentral JWT credential'} />
+          </SField>
+
+          <SField label="Webhook Verification Token (optional)">
+            <input value={sms.rc_webhook_verification_token} onChange={(e) => setSms((s) => ({ ...s, rc_webhook_verification_token: e.target.value }))} style={inp} placeholder={smsFlags.rc_webhook_token_set ? 'Saved — enter new value to replace' : 'Require a Verification-Token header on inbound webhooks'} />
+          </SField>
+
+          <button type="submit" disabled={smsSaving} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: smsSaving ? 0.6 : 1 }}>{smsSaving ? 'Saving…' : 'Save RingCentral Settings'}</button>
+        </form>
+
+        {/* inbound replies (webhook subscription) */}
+        <div style={{ borderTop: '1px solid #f0f2ef', marginTop: 18, paddingTop: 16 }}>
+          <div style={{ fontSize: 12.5, color: '#5d6b63', fontWeight: 600, marginBottom: 4 }}>Inbound replies</div>
+          <div style={{ fontSize: 12, color: '#7c8a82', marginBottom: 10 }}>
+            Connect once and the app keeps the RingCentral webhook subscription alive automatically — no manual setup in the developer portal.
+          </div>
+          {smsWebhookUrl && (
+            <div style={{ background: '#f7f9f7', border: '1px solid #e6eae6', borderRadius: 9, padding: '9px 12px', marginBottom: 10 }}>
+              <div style={{ fontSize: 11, color: '#9aa69e', fontWeight: 600, marginBottom: 2 }}>Webhook URL</div>
+              <div style={{ fontFamily: MONO, fontSize: 11.5, color: '#1f7a4d', wordBreak: 'break-all' }}>{smsWebhookUrl}</div>
+            </div>
+          )}
+          {smsSub.list.length > 0 ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 10 }}>
+              <span style={{ width: 9, height: 9, borderRadius: '50%', background: '#22b06b', flex: 'none' }} />
+              <div style={{ fontSize: 12.5, color: '#5d6b63' }}>
+                {smsSub.list.length} active subscription{smsSub.list.length === 1 ? '' : 's'}
+                {smsSub.list[0]?.expirationTime ? ` — renews before ${new Date(smsSub.list[0].expirationTime).toLocaleDateString()}` : ''}
+              </div>
+            </div>
+          ) : (
+            <div style={{ fontSize: 12.5, color: '#9aa69e', marginBottom: 10 }}>{smsSub.loading ? 'Checking…' : 'Not connected yet.'}</div>
+          )}
+          <button type="button" onClick={connectInbound} disabled={smsSub.busy} style={{ background: '#fff', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 9, padding: '9px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: smsSub.busy ? 0.6 : 1 }}>{smsSub.busy ? 'Connecting…' : smsSub.list.length ? 'Reconnect / refresh' : 'Connect inbound replies'}</button>
+        </div>
+
+        <div style={{ borderTop: '1px solid #f0f2ef', marginTop: 18, paddingTop: 16 }}>
+          <div style={{ fontSize: 12.5, color: '#5d6b63', fontWeight: 600, marginBottom: 8 }}>Send a test text</div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+            <div style={{ flex: 1, minWidth: 180 }}><input value={smsTestTo} onChange={(e) => setSmsTestTo(e.target.value)} style={inp} placeholder="(555) 123-4567" /></div>
+            <button type="button" onClick={testSms} disabled={smsTesting} style={{ flex: 'none', background: '#fff', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 9, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: smsTesting ? 0.6 : 1 }}>{smsTesting ? 'Sending…' : 'Send test'}</button>
+          </div>
+        </div>
+      </div>
+
+      {/* message templates */}
+      <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '20px 22px', marginBottom: 16 }}>
+        <div style={{ fontWeight: 700, fontSize: 16 }}>Message templates</div>
+        <div style={{ fontSize: 12.5, color: '#7c8a82', marginTop: 3, marginBottom: 14 }}>
+          The text customers receive for each event. Use placeholders: <span style={{ fontFamily: MONO, fontSize: 11.5 }}>{'{customerName} {serviceType} {address} {companyName} {invoiceNumber} {total} {payLink}'}</span>
+        </div>
+        {tplMsg && (
+          <div style={{ background: tplMsg.type === 'ok' ? '#eef7f1' : '#fdecea', border: '1px solid ' + (tplMsg.type === 'ok' ? '#cfe7da' : '#f3b7b0'), color: tplMsg.type === 'ok' ? '#1f7a4d' : '#9a2c1e', borderRadius: 10, padding: '9px 12px', fontSize: 12.5, marginBottom: 14 }}>{tplMsg.text}</div>
+        )}
+        <SField label="Company name (for {companyName})"><input value={tpl.company_name} onChange={(e) => setTpl((t) => ({ ...t, company_name: e.target.value }))} style={inp} placeholder="Valet Waste FL" /></SField>
+        <TplField label="Invoice text" value={tpl.sms_invoice_template} onChange={(v) => setTpl((t) => ({ ...t, sms_invoice_template: v }))} />
+        <TplField label="Check-in (tech arriving)" value={tpl.sms_checkin_template} onChange={(v) => setTpl((t) => ({ ...t, sms_checkin_template: v }))} />
+        <TplField label="Check-out (service complete)" value={tpl.sms_checkout_template} onChange={(v) => setTpl((t) => ({ ...t, sms_checkout_template: v }))} />
+        <TplField label="Service reminder" value={tpl.sms_reminder_template} onChange={(v) => setTpl((t) => ({ ...t, sms_reminder_template: v }))} />
+        <button type="button" onClick={saveTemplates} disabled={tplSaving} style={{ marginTop: 4, background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: tplSaving ? 0.6 : 1 }}>{tplSaving ? 'Saving…' : 'Save templates'}</button>
+      </div>
+
       {/* tags */}
       <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '20px 22px' }}>
         <div style={{ fontWeight: 700, fontSize: 16 }}>Tags</div>
@@ -240,6 +453,15 @@ function Palette({ onPick }) {
         <button key={c} onClick={() => onPick(c)} title={c} style={{ width: 24, height: 24, borderRadius: '50%', background: c, border: '2px solid #fff', boxShadow: '0 0 0 1px #dde2dd', cursor: 'pointer' }} />
       ))}
     </div>
+  )
+}
+
+function TplField({ label, value, onChange }) {
+  return (
+    <label style={{ display: 'block', marginBottom: 12 }}>
+      <div style={{ fontSize: 11.5, color: '#5d6b63', marginBottom: 5, fontWeight: 500 }}>{label}</div>
+      <textarea value={value} onChange={(e) => onChange(e.target.value)} style={{ width: '100%', border: '1px solid #dde2dd', background: '#fff', borderRadius: 9, padding: '10px 12px', fontSize: 13.5, outline: 'none', boxSizing: 'border-box', minHeight: 62, resize: 'vertical', lineHeight: 1.4 }} />
+    </label>
   )
 }
 
