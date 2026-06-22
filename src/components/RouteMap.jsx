@@ -52,7 +52,10 @@ export default function RouteMap({ depot, stops, height = 460 }) {
       .addTo(layer)
 
     const pts = [[depot.lat, depot.lng]]
-    stops.forEach((s) => {
+    // Only map stops with real coordinates — an un-geocoded property (null
+    // lat/lng) would otherwise throw "Invalid LatLng" and blank the page.
+    const located = stops.filter((s) => Number.isFinite(s.lat) && Number.isFinite(s.lng))
+    located.forEach((s) => {
       const meta = STATUS_META[s.status] || STATUS_META.pending
       pts.push([s.lat, s.lng])
       L.marker([s.lat, s.lng], {

@@ -526,7 +526,6 @@ export default function RoutesView({ app }) {
           <button onClick={openMass} style={ghostBtn}>+ Add stops</button>
           <button onClick={handleCopyPrevious} disabled={copying} style={{ ...ghostBtn, opacity: copying ? 0.6 : 1 }}>{copying ? 'Copying…' : `Copy last ${selDow}`}</button>
           <button onClick={handleBuildFromSchedules} disabled={building} style={{ ...ghostBtn, opacity: building ? 0.6 : 1 }}>{building ? 'Building…' : 'Build from schedules'}</button>
-          <button onClick={() => refresh().catch((e) => setErr(e.message))} style={ghostBtn}>Reload</button>
           <button onClick={handleOptimize} disabled={loading || !stops.length} style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'linear-gradient(135deg,#1f7a4d,#155e3a)', color: '#fff', border: 'none', borderRadius: 10, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: loading ? 'default' : 'pointer', opacity: loading || !stops.length ? 0.6 : 1 }}>
             <span>✦</span> Optimize
           </button>

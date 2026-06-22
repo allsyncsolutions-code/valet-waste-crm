@@ -163,44 +163,69 @@ export async function addStopToRoute(routeId, property, seq) {
   return data.id
 }
 
-// Populate the route FOR A SPECIFIC DATE from recurring schedules: every
-// property whose own pickup day(s) land on `date` (weekday + start date +
-// frequency) is added as a stop, skipping any already on the route. Because the
-// day lives on the property, a client's Tuesday and Friday addresses correctly
-// split across the Tuesday and Friday routes.
+// Sync the route FOR A SPECIFIC DATE to its recurring schedules. This is
+// self-correcting: every property whose own pickup day(s) land on `date`
+// (weekday + start date + frequency) is added, and any recurring stop that is
+// NOT due that day is removed — so a client's Tuesday and Friday addresses stay
+// on the right routes and stale stops can't pile up. Preserved on removal:
+//   - one-off / unscheduled stops (property has no pickup_days) — manual adds
+//   - stops already checked in or completed (status 'enroute' / 'done')
 export async function buildRouteFromSchedules(code = 'B', date = null) {
   if (!date) throw new Error('A date is required.')
 
   // Which properties are due on this date?
   const scheds = await loadActiveSchedules()
   const due = scheds.filter((s) => scheduleHitsDate(s, date))
-  const propIds = [...new Set(due.map((s) => s.property_id).filter(Boolean))]
-  if (!propIds.length) return { added: 0, route: null, noSchedules: true }
+  const dueIds = new Set(due.map((s) => s.property_id).filter(Boolean))
 
-  // Ensure the route for this date exists (carries the default driver forward).
-  const route = await ensureRoute(code, date)
+  // Find the route for this date; only create one if there's something to do.
+  let { data: route, error: rErr } = await supabase
+    .from('routes').select('id').eq('code', code).eq('service_date', date).maybeSingle()
+  if (rErr) throw rErr
+  if (!dueIds.size && !route) return { added: 0, removed: 0, route: null, noSchedules: true }
+  if (!route) route = await ensureRoute(code, date)
 
-  // The due properties (with coords for the map / optimizer).
-  const { data: props, error: pErr } = await supabase
-    .from('properties').select('id, service, lat, lng').in('id', propIds)
-  if (pErr) throw pErr
-
-  // Skip properties already on the route; append the rest.
+  // Current stops, with each property's schedule + work status.
   const { data: existing, error: eErr } = await supabase
-    .from('route_stops').select('property_id, seq').eq('route_id', route.id)
+    .from('route_stops')
+    .select('id, property_id, seq, status, properties(pickup_days)')
+    .eq('route_id', route.id)
   if (eErr) throw eErr
-  const have = new Set((existing || []).map((e) => e.property_id))
-  let seq = (existing || []).reduce((m, e) => Math.max(m, e.seq || 0), 0)
-  const toAdd = (props || []).filter((p) => !have.has(p.id))
-  if (toAdd.length) {
-    const rows = toAdd.map((p) => ({
+  const existingRows = existing || []
+
+  // Remove PENDING recurring stops that aren't due today.
+  const removeRows = existingRows.filter((r) => {
+    if (r.status !== 'pending') return false              // keep in-progress / done
+    const days = r.properties?.pickup_days || []
+    if (!days.length) return false                        // keep one-offs / unscheduled
+    return !dueIds.has(r.property_id)                      // recurring but not due today
+  })
+  if (removeRows.length) {
+    const { error } = await supabase.from('route_stops').delete().in('id', removeRows.map((r) => r.id))
+    if (error) throw error
+  }
+
+  // Add due properties not already on the route.
+  const kept = existingRows.filter((r) => !removeRows.includes(r))
+  const have = new Set(kept.map((r) => r.property_id))
+  const addIds = [...dueIds].filter((id) => !have.has(id))
+  let added = 0
+  if (addIds.length) {
+    const { data: props, error: pErr } = await supabase
+      .from('properties').select('id, service, lat, lng').in('id', addIds)
+    if (pErr) throw pErr
+    let seq = kept.reduce((m, r) => Math.max(m, r.seq || 0), 0)
+    const rows = (props || []).map((p) => ({
       route_id: route.id, property_id: p.id, seq: ++seq,
       status: 'pending', service: p.service || null, lat: p.lat, lng: p.lng,
     }))
-    const { error } = await supabase.from('route_stops').insert(rows)
-    if (error) throw error
+    if (rows.length) {
+      const { error } = await supabase.from('route_stops').insert(rows)
+      if (error) throw error
+      added = rows.length
+    }
   }
-  return { added: toAdd.length, route }
+  return { added, removed: removeRows.length, route }
 }
 
 // --- driver assignment -----------------------------------------------------
