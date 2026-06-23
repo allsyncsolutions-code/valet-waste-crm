@@ -133,7 +133,10 @@ export default function Schedule({ app }) {
                   onClick={() => setSelId(sel ? null : p.id)}
                   style={{ display: 'grid', gridTemplateColumns: cols, gap: 10, padding: '8px 14px', borderBottom: '1px solid #f1f3f0', alignItems: 'center', cursor: 'pointer', background: sel ? '#eef5f0' : '#fff', fontSize: 13 }}
                 >
-                  <div style={{ minWidth: 0, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.address || p.name}</div>
+                  <div style={{ minWidth: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ minWidth: 0, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.address || p.name}</span>
+                    {p.needsReview && <span title="Flagged for review" style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#c0492f', background: '#fbeae6', padding: '1px 5px', borderRadius: 4, letterSpacing: '.03em' }}>⚠ REVIEW</span>}
+                  </div>
                   {!isMobile && <div style={{ minWidth: 0, color: '#5d6b63', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.customerName}</div>}
                   {!isMobile && <div style={{ minWidth: 0, color: '#7c8a82', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.service || '—'}</div>}
                   <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>

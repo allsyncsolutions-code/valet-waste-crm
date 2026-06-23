@@ -585,7 +585,10 @@ export default function RoutesView({ app }) {
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontWeight: 600, fontSize: 13.5 }}>{st.name}</div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <span style={{ fontWeight: 600, fontSize: 13.5 }}>{st.name}</span>
+                          {st.needsReview && <span title="Flagged for review" style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#c0492f', background: '#fbeae6', padding: '1px 5px', borderRadius: 4, letterSpacing: '.03em' }}>⚠ REVIEW</span>}
+                        </div>
                         <div style={{ fontSize: 11.5, color: '#7c8a82' }}>{st.service}</div>
                       </div>
                       <div style={{ textAlign: 'right', flex: 'none' }}>
@@ -623,7 +626,10 @@ export default function RoutesView({ app }) {
               {unrouted.map((st) => (
                 <div key={st.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 9px', border: '1px dashed #e2cfa6', borderRadius: 9, marginBottom: 7, background: '#fdf8ef' }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontWeight: 600, fontSize: 12.5 }}>{st.name}</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ fontWeight: 600, fontSize: 12.5 }}>{st.name}</span>
+                      {st.needsReview && <span title="Flagged for review" style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#c0492f', background: '#fbeae6', padding: '1px 5px', borderRadius: 4, letterSpacing: '.03em' }}>⚠ REVIEW</span>}
+                    </div>
                     <div style={{ fontSize: 11, color: '#9a7b3e' }}>{st.service}{st.window ? ` · ${st.window}` : ''}</div>
                   </div>
                   <button onClick={() => handleAdd(st)} style={{ flex: 'none', background: '#c08a2e', color: '#fff', border: 'none', borderRadius: 7, padding: '6px 11px', fontSize: 11.5, fontWeight: 600, cursor: 'pointer' }}>+ Add</button>
@@ -665,7 +671,10 @@ export default function RoutesView({ app }) {
                   <label key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '9px 8px', borderBottom: '1px solid #f1f3f0', cursor: 'pointer' }}>
                     <input type="checkbox" checked={on} onChange={() => toggleMass(p.id)} style={{ width: 16, height: 16, accentColor: '#1f7a4d', flex: 'none' }} />
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontWeight: 600, fontSize: 13.5 }}>{p.name}</div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ fontWeight: 600, fontSize: 13.5 }}>{p.name}</span>
+                        {p.needsReview && <span title="Flagged for review" style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#c0492f', background: '#fbeae6', padding: '1px 5px', borderRadius: 4, letterSpacing: '.03em' }}>⚠ REVIEW</span>}
+                      </div>
                       <div style={{ fontSize: 11.5, color: '#7c8a82', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                         {[p.customerName, p.address || p.service].filter(Boolean).join(' · ')}
                       </div>

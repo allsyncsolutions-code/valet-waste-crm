@@ -101,7 +101,7 @@ export function subscribeSchedules(cb) {
 export async function loadPropertyPickups() {
   const { data, error } = await supabase
     .from('properties')
-    .select('id, name, address, service, pickup_days, pickup_frequency, pickup_start_date, customer_id, customers(name,status)')
+    .select('id, name, address, service, pickup_days, pickup_frequency, pickup_start_date, needs_review, customer_id, customers(name,status)')
     .order('name', { ascending: true })
   if (error) throw error
   return (data || []).map((p) => ({
@@ -112,6 +112,7 @@ export async function loadPropertyPickups() {
     days: p.pickup_days || [],
     frequency: p.pickup_frequency || 'weekly',
     startDate: p.pickup_start_date || null,
+    needsReview: !!p.needs_review,
     customerId: p.customer_id,
     customerName: p.customers?.name || 'Unknown',
     customerStatus: p.customers?.status || 'active',

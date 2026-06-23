@@ -80,6 +80,7 @@ function mapStop(row) {
     lat: row.lat ?? row.properties?.lat,
     lng: row.lng ?? row.properties?.lng,
     name: row.properties?.name || 'Unknown',
+    needsReview: !!row.properties?.needs_review,
   }
 }
 
@@ -104,7 +105,7 @@ export async function loadRouteSlice(code = 'B', date = null) {
 
   const { data: stopRows, error: sErr } = await supabase
     .from('route_stops')
-    .select('id, property_id, seq, status, service, time_window, lat, lng, properties(name, service, lat, lng)')
+    .select('id, property_id, seq, status, service, time_window, lat, lng, properties(name, service, lat, lng, needs_review)')
     .eq('route_id', route.id)
     .order('seq', { ascending: true })
   if (sErr) throw sErr
@@ -112,7 +113,7 @@ export async function loadRouteSlice(code = 'B', date = null) {
 
   const { data: props, error: pErr } = await supabase
     .from('properties')
-    .select('id, name, service, lat, lng, pickup_days, pickup_frequency, pickup_start_date')
+    .select('id, name, service, lat, lng, pickup_days, pickup_frequency, pickup_start_date, needs_review')
   if (pErr) throw pErr
 
   const onRoute = new Set(stops.map((s) => s.propertyId))
@@ -132,6 +133,7 @@ export async function loadRouteSlice(code = 'B', date = null) {
       lat: p.lat,
       lng: p.lng,
       status: 'pending',
+      needsReview: !!p.needs_review,
     }))
 
   const depot = route.depot_lat != null
@@ -366,12 +368,12 @@ export async function copyPreviousWeekday(code, date) {
 export async function loadAllProperties() {
   const { data, error } = await supabase
     .from('properties')
-    .select('id, name, address, service, lat, lng, customer_id, customers(name)')
+    .select('id, name, address, service, lat, lng, needs_review, customer_id, customers(name)')
     .order('name', { ascending: true })
   if (error) throw error
   return (data || []).map((p) => ({
     id: p.id, name: p.name, address: p.address || '', service: p.service || '',
-    lat: p.lat, lng: p.lng, customerId: p.customer_id, customerName: p.customers?.name || '',
+    lat: p.lat, lng: p.lng, needsReview: !!p.needs_review, customerId: p.customer_id, customerName: p.customers?.name || '',
   }))
 }
 
