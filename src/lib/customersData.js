@@ -136,6 +136,19 @@ export async function countDuplicateProperties() {
   return data || 0
 }
 
+// Merge duplicate copies into the kept property: unions pickup days onto it,
+// flags it needs_review, and deletes the other copies.
+export async function mergeProperties(keepId, removeIds) {
+  const { data, error } = await supabase.rpc('merge_properties', { keep_id: keepId, remove_ids: removeIds })
+  if (error) throw error
+  return data
+}
+export async function deleteProperty(id) {
+  const { data, error } = await supabase.rpc('delete_property', { p_id: id })
+  if (error) throw error
+  return data
+}
+
 // Recent service visits (check-ins/outs) for one property, newest first.
 // Pulled from route_stops where a driver actually checked in.
 export async function loadPropertyVisits(propertyId, limit = 20) {

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { MONO } from '../data.js'
 import { parseRows, loadClients, bulkImport, geocodeAll, pendingGeocodeCount } from '../lib/importData.js'
-import { findDuplicateProperties } from '../lib/customersData.js'
+import { findDuplicateProperties, mergeProperties, deleteProperty } from '../lib/customersData.js'
 
 const DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
 const FREQS = ['weekly', 'biweekly', 'monthly', 'on_call']
@@ -86,6 +86,24 @@ export default function Import({ app }) {
     if (dupBusy) return
     setDupBusy(true); setErr('')
     try { setDupGroups(await findDuplicateProperties()) }
+    catch (e) { setErr((e && e.message) || String(e)) }
+    setDupBusy(false)
+  }
+  async function mergeGroup(keepProp, group) {
+    if (dupBusy) return
+    const removeIds = group.properties.filter((p) => p.id !== keepProp.id).map((p) => p.id)
+    if (!removeIds.length) return
+    if (!window.confirm(`Merge ${removeIds.length + 1} copies of "${keepProp.address}" into one?\n\nThe kept copy gets every pickup day from all copies and is flagged "Needs review". The other ${removeIds.length} ${removeIds.length === 1 ? 'copy is' : 'copies are'} deleted.`)) return
+    setDupBusy(true); setErr('')
+    try { await mergeProperties(keepProp.id, removeIds); setDupGroups(await findDuplicateProperties()) }
+    catch (e) { setErr((e && e.message) || String(e)) }
+    setDupBusy(false)
+  }
+  async function removeDup(p) {
+    if (dupBusy) return
+    if (!window.confirm(`Delete this copy?\n\n${p.customer_name || '(no client)'} — ${p.address}`)) return
+    setDupBusy(true); setErr('')
+    try { await deleteProperty(p.id); setDupGroups(await findDuplicateProperties()) }
     catch (e) { setErr((e && e.message) || String(e)) }
     setDupBusy(false)
   }
@@ -220,13 +238,15 @@ export default function Import({ app }) {
                   <div key={g.normalized} style={{ border: '1px solid #f0d9c8', borderRadius: 10, padding: '10px 12px', background: '#fdf7f2' }}>
                     <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 6 }}>{(g.properties[0] && g.properties[0].address) || g.normalized} <span style={{ color: '#9a3412', fontWeight: 600 }}>· {g.count}×</span></div>
                     {g.properties.map((p) => (
-                      <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 12, padding: '3px 0', color: '#5d6b63' }}>
+                      <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 12, padding: '5px 0', color: '#5d6b63', borderTop: '1px solid #f3ece4' }}>
                         <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                           {p.customer_name || '(no client)'} — {p.address}
+                          {p.price != null && <span style={{ color: '#7c8a82' }}> · ${Number(p.price).toFixed(2)}</span>}
+                          {p.needs_review && <span style={{ color: '#c0492f', fontWeight: 700 }}> ⚠</span>}
                         </span>
                         <span style={{ flex: 'none', display: 'flex', gap: 8, alignItems: 'center' }}>
-                          {p.price != null && <span>${Number(p.price).toFixed(2)}</span>}
-                          {p.needs_review && <span style={{ color: '#c0492f', fontWeight: 700 }}>⚠</span>}
+                          <button onClick={() => mergeGroup(p, g)} disabled={dupBusy} title="Keep this copy, merge the others into it (combines pickup days, flags for review)" style={dupActBtn('#1f7a4d')}>Keep &amp; merge</button>
+                          <button onClick={() => removeDup(p)} disabled={dupBusy} title="Delete just this copy" style={dupActBtn('#c0492f')}>Delete</button>
                         </span>
                       </div>
                     ))}
@@ -248,4 +268,5 @@ const inp = { width: '100%', boxSizing: 'border-box', border: '1px solid #dde2dd
 const td = { padding: '8px 12px', textAlign: 'left', verticalAlign: 'top' }
 const btnPrimary = { display: 'inline-flex', alignItems: 'center', gap: 7, background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '11px 16px', fontSize: 14, fontWeight: 600, cursor: 'pointer' }
 const btnGhost = { background: '#fff', color: '#1a2420', border: '1px solid #dde2dd', borderRadius: 9, padding: '9px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }
+const dupActBtn = (color) => ({ flex: 'none', background: '#fff', color, border: `1px solid ${color}55`, borderRadius: 7, padding: '3px 8px', fontSize: 11, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' })
 const banner = (color, bg) => ({ background: bg, color, border: `1px solid ${color}33`, borderRadius: 10, padding: '12px 14px', fontSize: 13, marginBottom: 14 })

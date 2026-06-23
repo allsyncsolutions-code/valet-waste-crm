@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { MONO } from '../data.js'
-import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, updateProperty, loadPropertyVisits, countDuplicateProperties, findDuplicateProperties } from '../lib/customersData.js'
+import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, updateProperty, loadPropertyVisits, countDuplicateProperties, findDuplicateProperties, mergeProperties, deleteProperty } from '../lib/customersData.js'
 import { geocodeAll } from '../lib/importData.js'
 import { listTags, findOrCreateTag, subscribeTags } from '../lib/tagsData.js'
 import { stripeStatus, stripePaymentLink } from '../lib/stripeData.js'
@@ -104,6 +104,31 @@ export default function Clients({ app }) {
       catch (e) { setErr(e.message || String(e)) }
       finally { setDupBusy(false) }
     }
+  }
+  async function refreshDuplicates() {
+    try {
+      const [g, c] = await Promise.all([findDuplicateProperties(), countDuplicateProperties()])
+      setDupGroups(g); setDupCount(c)
+    } catch (e) { setErr(e.message || String(e)) }
+    if (selId) loadProperties(selId).then(setProps).catch(() => {})
+  }
+  async function mergeGroup(keepProp, group) {
+    if (dupBusy) return
+    const removeIds = group.properties.filter((p) => p.id !== keepProp.id).map((p) => p.id)
+    if (!removeIds.length) return
+    if (!window.confirm(`Merge ${removeIds.length + 1} copies of "${keepProp.address}" into one?\n\nThe kept copy gets every pickup day from all copies and is flagged "Needs review". The other ${removeIds.length} ${removeIds.length === 1 ? 'copy is' : 'copies are'} deleted.`)) return
+    setDupBusy(true)
+    try { await mergeProperties(keepProp.id, removeIds); await refreshDuplicates() }
+    catch (e) { setErr(e.message || String(e)) }
+    finally { setDupBusy(false) }
+  }
+  async function removeDup(p) {
+    if (dupBusy) return
+    if (!window.confirm(`Delete this copy?\n\n${p.customer_name || '(no client)'} — ${p.address}`)) return
+    setDupBusy(true)
+    try { await deleteProperty(p.id); await refreshDuplicates() }
+    catch (e) { setErr(e.message || String(e)) }
+    finally { setDupBusy(false) }
   }
 
   const q = search.toLowerCase().trim()
@@ -293,9 +318,14 @@ export default function Clients({ app }) {
                   <div key={g.normalized} style={{ border: '1px solid #f0d9c8', borderRadius: 9, padding: '8px 11px', background: '#fff' }}>
                     <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 5 }}>{(g.properties[0] && g.properties[0].address) || g.normalized} <span style={{ color: '#9a3412' }}>· {g.count}×</span></div>
                     {g.properties.map((p) => (
-                      <div key={p.id} onClick={() => p.customer_id && setSelId(p.customer_id)} title="Open this client" style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 12, padding: '3px 0', color: '#1f7a4d', cursor: p.customer_id ? 'pointer' : 'default' }}>
-                        <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.customer_name || '(no client)'}</span>
-                        <span style={{ flex: 'none', color: '#7c8a82' }}>{p.price != null ? `$${Number(p.price).toFixed(2)}` : ''}{p.needs_review ? ' ⚠' : ''}</span>
+                      <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 12, padding: '4px 0', borderTop: '1px solid #f7f0e8' }}>
+                        <span onClick={() => p.customer_id && setSelId(p.customer_id)} title="Open this client" style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#1f7a4d', cursor: p.customer_id ? 'pointer' : 'default' }}>
+                          {p.customer_name || '(no client)'} <span style={{ color: '#7c8a82' }}>{p.price != null ? `· $${Number(p.price).toFixed(2)}` : ''}{p.needs_review ? ' ⚠' : ''}</span>
+                        </span>
+                        <span style={{ flex: 'none', display: 'flex', gap: 8 }}>
+                          <button onClick={() => mergeGroup(p, g)} disabled={dupBusy} title="Keep this copy, merge the others into it (combines pickup days, flags for review)" style={dupActBtn('#1f7a4d')}>Keep &amp; merge</button>
+                          <button onClick={() => removeDup(p)} disabled={dupBusy} title="Delete just this copy" style={dupActBtn('#c0492f')}>Delete</button>
+                        </span>
                       </div>
                     ))}
                   </div>
@@ -608,6 +638,7 @@ function Divider({ children }) {
 const twoCol = { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 11 }
 const inp = { width: '100%', border: '1px solid #dde2dd', background: '#fff', borderRadius: 9, padding: '9px 11px', fontSize: 15, outline: 'none', boxSizing: 'border-box' }
 const empty = { padding: '22px 14px', textAlign: 'center', color: '#9aa69e', fontSize: 12.5 }
+const dupActBtn = (color) => ({ flex: 'none', background: '#fff', color, border: `1px solid ${color}55`, borderRadius: 7, padding: '3px 8px', fontSize: 11, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' })
 
 export const searchInput = { width: '100%', border: '1px solid #dde2dd', background: '#f7f9f7', borderRadius: 9, padding: '9px 12px 9px 32px', fontSize: 16, outline: 'none', boxSizing: 'border-box' }
 export const searchIcon = { position: 'absolute', left: 11, top: '50%', transform: 'translateY(-50%)', color: '#9aa69e' }
