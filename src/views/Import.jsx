@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { MONO } from '../data.js'
 import { parseRows, loadClients, bulkImport, geocodeAll, pendingGeocodeCount } from '../lib/importData.js'
+import { findDuplicateProperties } from '../lib/customersData.js'
 
 const DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
 const FREQS = ['weekly', 'biweekly', 'monthly', 'on_call']
@@ -20,9 +21,11 @@ export default function Import({ app }) {
 
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
-  const [result, setResult] = useState(null) // {inserted}
+  const [result, setResult] = useState(null) // {inserted, duplicates}
   const [geo, setGeo] = useState(null) // {updated, remaining}
   const [pending, setPending] = useState(0)
+  const [dupBusy, setDupBusy] = useState(false)
+  const [dupGroups, setDupGroups] = useState(null) // null = not scanned yet; [] = none
 
   const rows = parseRows(text)
 
@@ -58,7 +61,7 @@ export default function Import({ app }) {
         needs_review: markReview,
         properties: rows,
       })
-      setResult({ inserted: res?.inserted ?? 0 })
+      setResult({ inserted: res?.inserted ?? 0, duplicates: res?.duplicates ?? 0 })
       setText('')
       loadClients().then(setClients).catch(() => {})
       // Fill in coordinates in the background, throttled.
@@ -79,6 +82,14 @@ export default function Import({ app }) {
     setBusy(false)
   }
 
+  async function scanDuplicates() {
+    if (dupBusy) return
+    setDupBusy(true); setErr('')
+    try { setDupGroups(await findDuplicateProperties()) }
+    catch (e) { setErr((e && e.message) || String(e)) }
+    setDupBusy(false)
+  }
+
   return (
     <div style={{ maxWidth: 900, margin: '0 auto' }}>
       <div style={{ fontSize: 13, color: '#5d6b63', marginBottom: 16 }}>
@@ -95,6 +106,11 @@ export default function Import({ app }) {
           {geo && (geo.remaining == null
             ? 'Geocoding addresses…'
             : `Geocoded ${geo.updated}; ${geo.remaining} still without coordinates.`)}
+          {result.duplicates > 0 && (
+            <div style={{ marginTop: 8, color: '#9a3412' }}>
+              ⚠ {result.duplicates} of these {result.duplicates === 1 ? 'address' : 'addresses'} already existed elsewhere. They were still imported — use <b>Scan for duplicates</b> below to review.
+            </div>
+          )}
         </div>
       )}
 
@@ -180,6 +196,47 @@ export default function Import({ app }) {
             <button onClick={geocodeMissing} disabled={busy} style={btnGhost}>Geocode missing ({pending})</button>
           )}
         </div>
+      </div>
+
+      <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: 18, marginTop: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 700, fontSize: 14 }}>Duplicate addresses</div>
+            <div style={{ fontSize: 12.5, color: '#7c8a82', marginTop: 2 }}>Find the same address entered more than once — across all clients (ignores St/Street, punctuation, “, USA”).</div>
+          </div>
+          <button onClick={scanDuplicates} disabled={dupBusy} style={{ ...btnGhost, opacity: dupBusy ? 0.7 : 1 }}>{dupBusy ? 'Scanning…' : 'Scan for duplicates'}</button>
+        </div>
+
+        {dupGroups != null && (
+          dupGroups.length === 0 ? (
+            <div style={{ ...banner('#1f7a4d', '#e7f1eb'), marginTop: 14, marginBottom: 0 }}>No duplicate addresses found. 🎉</div>
+          ) : (
+            <div style={{ marginTop: 14 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: '#9a3412', marginBottom: 10 }}>
+                {dupGroups.length} duplicate {dupGroups.length === 1 ? 'address' : 'addresses'} found.
+              </div>
+              <div style={{ maxHeight: 380, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {dupGroups.map((g) => (
+                  <div key={g.normalized} style={{ border: '1px solid #f0d9c8', borderRadius: 10, padding: '10px 12px', background: '#fdf7f2' }}>
+                    <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 6 }}>{(g.properties[0] && g.properties[0].address) || g.normalized} <span style={{ color: '#9a3412', fontWeight: 600 }}>· {g.count}×</span></div>
+                    {g.properties.map((p) => (
+                      <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 12, padding: '3px 0', color: '#5d6b63' }}>
+                        <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {p.customer_name || '(no client)'} — {p.address}
+                        </span>
+                        <span style={{ flex: 'none', display: 'flex', gap: 8, alignItems: 'center' }}>
+                          {p.price != null && <span>${Number(p.price).toFixed(2)}</span>}
+                          {p.needs_review && <span style={{ color: '#c0492f', fontWeight: 700 }}>⚠</span>}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+              <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 10 }}>Open the client in the Clients tab to merge or delete the extra copy.</div>
+            </div>
+          )
+        )}
       </div>
     </div>
   )

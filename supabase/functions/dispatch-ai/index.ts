@@ -40,6 +40,7 @@ Guidelines:
 - When the user gives you MORE THAN ONE property/address for the same client (a pasted list, a vendor sheet, etc.), use bulk_add_properties ONCE with all of them — do not call add_stop_to_route in a loop. Pass every row in the properties array and report how many were added.
 - Staff flag uncertain imported properties as "Needs review" (e.g. unclear pricing or pickup frequency). Use list_needs_review to report what's flagged ("what needs review?"). Use edit_property to fix ONE property the owner is reviewing — set price/service/pickup_days/notes — and pass mark_reviewed:true to clear the flag once it's right. Find the property by address (add client_name if the address is ambiguous); if edit_property returns needs_clarification, ask the user which match they mean.
 - Use flag_properties to flag or unflag MANY properties at once by client, tag, or address (e.g. "flag everything for Staylah for review" → by_customer:"Staylah"; "clear review on all Palm Coast properties" → address_contains:"Palm Coast", needs_review:false). It defaults to flagging; pass needs_review:false to clear.
+- Use find_duplicates when the user asks about duplicate stops/addresses/properties. It returns groups of the same address used under more than one client; summarize the count and call out a few examples (address + the clients involved). To then flag those for cleanup, use flag_properties.
 - You cannot send payment links or charge cards — tell the user to use the "Send payment link" button on the invoice for that.
 - After making a change, confirm what you did in one short sentence.`
 
@@ -255,6 +256,7 @@ const tools = [
         create_schedule: { type: "boolean", description: "If true, create one pickup schedule for the client." },
         pickup_day: { type: "string", description: "Pickup day if create_schedule, e.g. 'monday'. Defaults to monday." },
         pickup_freq: { type: "string", description: "weekly | biweekly | monthly | on_call. Defaults to weekly." },
+        needs_review: { type: "boolean", description: "If true, flag every imported property as 'Needs review' (for messy data the owner should go over)." },
         properties: {
           type: "array",
           description: "Every property to add.",
@@ -318,6 +320,17 @@ const tools = [
         needs_review: { type: "boolean", description: "True to flag for review (default), false to clear the flag." },
       },
       required: [],
+    },
+  },
+  {
+    name: "find_duplicates",
+    description:
+      "Find duplicate service addresses — the same address entered more than once, across ALL clients (matching ignores case, punctuation, St/Street, and a trailing ', USA'). Use when the user asks about duplicate stops/addresses/properties or wants a data-cleanup check. Returns the biggest duplicate groups with the clients each copy is under.",
+    input_schema: {
+      type: "object",
+      properties: {
+        limit: { type: "number", description: "Max duplicate groups to return (default 25)." },
+      },
     },
   },
 ]
@@ -747,6 +760,7 @@ async function bulkAddProperties(a: any) {
         create_schedule: a.create_schedule ?? false,
         pickup_day: a.pickup_day ?? "monday",
         pickup_freq: a.pickup_freq ?? "weekly",
+        needs_review: a.needs_review ?? false,
         properties: list,
       },
     }),
@@ -757,6 +771,7 @@ async function bulkAddProperties(a: any) {
     client: a.client_name ?? a.client_id,
     customer_id: out?.customer_id,
     inserted: out?.inserted ?? 0,
+    duplicates: out?.duplicates ?? 0,
     note: "Addresses will be geocoded shortly (in the background / via the Import screen).",
   }
 }
@@ -847,12 +862,25 @@ async function flagProperties(a: any) {
   return { matched: ids.length, changed, needs_review: want }
 }
 
+async function findDuplicates(a: any) {
+  const lim = Number(a?.limit) > 0 ? Math.floor(Number(a.limit)) : 25
+  const r = await fetch(`${REST}/rpc/duplicate_summary`, {
+    method: "POST",
+    headers: HEADERS,
+    body: JSON.stringify({ lim }),
+  })
+  if (!r.ok) throw new Error(`find_duplicates: ${r.status} ${await r.text()}`)
+  const groups = await r.json()
+  return { count: Array.isArray(groups) ? groups.length : 0, duplicates: groups }
+}
+
 async function runTool(name: string, input: any): Promise<unknown> {
   switch (name) {
     case "find_clients": return await findClients(input)
     case "list_needs_review": return await listNeedsReview(input)
     case "edit_property": return await editProperty(input)
     case "flag_properties": return await flagProperties(input)
+    case "find_duplicates": return await findDuplicates(input)
     case "get_overview": return await getOverview()
     case "create_client": return await createClient(input)
     case "update_client": return await updateClient(input)
@@ -937,7 +965,7 @@ Deno.serve(async (req) => {
         if (block.type !== "tool_use") continue
         try {
           const out = await runTool(block.name, block.input)
-          if (block.name !== "find_clients" && block.name !== "get_overview" && block.name !== "list_routes" && block.name !== "list_needs_review") {
+          if (block.name !== "find_clients" && block.name !== "get_overview" && block.name !== "list_routes" && block.name !== "list_needs_review" && block.name !== "find_duplicates") {
             actions.push({ tool: block.name, result: out })
             await logForTool(block.name, out)
           }

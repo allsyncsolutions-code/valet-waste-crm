@@ -124,6 +124,18 @@ export async function loadProperties(customerId) {
   return data || []
 }
 
+// Duplicate-address detection (normalized match across ALL clients).
+export async function findDuplicateProperties() {
+  const { data, error } = await supabase.rpc('find_duplicate_properties')
+  if (error) throw error
+  return data || []
+}
+export async function countDuplicateProperties() {
+  const { data, error } = await supabase.rpc('count_duplicate_properties')
+  if (error) throw error
+  return data || 0
+}
+
 // Recent service visits (check-ins/outs) for one property, newest first.
 // Pulled from route_stops where a driver actually checked in.
 export async function loadPropertyVisits(propertyId, limit = 20) {

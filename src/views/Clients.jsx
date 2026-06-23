@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { MONO } from '../data.js'
-import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, updateProperty, loadPropertyVisits } from '../lib/customersData.js'
+import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, updateProperty, loadPropertyVisits, countDuplicateProperties, findDuplicateProperties } from '../lib/customersData.js'
 import { geocodeAll } from '../lib/importData.js'
 import { listTags, findOrCreateTag, subscribeTags } from '../lib/tagsData.js'
 import { stripeStatus, stripePaymentLink } from '../lib/stripeData.js'
@@ -65,6 +65,10 @@ export default function Clients({ app }) {
   const [histPid, setHistPid] = useState(null)
   const [hist, setHist] = useState([])
   const [histBusy, setHistBusy] = useState(false)
+  const [dupCount, setDupCount] = useState(0)
+  const [dupOpen, setDupOpen] = useState(false)
+  const [dupGroups, setDupGroups] = useState(null)
+  const [dupBusy, setDupBusy] = useState(false)
 
   // Load the selected client's service properties.
   useEffect(() => {
@@ -84,11 +88,23 @@ export default function Clients({ app }) {
     refresh().catch((e) => setErr(e.message || String(e))).finally(() => setLoading(false))
     const reloadTags = () => listTags().then(setAllTags).catch(() => {})
     reloadTags()
+    countDuplicateProperties().then(setDupCount).catch(() => {})
     stripeStatus().then((d) => setStripeOk(!!(d && d.connected && d.chargesEnabled))).catch(() => {})
     const unsubC = subscribeCustomers(() => refresh().catch(() => {}))
     const unsubT = subscribeTags(reloadTags)
     return () => { unsubC && unsubC(); unsubT && unsubT() }
   }, [])
+
+  async function toggleDuplicates() {
+    if (dupOpen) { setDupOpen(false); return }
+    setDupOpen(true)
+    if (dupGroups == null && !dupBusy) {
+      setDupBusy(true)
+      try { setDupGroups(await findDuplicateProperties()) }
+      catch (e) { setErr(e.message || String(e)) }
+      finally { setDupBusy(false) }
+    }
+  }
 
   const q = search.toLowerCase().trim()
   const list = useMemo(
@@ -254,7 +270,43 @@ export default function Clients({ app }) {
   }
 
   return (
-    <div style={{ maxWidth: 1200, margin: '0 auto', display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1.25fr', gap: 18 }}>
+    <div style={{ maxWidth: 1200, margin: '0 auto' }}>
+    {dupCount > 0 && (
+      <div style={{ background: '#fdf7f2', border: '1px solid #f0d9c8', borderRadius: 12, padding: '12px 16px', marginBottom: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 13.5, color: '#9a3412', fontWeight: 600, flex: 1, minWidth: 0 }}>
+            ⚠ {dupCount} duplicate {dupCount === 1 ? 'address' : 'addresses'} detected (same address under more than one client).
+          </span>
+          <button onClick={toggleDuplicates} style={{ flex: 'none', background: '#fff', color: '#9a3412', border: '1px solid #e3b48f', borderRadius: 8, padding: '7px 13px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>
+            {dupOpen ? 'Hide' : 'Review duplicates'}
+          </button>
+        </div>
+        {dupOpen && (
+          <div style={{ marginTop: 12 }}>
+            {dupBusy ? (
+              <div style={{ fontSize: 12.5, color: '#9aa69e' }}>Loading…</div>
+            ) : !dupGroups || !dupGroups.length ? (
+              <div style={{ fontSize: 12.5, color: '#9aa69e' }}>No duplicates found.</div>
+            ) : (
+              <div style={{ maxHeight: 340, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {dupGroups.map((g) => (
+                  <div key={g.normalized} style={{ border: '1px solid #f0d9c8', borderRadius: 9, padding: '8px 11px', background: '#fff' }}>
+                    <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 5 }}>{(g.properties[0] && g.properties[0].address) || g.normalized} <span style={{ color: '#9a3412' }}>· {g.count}×</span></div>
+                    {g.properties.map((p) => (
+                      <div key={p.id} onClick={() => p.customer_id && setSelId(p.customer_id)} title="Open this client" style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 12, padding: '3px 0', color: '#1f7a4d', cursor: p.customer_id ? 'pointer' : 'default' }}>
+                        <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.customer_name || '(no client)'}</span>
+                        <span style={{ flex: 'none', color: '#7c8a82' }}>{p.price != null ? `$${Number(p.price).toFixed(2)}` : ''}{p.needs_review ? ' ⚠' : ''}</span>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    )}
+    <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1.25fr', gap: 18 }}>
       {/* list */}
       <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: 8 }}>
         <div style={{ display: 'flex', gap: 8, margin: '6px 6px 8px' }}>
@@ -518,6 +570,7 @@ export default function Clients({ app }) {
           </form>
         </div>
       )}
+    </div>
     </div>
   )
 }
