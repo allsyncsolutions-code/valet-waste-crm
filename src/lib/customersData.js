@@ -124,6 +124,20 @@ export async function loadProperties(customerId) {
   return data || []
 }
 
+// Recent service visits (check-ins/outs) for one property, newest first.
+// Pulled from route_stops where a driver actually checked in.
+export async function loadPropertyVisits(propertyId, limit = 20) {
+  const { data, error } = await supabase
+    .from('route_stops')
+    .select('id, check_in, check_out, status')
+    .eq('property_id', propertyId)
+    .not('check_in', 'is', null)
+    .order('check_in', { ascending: false })
+    .limit(limit)
+  if (error) throw error
+  return data || []
+}
+
 // Update a property. Editing the address clears its coordinates and resets the
 // geocode-attempt counter so it gets re-geocoded on the next pass.
 export async function updateProperty(id, patch) {

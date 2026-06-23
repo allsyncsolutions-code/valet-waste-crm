@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { MONO } from '../data.js'
-import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, updateProperty } from '../lib/customersData.js'
+import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, updateProperty, loadPropertyVisits } from '../lib/customersData.js'
 import { geocodeAll } from '../lib/importData.js'
 import { listTags, findOrCreateTag, subscribeTags } from '../lib/tagsData.js'
 import { stripeStatus, stripePaymentLink } from '../lib/stripeData.js'
@@ -31,6 +31,8 @@ const freqLabel = (f) => (FREQ.find((x) => x[0] === f) || [f, f])[1]
 const cadenceLabel = (c) => (CADENCE.find((x) => x[0] === c) || [c, c])[1]
 const initialsOf = (name) =>
   (name || '?').split(/\s+/).slice(0, 2).map((w) => w[0]).join('').toUpperCase()
+const fmtDate = (ts) => { try { return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) } catch { return ts } }
+const fmtTime = (ts) => { try { return new Date(ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) } catch { return ts } }
 
 const BLANK = {
   name: '', address: '', contactName: '', email: '', phone: '', status: 'active', notes: '',
@@ -58,8 +60,11 @@ export default function Clients({ app }) {
   const [payErr, setPayErr] = useState(null)
   const [props, setProps] = useState([])
   const [editPid, setEditPid] = useState(null)
-  const [editP, setEditP] = useState({ address: '', service: '', notes: '', days: [], frequency: 'weekly' })
+  const [editP, setEditP] = useState({ address: '', service: '', notes: '', price: '', days: [], frequency: 'weekly' })
   const [pBusy, setPBusy] = useState(false)
+  const [histPid, setHistPid] = useState(null)
+  const [hist, setHist] = useState([])
+  const [histBusy, setHistBusy] = useState(false)
 
   // Load the selected client's service properties.
   useEffect(() => {
@@ -134,7 +139,14 @@ export default function Clients({ app }) {
   }
   function startEditProp(p) {
     setEditPid(p.id)
-    setEditP({ address: p.address || '', service: p.service || '', notes: p.notes || '', days: p.pickup_days || [], frequency: p.pickup_frequency || 'weekly' })
+    setEditP({ address: p.address || '', service: p.service || '', notes: p.notes || '', price: p.price ?? '', days: p.pickup_days || [], frequency: p.pickup_frequency || 'weekly' })
+  }
+  async function toggleHistory(p) {
+    if (histPid === p.id) { setHistPid(null); setHist([]); return }
+    setHistPid(p.id); setHist([]); setHistBusy(true)
+    try { setHist(await loadPropertyVisits(p.id)) }
+    catch (e) { setErr(e.message || String(e)) }
+    finally { setHistBusy(false) }
   }
   const toggleDay = (d) =>
     setEditP((e) => ({ ...e, days: e.days.includes(d) ? e.days.filter((x) => x !== d) : [...e.days, d] }))
@@ -146,6 +158,7 @@ export default function Clients({ app }) {
       const patch = {
         service: editP.service.trim(),
         notes: editP.notes.trim(),
+        price: editP.price === '' || editP.price == null ? null : Number(editP.price),
         pickup_days: orderDays(editP.days),
         pickup_frequency: editP.frequency,
       }
@@ -347,6 +360,11 @@ export default function Clients({ app }) {
                             <input value={editP.service} onChange={(e) => setEditP({ ...editP, service: e.target.value })} style={{ ...inp, fontSize: 13 }} placeholder="Service" />
                             <input value={editP.notes} onChange={(e) => setEditP({ ...editP, notes: e.target.value })} style={{ ...inp, fontSize: 13 }} placeholder="Bin location / notes" />
                           </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <span style={{ fontSize: 13, color: '#7c8a82' }}>$</span>
+                            <input value={editP.price} onChange={(e) => setEditP({ ...editP, price: e.target.value })} inputMode="decimal" style={{ ...inp, fontSize: 13, maxWidth: 140 }} placeholder="Price (e.g. 15)" />
+                            <span style={{ fontSize: 11.5, color: '#9aa69e' }}>per pickup</span>
+                          </div>
                           <div style={{ fontSize: 10.5, color: '#7c8a82', fontFamily: MONO, letterSpacing: '.06em', marginTop: 2 }}>PICKUP DAYS</div>
                           <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
                             {DAYS.map((d) => {
@@ -365,6 +383,7 @@ export default function Clients({ app }) {
                           </div>
                         </div>
                       ) : (
+                        <>
                         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
                           <div title={p.lat != null ? 'Geocoded' : 'No map pin yet'} style={{ marginTop: 5, width: 8, height: 8, borderRadius: '50%', flex: 'none', background: p.lat != null ? '#1f7a4d' : '#e0b450' }} />
                           <div style={{ flex: 1, minWidth: 0 }}>
@@ -390,8 +409,29 @@ export default function Clients({ app }) {
                           </div>
                           {p.price != null && <div style={{ fontSize: 12.5, color: '#5d6b63', flex: 'none' }}>${Number(p.price).toFixed(2)}</div>}
                           <button onClick={() => toggleReview(p)} disabled={pBusy} title={p.needs_review ? 'Clear the review flag' : 'Flag this property for the owner to review'} style={{ flex: 'none', background: 'none', border: 'none', color: p.needs_review ? '#1f7a4d' : '#c0492f', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px', opacity: pBusy ? 0.6 : 1 }}>{p.needs_review ? 'Mark reviewed' : 'Needs review'}</button>
+                          <button onClick={() => toggleHistory(p)} disabled={histBusy && histPid === p.id} style={{ flex: 'none', background: 'none', border: 'none', color: '#5d6b63', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>{histPid === p.id ? 'Hide' : 'History'}</button>
                           <button onClick={() => startEditProp(p)} style={{ flex: 'none', background: 'none', border: 'none', color: '#1f7a4d', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>Edit</button>
                         </div>
+                        {histPid === p.id && (
+                          <div style={{ margin: '6px 0 2px 18px', borderLeft: '2px solid #eef0ed', paddingLeft: 12 }}>
+                            <div style={{ fontSize: 10.5, color: '#7c8a82', fontFamily: MONO, letterSpacing: '.06em', marginBottom: 6 }}>CHECK-IN HISTORY</div>
+                            {histBusy ? (
+                              <div style={{ fontSize: 12, color: '#9aa69e' }}>Loading…</div>
+                            ) : hist.length === 0 ? (
+                              <div style={{ fontSize: 12, color: '#9aa69e' }}>No check-ins recorded yet.</div>
+                            ) : (
+                              hist.map((v) => (
+                                <div key={v.id} style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 12, padding: '3px 0' }}>
+                                  <span style={{ fontWeight: 600, color: '#1a2420', minWidth: 96 }}>{fmtDate(v.check_in)}</span>
+                                  <span style={{ color: '#5d6b63' }}>
+                                    in {fmtTime(v.check_in)}{v.check_out ? ` · out ${fmtTime(v.check_out)}` : ''}
+                                  </span>
+                                </div>
+                              ))
+                            )}
+                          </div>
+                        )}
+                        </>
                       )}
                     </div>
                   ))}
