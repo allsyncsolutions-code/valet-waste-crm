@@ -266,7 +266,7 @@ function StopRow({ s, busy, photos = [], uploading, onCheckIn, onCheckOut, onUnd
         </div>
         <div style={{ fontFamily: MONO, fontSize: 10, fontWeight: 600, color: meta.color, flex: 'none' }}>{meta.label}</div>
         {s.lat != null && s.lng != null && (
-          <a href={`https://www.google.com/maps/dir/?api=1&destination=${s.lat},${s.lng}`} target="_blank" rel="noreferrer" style={{ fontSize: 11.5, fontWeight: 600, color: '#1f7a4d', textDecoration: 'none', flex: 'none' }} title="Navigate">➤</a>
+          <a href={`https://www.google.com/maps/dir/?api=1&destination=${s.lat},${s.lng}`} target="_blank" rel="noreferrer" style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12.5, fontWeight: 600, color: '#fff', background: '#1f7a4d', borderRadius: 8, padding: '7px 12px', textDecoration: 'none', flex: 'none' }} title="Open turn-by-turn directions">➤ Navigate</a>
         )}
       </div>
 
