@@ -12,6 +12,8 @@ import Activity from './views/Activity.jsx'
 import Drivers from './views/Drivers.jsx'
 import Team from './views/Team.jsx'
 import Import from './views/Import.jsx'
+import Annotations from './views/Annotations.jsx'
+import AnnotationLayer from './components/AnnotationLayer.jsx'
 import AiDock from './AiDock.jsx'
 
 // Tabs not yet wired to Supabase show a clean placeholder (no sample data).
@@ -63,6 +65,8 @@ export default function App({ user, onSignOut }) {
 
   const [activeLine, setActiveLine] = useState('waste')
   const [activeView, setActiveView] = useState('clients')
+  const [annotateMode, setAnnotateMode] = useState(false)
+  const isAdmin = !!(user && user.role === 'admin')
   const [lineMenuOpen, setLineMenuOpen] = useState(false)
   const [navOpen, setNavOpen] = useState(false) // mobile drawer
   const [commandText, setCommandText] = useState('')
@@ -110,6 +114,7 @@ export default function App({ user, onSignOut }) {
     team: ['Team', 'Members and their business-line assignments'],
     portal: ['Client Portal', 'What your clients see when they log in'],
     settings: ['Settings', 'Manage tags and configuration'],
+    annotations: ['Annotations', 'Admin notes flagged with the ✎ tool — review with Claude'],
   }
   const [viewTitle, viewSubtitle] = VIEW_META[activeView] || VIEW_META.dashboard
 
@@ -202,6 +207,7 @@ export default function App({ user, onSignOut }) {
     portal: <Placeholder title="Client Portal" />,
     team: <Team app={app} />,
     settings: <Settings app={app} />,
+    annotations: <Annotations app={app} />,
   }
 
   const showInlineDock = aiOpen && !isMobile && !isTablet
@@ -275,7 +281,7 @@ export default function App({ user, onSignOut }) {
 
       <div style={{ flex: 1, overflowY: 'auto', padding: '4px 12px' }}>
         <NavGroup label="OPERATIONS" items={NAV_MAIN} activeView={activeView} onGo={go} />
-        <NavGroup label="FIELD & CLIENTS" items={NAV_FIELD} activeView={activeView} onGo={go} top={14} />
+        <NavGroup label="FIELD & CLIENTS" items={isAdmin ? [...NAV_FIELD, { id: 'annotations', glyph: '✎', label: 'Annotations' }] : NAV_FIELD} activeView={activeView} onGo={go} top={14} />
       </div>
 
       <div onClick={openAssistant} style={{ margin: '10px 12px', padding: '11px 12px', borderRadius: 10, background: 'linear-gradient(135deg,#1f7a4d,#155e3a)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -336,10 +342,11 @@ export default function App({ user, onSignOut }) {
             {isMobile && (
               <div onClick={openAssistant} style={{ width: 36, height: 36, borderRadius: 9, background: 'linear-gradient(135deg,#1f7a4d,#155e3a)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: '#fff', fontSize: 15, flex: 'none' }}>✦</div>
             )}
-            <div style={{ position: 'relative', width: 36, height: 36, borderRadius: 9, border: '1px solid #e3e6e2', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: '#5d6b63', flex: 'none' }}>
-              <span style={{ fontSize: 15 }}>⚲</span>
-              <div style={{ position: 'absolute', top: 7, right: 8, width: 7, height: 7, borderRadius: '50%', background: '#c0492f', border: '1.5px solid #fff' }} />
-            </div>
+            {isAdmin && (
+              <div data-annot-ui onClick={() => setAnnotateMode((v) => !v)} title={annotateMode ? 'Annotation mode is ON — click to turn off' : 'Annotate: flag an element with a note'} style={{ position: 'relative', width: 36, height: 36, borderRadius: 9, border: `1px solid ${annotateMode ? '#1f7a4d' : '#e3e6e2'}`, background: annotateMode ? '#1f7a4d' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: annotateMode ? '#fff' : '#5d6b63', flex: 'none' }}>
+                <span style={{ fontSize: 15 }}>✎</span>
+              </div>
+            )}
             {!isMobile && (
               <button onClick={startNewPickup} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '9px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 7, whiteSpace: 'nowrap' }}>
                 <span style={{ fontSize: 15, lineHeight: 1 }}>+</span> New pickup
@@ -404,6 +411,16 @@ export default function App({ user, onSignOut }) {
             scrollRef={aiScrollRef}
           />
         </>
+      )}
+
+      {isAdmin && (
+        <AnnotationLayer
+          active={annotateMode}
+          viewName={activeView}
+          viewTitle={viewTitle}
+          onClose={() => setAnnotateMode(false)}
+          onSaved={() => {}}
+        />
       )}
     </div>
   )
