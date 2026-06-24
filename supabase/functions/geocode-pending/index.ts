@@ -47,9 +47,11 @@ async function geocodeCensus(address: string) {
 }
 
 // OpenStreetMap fallback (better outside the US / for non-standard addresses).
+// Restricted to the US so a bare street name can't match a same-named road
+// abroad (e.g. "Gillespie Rd" -> London).
 async function geocodeOSM(address: string) {
   try {
-    const r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${enc(address)}`,
+    const r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&q=${enc(address)}`,
       { headers: { "User-Agent": "ValetWasteCRM/1.0 (geocode-pending)" } })
     if (!r.ok) return null
     const rows = await r.json()
@@ -58,8 +60,17 @@ async function geocodeOSM(address: string) {
   } catch { return null }
 }
 
+// Reject anything outside the continental-US bounding box. This is the safety
+// net that stops a wrong pin (Europe / null island at 0,0) from ever being
+// stored — a miss is better than a pin on the other side of the planet.
+function inUS(p: { lat: number; lng: number } | null) {
+  return !!p && Number.isFinite(p.lat) && Number.isFinite(p.lng) &&
+    p.lat >= 24 && p.lat <= 50 && p.lng >= -125 && p.lng <= -66
+}
+
 async function geocode(address: string) {
-  return (await geocodeCensus(address)) || (await geocodeOSM(address))
+  const loc = (await geocodeCensus(address)) || (await geocodeOSM(address))
+  return inUS(loc) ? loc : null
 }
 
 // Eligible = no coords yet, has an address, and hasn't failed too many times.

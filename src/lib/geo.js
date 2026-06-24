@@ -6,6 +6,17 @@
 
 const EARTH_M = 6371000
 
+// A usable map point: finite lat/lng inside the continental-US box and not the
+// 0,0 "null island". Ungeocoded / mis-geocoded stops fail this and are skipped
+// from distance + map so a single bad pin can't blow up a route.
+export function hasCoords(p) {
+  const lat = p && Number(p.lat)
+  const lng = p && Number(p.lng)
+  return Number.isFinite(lat) && Number.isFinite(lng) &&
+    !(lat === 0 && lng === 0) &&
+    lat >= 24 && lat <= 50 && lng >= -125 && lng <= -66
+}
+
 // Tuning knobs (clearly labelled estimates).
 export const ROAD_CIRCUITY = 1.32 // streets aren't straight lines
 export const AVG_SPEED_MPH = 22 // urban collection-route average

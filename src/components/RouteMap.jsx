@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { STATUS_META } from '../lib/routeModel.js'
+import { hasCoords } from '../lib/geo.js'
 
 // Live route map. Renders the depot + numbered stop markers in sequence order
 // and draws the route polyline. Pure Leaflet (free OSM tiles) so there's no
@@ -52,9 +53,10 @@ export default function RouteMap({ depot, stops, height = 460 }) {
       .addTo(layer)
 
     const pts = [[depot.lat, depot.lng]]
-    // Only map stops with real coordinates — an un-geocoded property (null
-    // lat/lng) would otherwise throw "Invalid LatLng" and blank the page.
-    const located = stops.filter((s) => Number.isFinite(s.lat) && Number.isFinite(s.lng))
+    // Only map stops with usable US coordinates. This skips un-geocoded stops
+    // (null → "Invalid LatLng" crash) AND mis-geocoded ones (0,0 / abroad) that
+    // would otherwise drag the map zoom out to the whole world.
+    const located = stops.filter(hasCoords)
     located.forEach((s) => {
       const meta = STATUS_META[s.status] || STATUS_META.pending
       pts.push([s.lat, s.lng])

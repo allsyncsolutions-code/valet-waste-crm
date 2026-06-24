@@ -11,15 +11,19 @@
 import {
   drivingMeters,
   driveMinutes,
+  hasCoords,
   SERVICE_MIN_PER_STOP,
 } from './geo.js'
 
 // Total estimated drive distance for depot -> stops (in given order), meters.
+// Stops without usable coordinates (ungeocoded / mis-geocoded) are skipped so
+// one bad pin can't inflate the total to tens of thousands of miles.
 export function routeMeters(stops, depot) {
-  if (!stops.length) return 0
+  const pts = stops.filter(hasCoords)
+  if (!pts.length) return 0
   let total = 0
-  let prev = depot || stops[0]
-  const seq = depot ? stops : stops.slice(1)
+  let prev = (depot && hasCoords(depot)) ? depot : pts[0]
+  const seq = (depot && hasCoords(depot)) ? pts : pts.slice(1)
   for (const s of seq) {
     total += drivingMeters(prev, s)
     prev = s
@@ -84,10 +88,15 @@ function twoOpt(order, start) {
 // Optimize the order of `stops` starting from `start` (depot or current truck
 // location). Returns the reordered stops plus estimated distance/time.
 export function optimizeOrder(stops, start) {
-  if (stops.length <= 2) {
-    return { ordered: stops.slice(), ...routeMetrics(stops, start) }
+  // Only stops with usable coordinates can be sequenced by distance; keep any
+  // ungeocoded stops and append them at the end so none are lost.
+  const geo = stops.filter(hasCoords)
+  const nogeo = stops.filter((s) => !hasCoords(s))
+  if (geo.length <= 2) {
+    return { ordered: [...geo, ...nogeo], ...routeMetrics(stops, start) }
   }
-  const nn = nearestNeighbor(stops, start)
-  const ordered = twoOpt(nn, start)
+  const nn = nearestNeighbor(geo, start)
+  const optimized = twoOpt(nn, start)
+  const ordered = [...optimized, ...nogeo]
   return { ordered, ...routeMetrics(ordered, start) }
 }
