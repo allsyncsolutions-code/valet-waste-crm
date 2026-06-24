@@ -77,8 +77,11 @@ function mapStop(row) {
     status: row.status,
     service: row.service || row.properties?.service || '',
     window: row.time_window || '',
-    lat: row.lat ?? row.properties?.lat,
-    lng: row.lng ?? row.properties?.lng,
+    // Prefer the PROPERTY's current coordinates over the stop's cached copy, so
+    // re-geocoding a fixed address moves the pin immediately (the stop's lat/lng
+    // is only a fallback for when the property join is missing).
+    lat: row.properties?.lat ?? row.lat,
+    lng: row.properties?.lng ?? row.lng,
     name: row.properties?.name || 'Unknown',
     address: row.properties?.address || '',
     needsReview: !!row.properties?.needs_review,
@@ -412,7 +415,7 @@ export async function loadDayDispatch(date) {
   if (!date) throw new Error('A date is required.')
   const { data, error } = await supabase
     .from('routes')
-    .select('id, code, name, driver_id, route_stops(id, seq, status, service, time_window, lat, lng, check_in, check_out, properties(name, address))')
+    .select('id, code, name, driver_id, route_stops(id, seq, status, service, time_window, lat, lng, check_in, check_out, properties(name, address, lat, lng))')
     .eq('service_date', date)
     .order('code', { ascending: true })
   if (error) throw error
@@ -426,7 +429,7 @@ export async function loadDayDispatch(date) {
       .sort((a, b) => (a.seq || 0) - (b.seq || 0))
       .map((s) => ({
         id: s.id, seq: s.seq, status: s.status, service: s.service, window: s.time_window,
-        lat: s.lat, lng: s.lng, checkIn: s.check_in, checkOut: s.check_out,
+        lat: s.properties?.lat ?? s.lat, lng: s.properties?.lng ?? s.lng, checkIn: s.check_in, checkOut: s.check_out,
         name: s.properties?.name || '—', address: s.properties?.address || '',
       })),
   }))
