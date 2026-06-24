@@ -80,6 +80,7 @@ function mapStop(row) {
     lat: row.lat ?? row.properties?.lat,
     lng: row.lng ?? row.properties?.lng,
     name: row.properties?.name || 'Unknown',
+    address: row.properties?.address || '',
     needsReview: !!row.properties?.needs_review,
   }
 }
@@ -105,7 +106,7 @@ export async function loadRouteSlice(code = 'B', date = null) {
 
   const { data: stopRows, error: sErr } = await supabase
     .from('route_stops')
-    .select('id, property_id, seq, status, service, time_window, lat, lng, properties(name, service, lat, lng, needs_review)')
+    .select('id, property_id, seq, status, service, time_window, lat, lng, properties(name, address, service, lat, lng, needs_review)')
     .eq('route_id', route.id)
     .order('seq', { ascending: true })
   if (sErr) throw sErr

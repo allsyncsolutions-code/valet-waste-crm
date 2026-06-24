@@ -38,7 +38,8 @@ import {
   addPropertiesToRoute,
 } from '../lib/routesData.js'
 import { loadDrivers } from '../lib/teamData.js'
-import { loadCustomers } from '../lib/customersData.js'
+import { loadCustomers, updateProperty } from '../lib/customersData.js'
+import { geocodeAll } from '../lib/importData.js'
 import { createInvoice } from '../lib/invoicesData.js'
 
 const BLANK_STOP = { name: '', address: '', service: '', customerId: '', customerName: '', description: '', price: '' }
@@ -69,6 +70,9 @@ export default function RoutesView({ app }) {
   const [err, setErr] = useState(null)
   const [optimized, setOptimized] = useState(false)
   const [saved, setSaved] = useState(null)
+  const [editStopId, setEditStopId] = useState(null) // stop whose address is being edited
+  const [editStopAddr, setEditStopAddr] = useState('')
+  const [stopBusy, setStopBusy] = useState(false)
 
   const [schedules, setSchedules] = useState([]) // active schedules, for the day dots
   const [drivers, setDrivers] = useState([]) // staff flagged is_driver
@@ -193,6 +197,29 @@ export default function RoutesView({ app }) {
     })
     setOptimized(true)
     withWrite(() => persistOrder(next))
+  }
+
+  function startEditAddress(st) {
+    setEditStopId(st.id)
+    setEditStopAddr(st.address || st.name || '')
+  }
+  async function saveStopAddress(st) {
+    if (stopBusy) return
+    const addr = editStopAddr.trim()
+    if (!addr) return
+    setStopBusy(true); setErr(null)
+    try {
+      // Editing the address clears coords + resets the geocoder; we then re-geocode
+      // and mark it reviewed (the address has been corrected).
+      await updateProperty(st.propertyId, { address: addr, needs_review: false })
+      setEditStopId(null)
+      await refresh()
+      geocodeAll(() => {}).then(() => refresh()).catch(() => {})
+    } catch (e) {
+      setErr(e.message || String(e))
+    } finally {
+      setStopBusy(false)
+    }
   }
 
   function handleMove(id, dir) {
@@ -604,13 +631,28 @@ export default function RoutesView({ app }) {
                 <div key={st.id} style={{ display: 'flex', gap: 10, padding: '7px 8px', borderBottom: '1px solid #f1f3f0' }}>
                   <div style={{ width: 24, height: 24, flex: 'none', borderRadius: '50%', background: meta.bg, color: meta.fg, border: st.status === 'enroute' ? '2px solid #46c585' : 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontSize: 11, fontWeight: 600 }}>{st.seq}</div>
                   <div style={{ flex: 1, minWidth: 0 }}>
+                    {editStopId === st.id ? (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        <input autoFocus value={editStopAddr} onChange={(e) => setEditStopAddr(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === 'Enter') saveStopAddress(st); if (e.key === 'Escape') setEditStopId(null) }}
+                          placeholder="123 Main St, City, FL 32084"
+                          style={{ width: '100%', boxSizing: 'border-box', border: '1px solid #1f7a4d', borderRadius: 8, padding: '7px 10px', fontSize: 13, outline: 'none' }} />
+                        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                          <button onClick={() => saveStopAddress(st)} disabled={stopBusy} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 7, padding: '5px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer', opacity: stopBusy ? 0.6 : 1 }}>{stopBusy ? 'Saving…' : 'Save & re-geocode'}</button>
+                          <button onClick={() => setEditStopId(null)} disabled={stopBusy} style={{ ...miniBtn }}>Cancel</button>
+                          <span style={{ fontSize: 11, color: '#9aa69e' }}>Adding the city + ZIP fixes the map pin.</span>
+                        </div>
+                      </div>
+                    ) : (
+                    <>
                     <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                           <span style={{ fontWeight: 600, fontSize: 13.5 }}>{st.name}</span>
                           {st.needsReview && <span title="Flagged for review" style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#c0492f', background: '#fbeae6', padding: '1px 5px', borderRadius: 4, letterSpacing: '.03em' }}>⚠ REVIEW</span>}
+                          {st.lat == null && <span title="No map pin — address likely needs a city/ZIP" style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#c08a2e', background: '#fbf3e2', padding: '1px 5px', borderRadius: 4 }}>NO PIN</span>}
                         </div>
-                        <div style={{ fontSize: 11.5, color: '#7c8a82' }}>{st.service}</div>
+                        <div style={{ fontSize: 11.5, color: '#7c8a82' }}>{st.address && st.address !== st.name ? st.address : st.service}</div>
                       </div>
                       <div style={{ textAlign: 'right', flex: 'none' }}>
                         <div style={{ fontFamily: MONO, fontSize: 10.5, fontWeight: 600, color: meta.color }}>{meta.label}</div>
@@ -621,6 +663,7 @@ export default function RoutesView({ app }) {
                       <div style={{ marginTop: 7, display: 'flex', gap: 6, alignItems: 'center' }}>
                         <button onClick={() => handleMove(st.id, -1)} style={miniBtn} title="Move up">↑</button>
                         <button onClick={() => handleMove(st.id, 1)} style={miniBtn} title="Move down">↓</button>
+                        <button onClick={() => startEditAddress(st)} style={miniBtn} title="Edit this address">✎ Address</button>
                         <a href={`https://www.google.com/maps/dir/?api=1&destination=${st.lat},${st.lng}`} target="_blank" rel="noreferrer" style={{ ...miniBtn, textDecoration: 'none', color: '#1f7a4d' }} title="Navigate">➤ Nav</a>
                         {routeDefs.length > 1 && (
                           <select value="" onChange={(e) => handleMoveToRoute(st.id, e.target.value)} title="Move to another route (hands it to that route's driver)" style={{ ...miniBtn, paddingRight: 4, cursor: 'pointer' }}>
@@ -633,6 +676,8 @@ export default function RoutesView({ app }) {
                         <div style={{ flex: 1 }} />
                         <button onClick={() => handleRemove(st.id)} style={{ ...miniBtn, color: '#c0492f' }} title="Remove from route">×</button>
                       </div>
+                    )}
+                    </>
                     )}
                   </div>
                 </div>
