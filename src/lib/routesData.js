@@ -307,6 +307,14 @@ export async function updateRouteDef(code, patch) {
   if (error) throw error
 }
 
+// Delete a whole route: its dated instances and their stops, plus the catalog
+// row. Properties are untouched. Returns counts of what was removed.
+export async function deleteRouteDef(code) {
+  const { data, error } = await supabase.rpc('delete_route', { p_code: code })
+  if (error) throw error
+  return data
+}
+
 export async function createRouteDef({ code, name, color }) {
   const c = String(code || '').trim().toUpperCase()
   if (!c) throw new Error('A route code is required.')

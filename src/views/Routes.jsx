@@ -29,6 +29,7 @@ import {
   addOneOffStop,
   loadRouteDefs,
   createRouteDef,
+  deleteRouteDef,
   updateRouteDef,
   copyPreviousWeekday,
   moveStopToRoute,
@@ -400,6 +401,23 @@ export default function RoutesView({ app }) {
     }
   }
 
+  async function deleteRoute() {
+    if (routeDefs.length <= 1) { setErr('You need at least one route — add another before deleting this one.'); return }
+    const stopCount = stops.length
+    const msg = `Delete ${currentDef.name} (${currentDef.code})?\n\n`
+      + `This removes the route and every dated copy of it${stopCount ? `, including the ${stopCount} stop${stopCount === 1 ? '' : 's'} on this day` : ''}. The service properties themselves are NOT deleted — they stay on their clients and can be added to another route.\n\nThis can't be undone.`
+    if (!window.confirm(msg)) return
+    setErr(null)
+    try {
+      await deleteRouteDef(routeCode)
+      const defs = await loadRouteDefs()
+      setRouteDefs(defs)
+      setRouteCode((defs[0] && defs[0].code) || 'A')
+    } catch (e) {
+      setErr(e.message || String(e))
+    }
+  }
+
   async function addRoute() {
     const name = window.prompt('New route name (e.g. "Route C" or "North Side")')
     if (name == null || !name.trim()) return
@@ -497,6 +515,9 @@ export default function RoutesView({ app }) {
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <div style={{ fontSize: 14, fontWeight: 700 }}>{currentDef.name}</div>
                 <span onClick={renameRoute} title="Rename this route" style={{ cursor: 'pointer', color: '#9aa69e', fontSize: 12 }}>✎</span>
+                {routeDefs.length > 1 && (
+                  <span onClick={deleteRoute} title="Delete this route" style={{ cursor: 'pointer', color: '#c0492f', fontSize: 12 }}>🗑</span>
+                )}
               </div>
               <div style={{ fontSize: 10.5, color: '#7c8a82' }}>{prettyDate(routeSel)} · {stops.length} stop{stops.length === 1 ? '' : 's'}</div>
             </div>
