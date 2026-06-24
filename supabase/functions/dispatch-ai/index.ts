@@ -30,7 +30,7 @@ const CADENCES = ["monthly", "per_service", "weekly", "quarterly", "annual"]
 const SYSTEM = `You are Trashy Randy, the dispatch assistant inside Valet Waste, a CRM for a waste-hauling business. You help manage clients, pickup schedules, invoices, tags, and routes. Be concise and operational (1-3 sentences).
 
 Guidelines:
-- When the user refers to a client by name, business, phone or email, call find_clients FIRST to resolve the exact customer_id before acting. If multiple match, ask which one. If none match and the action needs an existing client, say so.
+- When the user refers to a client by name, business, phone or email, call find_clients FIRST to resolve the exact customer_id before acting. If multiple match, ask which one. If none match and the action needs an existing client, say so. find_clients also resolves a SERVICE ADDRESS to its owning client (it falls back to matching properties), so use it to answer "who is the client for <address>?".
 - Infer sensible defaults: weekly pickup on Monday, monthly invoicing. Invoices are created as drafts unless told otherwise.
 - You can create_client, update_client, create_schedule (pickup), tag_client, create_invoice, mark_invoice_paid, add_stop_to_route, assemble_route, move_stops, assign_driver, list_routes, and create_route. Use get_overview for balances/counts and list_routes to see which routes exist.
 - Routes are per DAY and there can be several (e.g. Route A, B). Every route op defaults to TODAY and to the first route unless the user names a date or a route. If more than one route exists and it's ambiguous which they mean, call list_routes and ask.
@@ -47,7 +47,7 @@ Guidelines:
 const tools = [
   {
     name: "find_clients",
-    description: "Search customers by name, business, email, phone or address. Returns matches with ids. Use this to resolve who the user means before acting, or to answer questions about a client's contact info.",
+    description: "Search customers by name, business, email, phone or address. Returns matches with ids. Also resolves a service-property ADDRESS to its owning client (falls back to matching properties when no customer matches). Use this to resolve who the user means before acting, to answer 'who is the client for <address>?', or to answer questions about a client's contact info.",
     input_schema: {
       type: "object",
       properties: { query: { type: "string", description: "Name, email, phone or address fragment" } },
@@ -484,7 +484,19 @@ async function findClients(a: any) {
   const like = `*${q}*`
   const or = `or=(name.ilike.${enc(like)},email.ilike.${enc(like)},phone.ilike.${enc(like)},contact_name.ilike.${enc(like)},address.ilike.${enc(like)})`
   const rows = await sbGet(`customers?${or}&select=id,name,contact_name,email,phone,address,status&limit=10`)
-  return { matches: rows }
+  if (rows.length) return { matches: rows }
+  // Fallback: the query may be a SERVICE-PROPERTY address (clients usually have
+  // no address of their own — the addresses live on their properties). Resolve
+  // the owning client(s) by matching the property address/name.
+  const plike = enc(`*${q}*`)
+  const props = await sbGet(`properties?or=(address.ilike.${plike},name.ilike.${plike})&select=address,customer_id,customers(id,name,contact_name,email,phone,status)&limit=10`)
+  const seen = new Set<string>()
+  const matches: any[] = []
+  for (const p of props) {
+    const c = p.customers
+    if (c && !seen.has(c.id)) { seen.add(c.id); matches.push({ ...c, matched_property: p.address }) }
+  }
+  return { matches, matched_by_property: matches.length > 0 }
 }
 
 async function getOverview() {

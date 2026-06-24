@@ -318,10 +318,13 @@ export default function Clients({ app }) {
                   <div key={g.normalized} style={{ border: '1px solid #f0d9c8', borderRadius: 9, padding: '8px 11px', background: '#fff' }}>
                     <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 5 }}>{(g.properties[0] && g.properties[0].address) || g.normalized} <span style={{ color: '#9a3412' }}>· {g.count}×</span></div>
                     {g.properties.map((p) => (
-                      <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 12, padding: '4px 0', borderTop: '1px solid #f7f0e8' }}>
-                        <span onClick={() => p.customer_id && setSelId(p.customer_id)} title="Open this client" style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#1f7a4d', cursor: p.customer_id ? 'pointer' : 'default' }}>
-                          {p.customer_name || '(no client)'} <span style={{ color: '#7c8a82' }}>{p.price != null ? `· $${Number(p.price).toFixed(2)}` : ''}{p.needs_review ? ' ⚠' : ''}</span>
-                        </span>
+                      <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', fontSize: 12, padding: '5px 0', borderTop: '1px solid #f7f0e8' }}>
+                        <div style={{ minWidth: 0 }}>
+                          <div onClick={() => p.customer_id && setSelId(p.customer_id)} title="Open this client" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#1f7a4d', cursor: p.customer_id ? 'pointer' : 'default', fontWeight: 600 }}>
+                            {p.customer_name || '(no client)'} <span style={{ color: '#7c8a82', fontWeight: 400 }}>{p.price != null ? `· $${Number(p.price).toFixed(2)}` : ''}{p.needs_review ? ' ⚠' : ''}</span>
+                          </div>
+                          <div style={{ color: '#9aa69e', fontSize: 11 }}>{dupMeta(p)}</div>
+                        </div>
                         <span style={{ flex: 'none', display: 'flex', gap: 8 }}>
                           <button onClick={() => mergeGroup(p, g)} disabled={dupBusy} title="Keep this copy, merge the others into it (combines pickup days, flags for review)" style={dupActBtn('#1f7a4d')}>Keep &amp; merge</button>
                           <button onClick={() => removeDup(p)} disabled={dupBusy} title="Delete just this copy" style={dupActBtn('#c0492f')}>Delete</button>
@@ -639,6 +642,15 @@ const twoCol = { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 11 }
 const inp = { width: '100%', border: '1px solid #dde2dd', background: '#fff', borderRadius: 9, padding: '9px 11px', fontSize: 15, outline: 'none', boxSizing: 'border-box' }
 const empty = { padding: '22px 14px', textAlign: 'center', color: '#9aa69e', fontSize: 12.5 }
 const dupActBtn = (color) => ({ flex: 'none', background: '#fff', color, border: `1px solid ${color}55`, borderRadius: 7, padding: '3px 8px', fontSize: 11, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' })
+// One-line "where this copy is from" for a duplicate: pickup day(s), import code, and when it was added.
+const dupMeta = (p) => {
+  const parts = []
+  const d = daysLabel(p.pickup_days)
+  parts.push(d ? d : 'no pickup day')
+  if (p.code) parts.push(`#${p.code}`)
+  if (p.created_at) parts.push(`added ${fmtDate(p.created_at)}`)
+  return parts.join(' · ')
+}
 
 export const searchInput = { width: '100%', border: '1px solid #dde2dd', background: '#f7f9f7', borderRadius: 9, padding: '9px 12px 9px 32px', fontSize: 16, outline: 'none', boxSizing: 'border-box' }
 export const searchIcon = { position: 'absolute', left: 11, top: '50%', transform: 'translateY(-50%)', color: '#9aa69e' }

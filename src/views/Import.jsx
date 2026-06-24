@@ -5,6 +5,17 @@ import { findDuplicateProperties, mergeProperties, deleteProperty } from '../lib
 
 const DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
 const FREQS = ['weekly', 'biweekly', 'monthly', 'on_call']
+const DAY_ABBR = { monday: 'Mon', tuesday: 'Tue', wednesday: 'Wed', thursday: 'Thu', friday: 'Fri', saturday: 'Sat', sunday: 'Sun' }
+const fmtDate = (ts) => { try { return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) } catch { return ts } }
+// "Where this copy is from": pickup day(s), import code, added date.
+const dupMeta = (p) => {
+  const parts = []
+  const days = DAYS.filter((d) => (p.pickup_days || []).includes(d)).map((d) => DAY_ABBR[d]).join(' · ')
+  parts.push(days || 'no pickup day')
+  if (p.code) parts.push(`#${p.code}`)
+  if (p.created_at) parts.push(`added ${fmtDate(p.created_at)}`)
+  return parts.join(' · ')
+}
 
 export default function Import({ app }) {
   const isMobile = app.isMobile
@@ -238,12 +249,15 @@ export default function Import({ app }) {
                   <div key={g.normalized} style={{ border: '1px solid #f0d9c8', borderRadius: 10, padding: '10px 12px', background: '#fdf7f2' }}>
                     <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 6 }}>{(g.properties[0] && g.properties[0].address) || g.normalized} <span style={{ color: '#9a3412', fontWeight: 600 }}>· {g.count}×</span></div>
                     {g.properties.map((p) => (
-                      <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 12, padding: '5px 0', color: '#5d6b63', borderTop: '1px solid #f3ece4' }}>
-                        <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {p.customer_name || '(no client)'} — {p.address}
-                          {p.price != null && <span style={{ color: '#7c8a82' }}> · ${Number(p.price).toFixed(2)}</span>}
-                          {p.needs_review && <span style={{ color: '#c0492f', fontWeight: 700 }}> ⚠</span>}
-                        </span>
+                      <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', fontSize: 12, padding: '6px 0', color: '#5d6b63', borderTop: '1px solid #f3ece4' }}>
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            <b style={{ color: '#1a2420' }}>{p.customer_name || '(no client)'}</b> — {p.address}
+                            {p.price != null && <span style={{ color: '#7c8a82' }}> · ${Number(p.price).toFixed(2)}</span>}
+                            {p.needs_review && <span style={{ color: '#c0492f', fontWeight: 700 }}> ⚠</span>}
+                          </div>
+                          <div style={{ color: '#9aa69e', fontSize: 11 }}>{dupMeta(p)}</div>
+                        </div>
                         <span style={{ flex: 'none', display: 'flex', gap: 8, alignItems: 'center' }}>
                           <button onClick={() => mergeGroup(p, g)} disabled={dupBusy} title="Keep this copy, merge the others into it (combines pickup days, flags for review)" style={dupActBtn('#1f7a4d')}>Keep &amp; merge</button>
                           <button onClick={() => removeDup(p)} disabled={dupBusy} title="Delete just this copy" style={dupActBtn('#c0492f')}>Delete</button>
