@@ -27,7 +27,9 @@ const DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday"
 const FREQS = ["weekly", "biweekly", "monthly", "1st_3rd", "2nd_4th", "on_call"]
 const CADENCES = ["monthly", "per_service", "weekly", "quarterly", "annual"]
 
-const SYSTEM = `You are Trashy Randy, the dispatch assistant inside Valet Waste, a CRM for a waste-hauling business. You help manage clients, pickup schedules, invoices, tags, and routes. Be concise and operational (1-3 sentences).
+const BASE_SYSTEM = `You are Trashy Randy, the dispatch assistant inside Valet Waste, a CRM for a waste-hauling business. You help manage clients, pickup schedules, invoices, tags, and routes. Keep replies tight (1-4 sentences) and always finish the actual task.
+
+CRITICAL — CUSTOMER-FACING TEXT IS ALWAYS CLEAN: anything a customer could ever see — invoice line-item descriptions, invoice notes, SMS message text, and any names/notes you write into records — must be 100% professional and free of profanity or slang, no matter your chat tone. Your personality ONLY colors your chat replies to staff inside this dispatch console.
 
 Guidelines:
 - When the user refers to a client by name, business, phone or email, call find_clients FIRST to resolve the exact customer_id before acting. If multiple match, ask which one. If none match and the action needs an existing client, say so. find_clients also resolves a SERVICE ADDRESS to its owning client (it falls back to matching properties), so use it to answer "who is the client for <address>?".
@@ -45,6 +47,29 @@ Guidelines:
 - Use add_property_photo to log a dated photo/missed-pickup entry onto an ADDRESS's file (e.g. "log that 123 Main wasn't picked up June 24, bin not out"). You can't take a picture yourself, so unless the user gives you an image_url this logs a dated note the owner attaches the real photo to in Clients › property › Photos. Always set the date to the day it applies to. Resolve the property by address (add client_name if ambiguous); if it returns needs_clarification, ask which match.
 - You cannot send payment links or charge cards — tell the user to use the "Send payment link" button on the invoice for that.
 - After making a change, confirm what you did in one short sentence.`
+
+// Selectable personalities for Randy's STAFF chat replies. The customer-facing
+// guardrail in BASE_SYSTEM always wins — these only flavor the dispatch console.
+const TONES: Record<string, string> = {
+  professional:
+    "TONE: Professional. Neutral, concise, operational. No jokes, no profanity, no slang. Just the facts and the action.",
+  friendly:
+    "TONE: Friendly. Warm, casual, and encouraging with a little light humor. Talk like a helpful coworker. No profanity.",
+  funny:
+    "TONE: Funny (clean). Be genuinely witty — quick one-liners, playful asides, the occasional trash-hauling pun. Keep it PG: NO profanity. Land the joke, then nail the answer/action.",
+  spicy:
+    "TONE: Spicy. You're a hilarious, foul-mouthed dispatch buddy who loves this messy business. Crack jokes, talk trash (literally), and curse freely for comedic emphasis — f-bombs are fine in staff chat. HARD RULES: (1) never aim profanity AT the user or any person — it's for vibe and emphasis, never an insult; (2) absolutely no slurs or hateful/harassing language; (3) always still complete the task and give correct info. Be funny as hell, then get the job done.",
+  hype:
+    "TONE: Hype. High-energy hype-man. Big enthusiasm, celebrate the wins, light slang, lots of momentum. No profanity.",
+  deadpan:
+    "TONE: Deadpan. Dry, sarcastic, understated, mildly world-weary. Minimal words, maximum side-eye. A stray 'damn' or 'hell' is fine; no f-bombs.",
+}
+const DEFAULT_TONE = "spicy"
+
+function buildSystem(tone?: string | null): string {
+  const key = (tone || DEFAULT_TONE).toLowerCase()
+  return `${BASE_SYSTEM}\n\n${TONES[key] || TONES[DEFAULT_TONE]}`
+}
 
 const tools = [
   {
@@ -1023,7 +1048,7 @@ async function runTool(name: string, input: any): Promise<unknown> {
   }
 }
 
-async function callAnthropic(messages: unknown[], apiKey: string) {
+async function callAnthropic(messages: unknown[], apiKey: string, system: string) {
   const r = await fetch(ANTHROPIC_URL, {
     method: "POST",
     headers: {
@@ -1031,7 +1056,7 @@ async function callAnthropic(messages: unknown[], apiKey: string) {
       "anthropic-version": "2023-06-01",
       "content-type": "application/json",
     },
-    body: JSON.stringify({ model: MODEL, max_tokens: 4096, system: SYSTEM, tools, messages }),
+    body: JSON.stringify({ model: MODEL, max_tokens: 4096, system, tools, messages }),
   })
   const data = await r.json()
   if (!r.ok) throw new Error(data?.error?.message || `Anthropic ${r.status}`)
@@ -1070,11 +1095,16 @@ Deno.serve(async (req) => {
       .filter((m: any) => m && m.text)
       .map((m: any) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.text }))
 
+    // Personality is configured in Settings (app_settings.randy_tone).
+    let tone: string | null = null
+    try { tone = (await sbGet(`app_settings?id=eq.1&select=randy_tone`))?.[0]?.randy_tone ?? null } catch (_) { /* fall back to default */ }
+    const system = buildSystem(tone)
+
     const actions: Array<{ tool: string; result: unknown }> = []
     let finalText = ""
 
     for (let i = 0; i < 8; i++) {
-      const res = await callAnthropic(messages, apiKey)
+      const res = await callAnthropic(messages, apiKey, system)
       finalText = (res.content || [])
         .filter((b: any) => b.type === "text")
         .map((b: any) => b.text)

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { MONO } from '../data.js'
 import { listTags, createTag, updateTag, deleteTag, tagUsageCounts, subscribeTags, TAG_COLORS } from '../lib/tagsData.js'
-import { loadSettings, saveDepot, geocodeAddress, subscribeSettings, saveSmsTemplates } from '../lib/settingsData.js'
+import { loadSettings, saveDepot, geocodeAddress, subscribeSettings, saveSmsTemplates, saveRandyTone, RANDY_TONES } from '../lib/settingsData.js'
 import { stripeStatus, stripeOnboard } from '../lib/stripeData.js'
 import { getSmsConfig, saveSmsConfig, sendTestSms, listSmsSubscriptions, ensureSmsSubscription } from '../lib/smsData.js'
 
@@ -41,6 +41,8 @@ export default function Settings({ app }) {
   const [tpl, setTpl] = useState({ company_name: '', sms_checkin_template: '', sms_checkout_template: '', sms_reminder_template: '', sms_invoice_template: '' })
   const [tplSaving, setTplSaving] = useState(false)
   const [tplMsg, setTplMsg] = useState(null)
+  const [randyTone, setRandyTone] = useState('spicy')
+  const [randyMsg, setRandyMsg] = useState(null)
 
   async function refresh() {
     const [t, c] = await Promise.all([listTags(), tagUsageCounts()])
@@ -64,6 +66,7 @@ export default function Settings({ app }) {
           sms_reminder_template: s.sms_reminder_template || '',
           sms_invoice_template: s.sms_invoice_template || '',
         })
+        if (s.randy_tone) setRandyTone(s.randy_tone)
       }
     }).catch(() => {})
     load()
@@ -200,6 +203,18 @@ export default function Settings({ app }) {
       setTplSaving(false)
     }
   }
+  async function pickTone(tone) {
+    const prev = randyTone
+    setRandyTone(tone)
+    setRandyMsg(null)
+    try {
+      await saveRandyTone(tone)
+      setRandyMsg({ type: 'ok', text: 'Saved — Randy will talk like this from his next reply.' })
+    } catch (e) {
+      setRandyTone(prev)
+      setRandyMsg({ type: 'err', text: e.message || String(e) })
+    }
+  }
   async function testSms() {
     const to = smsTestTo.trim()
     if (!to) { setSmsMsg({ type: 'err', text: 'Enter a number to send a test to.' }); return }
@@ -267,6 +282,31 @@ export default function Settings({ app }) {
           </div>
           <button type="submit" disabled={depotSaving} style={{ marginTop: 6, background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: depotSaving ? 0.6 : 1 }}>{depotSaving ? 'Saving…' : 'Save location'}</button>
         </form>
+      </div>
+
+      {/* trashy randy personality */}
+      <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '20px 22px', marginBottom: 16 }}>
+        <div style={{ fontWeight: 700, fontSize: 16 }}>Trashy Randy personality</div>
+        <div style={{ fontSize: 12.5, color: '#7c8a82', marginTop: 3, marginBottom: 14 }}>
+          How Randy talks to your team in the dispatch chat. This is staff-only — anything a customer sees (invoices, texts, saved notes) always stays clean and professional, no matter the tone.
+        </div>
+        {randyMsg && (
+          <div style={{ background: randyMsg.type === 'ok' ? '#eef7f1' : '#fdecea', border: '1px solid ' + (randyMsg.type === 'ok' ? '#cfe7da' : '#f3b7b0'), color: randyMsg.type === 'ok' ? '#1f7a4d' : '#9a2c1e', borderRadius: 10, padding: '9px 12px', fontSize: 12.5, marginBottom: 14 }}>{randyMsg.text}</div>
+        )}
+        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 10 }}>
+          {RANDY_TONES.map(([id, label, desc]) => {
+            const on = randyTone === id
+            return (
+              <div key={id} onClick={() => pickTone(id)} style={{ cursor: 'pointer', border: `1px solid ${on ? '#1f7a4d' : '#dde2dd'}`, background: on ? '#e7f1eb' : '#fff', borderRadius: 11, padding: '12px 14px', display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                <span style={{ flex: 'none', marginTop: 2, width: 16, height: 16, borderRadius: '50%', border: `2px solid ${on ? '#1f7a4d' : '#c3ccc5'}`, background: on ? '#1f7a4d' : '#fff', boxShadow: on ? 'inset 0 0 0 2px #fff' : 'none' }} />
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 13.5, color: on ? '#15281d' : '#1a2420' }}>{label}{id === 'spicy' ? ' 🌶️' : ''}</div>
+                  <div style={{ fontSize: 11.5, color: '#7c8a82', marginTop: 2, lineHeight: 1.35 }}>{desc}</div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
       </div>
 
       {/* payments */}

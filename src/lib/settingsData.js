@@ -46,6 +46,25 @@ export async function saveSmsTemplates(t) {
   if (error) throw error
 }
 
+// Trashy Randy's chat personality (staff-facing only). One of:
+// professional | friendly | funny | spicy | hype | deadpan.
+export const RANDY_TONES = [
+  ['spicy', 'Spicy', 'Funny + cussing (f-bombs). Staff-only — never customer-facing.'],
+  ['funny', 'Funny', 'Witty and playful jokes, no cussing.'],
+  ['friendly', 'Friendly', 'Warm and casual, light humor, no cussing.'],
+  ['professional', 'Professional', 'Neutral, concise, all business.'],
+  ['hype', 'Hype', 'High-energy hype-man, celebrates the wins.'],
+  ['deadpan', 'Deadpan', 'Dry, sarcastic, understated.'],
+]
+
+export async function saveRandyTone(tone) {
+  const { error } = await supabase
+    .from('app_settings')
+    .update({ randy_tone: tone, updated_at: new Date().toISOString() })
+    .eq('id', 1)
+  if (error) throw error
+}
+
 // Free geocoding via OpenStreetMap Nominatim (no key). For light use only.
 export async function geocodeAddress(q) {
   const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`
