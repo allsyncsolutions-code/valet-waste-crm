@@ -41,6 +41,8 @@ Guidelines:
 - Staff flag uncertain imported properties as "Needs review" (e.g. unclear pricing or pickup frequency). Use list_needs_review to report what's flagged ("what needs review?"). Use edit_property to fix ONE property the owner is reviewing — set price/service/pickup_days/notes — and pass mark_reviewed:true to clear the flag once it's right. Find the property by address (add client_name if the address is ambiguous); if edit_property returns needs_clarification, ask the user which match they mean.
 - Use flag_properties to flag or unflag MANY properties at once by client, tag, or address (e.g. "flag everything for Staylah for review" → by_customer:"Staylah"; "clear review on all Palm Coast properties" → address_contains:"Palm Coast", needs_review:false). It defaults to flagging; pass needs_review:false to clear.
 - Use find_duplicates when the user asks about duplicate stops/addresses/properties. It returns groups of the same address used under more than one client; summarize the count and call out a few examples (address + the clients involved). To then flag those for cleanup, use flag_properties.
+- Use list_skipped_stops to report addresses that were NOT checked in (skipped) on a day — e.g. "what got skipped yesterday?" or "which stops weren't picked up on June 24?". It defaults to today; pass a date or a route_code to narrow it.
+- Use add_property_photo to log a dated photo/missed-pickup entry onto an ADDRESS's file (e.g. "log that 123 Main wasn't picked up June 24, bin not out"). You can't take a picture yourself, so unless the user gives you an image_url this logs a dated note the owner attaches the real photo to in Clients › property › Photos. Always set the date to the day it applies to. Resolve the property by address (add client_name if ambiguous); if it returns needs_clarification, ask which match.
 - You cannot send payment links or charge cards — tell the user to use the "Send payment link" button on the invoice for that.
 - After making a change, confirm what you did in one short sentence.`
 
@@ -333,6 +335,34 @@ const tools = [
       },
     },
   },
+  {
+    name: "list_skipped_stops",
+    description:
+      "List service addresses that were NOT checked in (skipped) on a given day — route stops with no driver check-in for that service date. Use when the user asks which addresses were missed / not picked up / not checked in on a date (e.g. 'what got skipped yesterday?'). Returns each skipped stop's address, route, and owning client. Defaults to today.",
+    input_schema: {
+      type: "object",
+      properties: {
+        date: { type: "string", description: "Service date YYYY-MM-DD. Defaults to today." },
+        route_code: { type: "string", description: "Optional — limit to one route code/letter." },
+      },
+    },
+  },
+  {
+    name: "add_property_photo",
+    description:
+      "Add a dated photo / missed-pickup entry to an ADDRESS's file (the property's Photos). Use to document an address that was not checked in on a day (e.g. 'log that 123 Main wasn't picked up June 24, bin not out'). Find the property by address (add client_name to disambiguate a shared address). You cannot capture an image yourself, so this logs a dated note entry the owner can attach the actual photo to in the Clients > property > Photos panel — UNLESS the user gives you an image_url, which is stored as the photo. Always set the date to the day it applies to.",
+    input_schema: {
+      type: "object",
+      properties: {
+        address: { type: "string", description: "Address (or part of it) of the property. Required unless property_id is given." },
+        property_id: { type: "string", description: "Exact property id, if known. Use instead of address." },
+        client_name: { type: "string", description: "Optional — the owning client, to disambiguate a shared address." },
+        date: { type: "string", description: "Photo / missed-pickup date YYYY-MM-DD. Defaults to today." },
+        note: { type: "string", description: "Short note, e.g. 'bin not out', 'gate locked'." },
+        image_url: { type: "string", description: "Optional public image URL to store as the photo, if the user provides one." },
+      },
+    },
+  },
 ]
 
 // ---- PostgREST helpers (service role) ----
@@ -399,6 +429,7 @@ function logForTool(name: string, out: any): Promise<void> | undefined {
     case "bulk_add_properties": return logActivity("properties_imported", `Imported ${out.inserted} properties for ${out.client}`, "customer", out.customer_id)
     case "edit_property": return out.needs_clarification ? undefined : logActivity("property_updated", `Updated property ${out.address}${out.needs_review === false ? " (reviewed)" : ""}`, "property", out.id)
     case "flag_properties": return out.changed ? logActivity("properties_flagged", `${out.needs_review ? "Flagged" : "Cleared review on"} ${out.changed} propert${out.changed === 1 ? "y" : "ies"}`, "customer") : undefined
+    case "add_property_photo": return out.needs_clarification ? undefined : logActivity("property_photo_added", `Logged a ${out.date} photo on ${out.address}`, "property", out.id)
     default: return undefined
   }
 }
@@ -886,6 +917,85 @@ async function findDuplicates(a: any) {
   return { count: Array.isArray(groups) ? groups.length : 0, duplicates: groups }
 }
 
+// Resolve exactly one property from address/property_id (+ optional client_name).
+// Returns { id, address } or { needs_clarification, matches } when ambiguous.
+async function resolveOneProperty(a: any): Promise<any> {
+  if (a.property_id) {
+    const rows = await sbGet(`properties?id=eq.${enc(a.property_id)}&select=id,address,name&limit=1`)
+    if (!rows[0]) throw new Error("Property not found.")
+    return { id: rows[0].id, address: rows[0].address || rows[0].name }
+  }
+  if (!a.address) throw new Error("Provide an address (or property_id) of the property.")
+  const like = enc(`*${a.address}*`)
+  let rows = await sbGet(`properties?or=(address.ilike.${like},name.ilike.${like})&select=id,address,name,customer_id&limit=10`)
+  if (a.client_name && rows.length > 1) {
+    const custs = await sbGet(`customers?name=ilike.${enc(`*${a.client_name}*`)}&select=id&limit=25`)
+    const cset = new Set(custs.map((c: any) => c.id))
+    rows = rows.filter((r: any) => cset.has(r.customer_id))
+  }
+  if (!rows.length) throw new Error(`No property matches "${a.address}".`)
+  if (rows.length > 1) {
+    return { needs_clarification: true, matches: rows.map((r: any) => ({ id: r.id, address: r.address || r.name })) }
+  }
+  return { id: rows[0].id, address: rows[0].address || rows[0].name }
+}
+
+async function addPropertyPhoto(a: any) {
+  const resolved = await resolveOneProperty(a)
+  if (resolved.needs_clarification) return resolved
+  const date = a.date ? String(a.date).trim() : today()
+  const row: Record<string, unknown> = {
+    property_id: resolved.id,
+    taken_on: date,
+    note: a.note ?? null,
+    image_url: a.image_url ?? null,
+    source: "randy",
+  }
+  const [created] = await sbPost("property_photos", row)
+  return {
+    id: created.id,
+    address: resolved.address,
+    date,
+    note: a.note ?? null,
+    has_image: !!a.image_url,
+    message: a.image_url
+      ? `Saved a photo to ${resolved.address}'s file dated ${date}.`
+      : `Logged a ${date} photo entry on ${resolved.address}'s file — attach the actual photo in Clients › the property › Photos.`,
+  }
+}
+
+async function listSkippedStops(a: any) {
+  const date = a.date ? String(a.date).trim() : today()
+  let routeFilter = ""
+  if (a.route_code) {
+    const code = String(a.route_code).trim().toUpperCase()
+    const rs = await sbGet(`routes?service_date=eq.${enc(date)}&code=eq.${enc(code)}&select=id`)
+    const ids = rs.map((r: any) => r.id)
+    if (!ids.length) return { date, count: 0, skipped: [], note: `No route ${code} on ${date}.` }
+    routeFilter = `&route_id=in.(${ids.join(",")})`
+  }
+  // Stops on that service date with no check-in = not checked in / skipped.
+  const stops = await sbGet(
+    `route_stops?check_in=is.null${routeFilter}&select=id,status,routes!inner(code,service_date),properties(name,address,customer_id)&routes.service_date=eq.${enc(date)}&order=seq.asc&limit=300`,
+  )
+  const custIds = [...new Set(stops.map((s: any) => s.properties?.customer_id).filter(Boolean))]
+  const nameById: Record<string, string> = {}
+  if (custIds.length) {
+    const cs = await sbGet(`customers?id=in.(${custIds.join(",")})&select=id,name`)
+    for (const c of cs) nameById[c.id] = c.name
+  }
+  return {
+    date,
+    count: stops.length,
+    skipped: stops.map((s: any) => ({
+      address: s.properties?.address || s.properties?.name || "(unknown)",
+      route: s.routes?.code,
+      client: s.properties?.customer_id ? (nameById[s.properties.customer_id] || null) : null,
+      status: s.status,
+    })),
+  }
+}
+
 async function runTool(name: string, input: any): Promise<unknown> {
   switch (name) {
     case "find_clients": return await findClients(input)
@@ -907,6 +1017,8 @@ async function runTool(name: string, input: any): Promise<unknown> {
     case "assemble_route": return await assembleRoute(input)
     case "move_stops": return await moveStops(input)
     case "bulk_add_properties": return await bulkAddProperties(input)
+    case "add_property_photo": return await addPropertyPhoto(input)
+    case "list_skipped_stops": return await listSkippedStops(input)
     default: throw new Error(`Unknown tool: ${name}`)
   }
 }
@@ -977,7 +1089,7 @@ Deno.serve(async (req) => {
         if (block.type !== "tool_use") continue
         try {
           const out = await runTool(block.name, block.input)
-          if (block.name !== "find_clients" && block.name !== "get_overview" && block.name !== "list_routes" && block.name !== "list_needs_review" && block.name !== "find_duplicates") {
+          if (block.name !== "find_clients" && block.name !== "get_overview" && block.name !== "list_routes" && block.name !== "list_needs_review" && block.name !== "find_duplicates" && block.name !== "list_skipped_stops") {
             actions.push({ tool: block.name, result: out })
             await logForTool(block.name, out)
           }

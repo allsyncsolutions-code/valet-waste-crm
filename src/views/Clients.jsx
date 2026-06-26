@@ -4,6 +4,10 @@ import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attach
 import { geocodeAll } from '../lib/importData.js'
 import { listTags, findOrCreateTag, subscribeTags } from '../lib/tagsData.js'
 import { stripeStatus, stripePaymentLink } from '../lib/stripeData.js'
+import { loadPropertyPhotos, uploadPropertyPhoto, updatePropertyPhoto, deletePropertyPhoto } from '../lib/propertyPhotosData.js'
+
+const todayStr = () => new Date().toISOString().slice(0, 10)
+const fmtDay = (d) => { try { return new Date(d + 'T00:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) } catch { return d } }
 
 const FREQ = [
   ['weekly', 'Weekly'],
@@ -65,6 +69,11 @@ export default function Clients({ app }) {
   const [histPid, setHistPid] = useState(null)
   const [hist, setHist] = useState([])
   const [histBusy, setHistBusy] = useState(false)
+  const [photoPid, setPhotoPid] = useState(null)
+  const [photos, setPhotos] = useState([])
+  const [photoBusy, setPhotoBusy] = useState(false)
+  const [photoDate, setPhotoDate] = useState(todayStr())
+  const [photoNote, setPhotoNote] = useState('')
   const [dupCount, setDupCount] = useState(0)
   const [dupOpen, setDupOpen] = useState(false)
   const [dupGroups, setDupGroups] = useState(null)
@@ -188,6 +197,43 @@ export default function Clients({ app }) {
     try { setHist(await loadPropertyVisits(p.id)) }
     catch (e) { setErr(e.message || String(e)) }
     finally { setHistBusy(false) }
+  }
+  async function togglePhotos(p) {
+    if (photoPid === p.id) { setPhotoPid(null); setPhotos([]); return }
+    setPhotoPid(p.id); setPhotos([]); setPhotoDate(todayStr()); setPhotoNote(''); setPhotoBusy(true)
+    try { setPhotos(await loadPropertyPhotos(p.id)) }
+    catch (e) { setErr(e.message || String(e)) }
+    finally { setPhotoBusy(false) }
+  }
+  async function addPhotos(p, fileList) {
+    const files = Array.from(fileList || [])
+    if (!files.length || photoBusy) return
+    setPhotoBusy(true)
+    setErr(null)
+    try {
+      for (const f of files) {
+        await uploadPropertyPhoto(p.id, f, { takenOn: photoDate || todayStr(), note: photoNote.trim() || null })
+      }
+      setPhotoNote('')
+      setPhotos(await loadPropertyPhotos(p.id))
+    } catch (e) {
+      setErr(e.message || String(e))
+    } finally {
+      setPhotoBusy(false)
+    }
+  }
+  async function changePhotoDate(ph, takenOn) {
+    if (!takenOn || takenOn === ph.takenOn) return
+    setPhotos((list) => list.map((x) => (x.id === ph.id ? { ...x, takenOn } : x)))
+    try { await updatePropertyPhoto(ph.id, { takenOn }) }
+    catch (e) { setErr(e.message || String(e)) }
+  }
+  async function removePhoto(p, ph) {
+    if (photoBusy) return
+    setPhotoBusy(true)
+    try { await deletePropertyPhoto(ph); setPhotos(await loadPropertyPhotos(p.id)) }
+    catch (e) { setErr(e.message || String(e)) }
+    finally { setPhotoBusy(false) }
   }
   const toggleDay = (d) =>
     setEditP((e) => ({ ...e, days: e.days.includes(d) ? e.days.filter((x) => x !== d) : [...e.days, d] }))
@@ -495,6 +541,7 @@ export default function Clients({ app }) {
                           {p.price != null && <div style={{ fontSize: 12.5, color: '#5d6b63', flex: 'none' }}>${Number(p.price).toFixed(2)}</div>}
                           <button onClick={() => toggleReview(p)} disabled={pBusy} title={p.needs_review ? 'Clear the review flag' : 'Flag this property for the owner to review'} style={{ flex: 'none', background: 'none', border: 'none', color: p.needs_review ? '#1f7a4d' : '#c0492f', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px', opacity: pBusy ? 0.6 : 1 }}>{p.needs_review ? 'Mark reviewed' : 'Needs review'}</button>
                           <button onClick={() => toggleHistory(p)} disabled={histBusy && histPid === p.id} style={{ flex: 'none', background: 'none', border: 'none', color: '#5d6b63', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>{histPid === p.id ? 'Hide' : 'History'}</button>
+                          <button onClick={() => togglePhotos(p)} disabled={photoBusy && photoPid === p.id} style={{ flex: 'none', background: 'none', border: 'none', color: '#5d6b63', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>{photoPid === p.id ? 'Hide' : 'Photos'}</button>
                           <button onClick={() => startEditProp(p)} style={{ flex: 'none', background: 'none', border: 'none', color: '#1f7a4d', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>Edit</button>
                         </div>
                         {histPid === p.id && (
@@ -513,6 +560,46 @@ export default function Clients({ app }) {
                                   </span>
                                 </div>
                               ))
+                            )}
+                          </div>
+                        )}
+                        {photoPid === p.id && (
+                          <div style={{ margin: '6px 0 2px 18px', borderLeft: '2px solid #eef0ed', paddingLeft: 12 }}>
+                            <div style={{ fontSize: 10.5, color: '#7c8a82', fontFamily: MONO, letterSpacing: '.06em', marginBottom: 8 }}>PHOTOS — PROOF FOR ADDRESSES NOT CHECKED IN</div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+                              <label style={{ fontSize: 11.5, color: '#7c8a82' }}>Date
+                                <input type="date" value={photoDate} max={todayStr()} onChange={(e) => setPhotoDate(e.target.value)} style={{ ...inp, fontSize: 12.5, marginLeft: 6, padding: '5px 8px', width: 'auto' }} />
+                              </label>
+                              <input value={photoNote} onChange={(e) => setPhotoNote(e.target.value)} placeholder="Note (e.g. bin not out)" style={{ ...inp, fontSize: 12.5, padding: '5px 8px', flex: 1, minWidth: 120 }} />
+                              <label style={{ flex: 'none', cursor: photoBusy ? 'default' : 'pointer', fontSize: 12.5, fontWeight: 600, color: '#fff', background: photoBusy ? '#9aa69e' : '#1f7a4d', borderRadius: 8, padding: '6px 12px' }}>
+                                {photoBusy ? 'Working…' : '+ Add photo'}
+                                <input type="file" accept="image/*" multiple disabled={photoBusy} onChange={(e) => { addPhotos(p, e.target.files); e.target.value = '' }} style={{ display: 'none' }} />
+                              </label>
+                            </div>
+                            {photoBusy && !photos.length ? (
+                              <div style={{ fontSize: 12, color: '#9aa69e' }}>Loading…</div>
+                            ) : photos.length === 0 ? (
+                              <div style={{ fontSize: 12, color: '#9aa69e' }}>No photos yet. Pick a date, then add a photo of the address.</div>
+                            ) : (
+                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(96px, 1fr))', gap: 8 }}>
+                                {photos.map((ph) => (
+                                  <div key={ph.id} style={{ border: '1px solid #e6eae6', borderRadius: 10, overflow: 'hidden', background: '#fff' }}>
+                                    <div style={{ position: 'relative', aspectRatio: '1', background: '#eef0ed' }}>
+                                      {ph.url ? (
+                                        <a href={ph.url} target="_blank" rel="noreferrer"><img src={ph.url} alt={ph.note || 'photo'} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} /></a>
+                                      ) : (
+                                        <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#9aa69e', fontSize: 22 }}>▦</div>
+                                      )}
+                                      <button onClick={() => removePhoto(p, ph)} title="Delete photo" style={{ position: 'absolute', top: 4, right: 4, width: 22, height: 22, borderRadius: 6, border: 'none', background: 'rgba(15,30,20,.55)', color: '#fff', fontSize: 12, cursor: 'pointer', lineHeight: 1 }}>✕</button>
+                                    </div>
+                                    <div style={{ padding: '6px 7px' }}>
+                                      <input type="date" value={ph.takenOn} max={todayStr()} onChange={(e) => changePhotoDate(ph, e.target.value)} style={{ width: '100%', border: '1px solid #eef0ed', borderRadius: 6, padding: '3px 5px', fontSize: 11, color: '#1a2420', outline: 'none' }} />
+                                      {ph.note && <div style={{ fontSize: 11, color: '#7c8a82', marginTop: 3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={ph.note}>{ph.note}</div>}
+                                      {ph.source === 'randy' && <div style={{ fontSize: 9.5, color: '#9aa69e', fontFamily: MONO, marginTop: 2 }}>via Randy</div>}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
                             )}
                           </div>
                         )}
