@@ -82,6 +82,17 @@ const tools = [
     },
   },
   {
+    name: "list_properties",
+    description: "List all service properties (addresses) belonging to a client, with each property's address, service, monthly price and pickup days. Use this to itemize an invoice with one line per property address, to count how many stops/addresses a client has, or to answer 'what addresses does <client> have?'. Provide customer_id (preferred) or a client name in query.",
+    input_schema: {
+      type: "object",
+      properties: {
+        customer_id: { type: "string", description: "The client's id (preferred — get it from find_clients)" },
+        query: { type: "string", description: "Client name to resolve if you don't have the id" },
+      },
+    },
+  },
+  {
     name: "get_overview",
     description: "Get a snapshot of the business: client counts, today's scheduled pickups, outstanding (sent) and collected (paid) invoice totals, and draft count.",
     input_schema: { type: "object", properties: {} },
@@ -156,7 +167,7 @@ const tools = [
   },
   {
     name: "create_invoice",
-    description: "Create an invoice (draft by default) for a customer with line items. Totals are computed automatically.",
+    description: "Create an invoice (draft by default) for a customer with line items. Totals are computed automatically. To bill one line PER service address, call list_properties first to get each property's address and price, then pass one line item per property.",
     input_schema: {
       type: "object",
       properties: {
@@ -553,6 +564,45 @@ async function findClients(a: any) {
     if (c && !seen.has(c.id)) { seen.add(c.id); matches.push({ ...c, matched_property: p.address }) }
   }
   return { matches, matched_by_property: matches.length > 0 }
+}
+
+// List a client's service properties so Randy can itemize invoices per address,
+// count stops, etc. Accepts a customer_id (preferred) or a client name in query.
+async function listProperties(a: any) {
+  let customerId = a.customer_id ? String(a.customer_id).trim() : ""
+  let clientName = ""
+  if (!customerId) {
+    const q = String(a.query ?? "").trim()
+    if (!q) throw new Error("Provide a customer_id or a client name in query.")
+    const rows = await sbGet(`customers?name=ilike.${enc(`*${q}*`)}&select=id,name&limit=6`)
+    if (!rows.length) return { count: 0, properties: [], note: `No client matches "${q}".` }
+    if (rows.length > 1) {
+      return { needs_clarification: true, candidates: rows.map((r: any) => ({ id: r.id, name: r.name })) }
+    }
+    customerId = rows[0].id
+    clientName = rows[0].name
+  }
+  const props = await sbGet(
+    `properties?customer_id=eq.${enc(customerId)}&select=id,code,name,address,service,price,pickup_days,needs_review&order=address.asc`,
+  )
+  if (!clientName) {
+    const c = await sbGet(`customers?id=eq.${enc(customerId)}&select=name&limit=1`)
+    clientName = c[0]?.name ?? ""
+  }
+  return {
+    customer_id: customerId,
+    client: clientName,
+    count: props.length,
+    properties: props.map((p: any) => ({
+      id: p.id,
+      address: p.address,
+      name: p.name,
+      service: p.service,
+      price: p.price,
+      pickup_days: p.pickup_days,
+      needs_review: p.needs_review,
+    })),
+  }
 }
 
 async function getOverview() {
@@ -1024,6 +1074,7 @@ async function listSkippedStops(a: any) {
 async function runTool(name: string, input: any): Promise<unknown> {
   switch (name) {
     case "find_clients": return await findClients(input)
+    case "list_properties": return await listProperties(input)
     case "list_needs_review": return await listNeedsReview(input)
     case "edit_property": return await editProperty(input)
     case "flag_properties": return await flagProperties(input)
