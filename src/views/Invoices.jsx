@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { MONO } from '../data.js'
 import { hasSupabase } from '../lib/supabaseClient.js'
-import { loadCustomers } from '../lib/customersData.js'
+import { loadCustomers, createClient } from '../lib/customersData.js'
 import { stripeStatus } from '../lib/stripeData.js'
 import {
   loadInvoices,
@@ -32,6 +32,7 @@ const FILTERS = [['all', 'All'], ['draft', 'Draft'], ['sent', 'Sent'], ['paid', 
 const today = () => new Date().toISOString().slice(0, 10)
 const blankLine = () => ({ description: '', quantity: 1, unitPrice: '' })
 const blankForm = () => ({ customerId: '', issueDate: today(), dueDate: '', notes: '', discount: '', items: [blankLine()] })
+const blankClient = () => ({ name: '', contactName: '', email: '', phone: '', address: '' })
 
 export default function Invoices({ app }) {
   const isMobile = app.isMobile
@@ -47,6 +48,11 @@ export default function Invoices({ app }) {
   const [editId, setEditId] = useState(null)
   const [saving, setSaving] = useState(false)
   const [form, setForm] = useState(blankForm())
+
+  // Inline "add new client" inside the invoice form
+  const [addingClient, setAddingClient] = useState(false)
+  const [newClient, setNewClient] = useState(blankClient())
+  const [savingClient, setSavingClient] = useState(false)
 
   const [busy, setBusy] = useState(false) // detail-pane action in flight
 
@@ -87,13 +93,47 @@ export default function Invoices({ app }) {
   const removeLine = (idx) => setForm((f) => ({ ...f, items: f.items.length > 1 ? f.items.filter((_, i) => i !== idx) : f.items }))
   const { subtotal, total } = invoiceTotals(form.items, form.discount)
 
+  // Save a brand-new client created inline, then select it for this invoice.
+  async function saveNewClient() {
+    const name = newClient.name.trim()
+    if (!name) { setErr('Give the new client a name.'); return }
+    setSavingClient(true)
+    setErr(null)
+    try {
+      const id = await createClient({
+        name,
+        contactName: newClient.contactName.trim(),
+        email: newClient.email.trim(),
+        phone: newClient.phone.trim(),
+        address: newClient.address.trim(),
+      })
+      const rows = await loadCustomers()
+      setCustomers(rows)
+      setF({ customerId: id })
+      setAddingClient(false)
+      setNewClient(blankClient())
+    } catch (e) {
+      setErr(e.message || String(e))
+    } finally {
+      setSavingClient(false)
+    }
+  }
+  function cancelNewClient() {
+    setAddingClient(false)
+    setNewClient(blankClient())
+  }
+
   function openCreate() {
     setEditId(null)
+    setAddingClient(false)
+    setNewClient(blankClient())
     setForm({ ...blankForm(), customerId: customers[0]?.id || '' })
     setShowForm(true)
   }
   function openEdit(inv) {
     setEditId(inv.id)
+    setAddingClient(false)
+    setNewClient(blankClient())
     setForm({
       customerId: inv.customerId,
       issueDate: inv.issueDate || today(),
@@ -163,7 +203,7 @@ export default function Invoices({ app }) {
         <SummaryCard label="Collected" value={money(paidTotal)} sub={`${invoices.filter((i) => i.status === 'paid').length} paid`} accent="#1f7a4d" />
         <SummaryCard label="Drafts" value={String(draftCount)} sub="not sent yet" accent="#7c8a82" />
         <div style={{ flex: 1 }} />
-        <button onClick={openCreate} disabled={!customers.length} style={{ alignSelf: 'center', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 10, padding: '11px 17px', fontSize: 13.5, fontWeight: 600, cursor: customers.length ? 'pointer' : 'default', opacity: customers.length ? 1 : 0.5 }} title={customers.length ? '' : 'Add a client first'}>+ New invoice</button>
+        <button onClick={openCreate} style={{ alignSelf: 'center', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 10, padding: '11px 17px', fontSize: 13.5, fontWeight: 600, cursor: 'pointer' }}>+ New invoice</button>
       </div>
 
       {err && <div style={errorBox}>{err}</div>}
@@ -228,9 +268,18 @@ export default function Invoices({ app }) {
 
             <div style={twoCol}>
               <Field label="Customer *">
-                <select value={form.customerId} onChange={(e) => setF({ customerId: e.target.value })} style={inp} disabled={!!editId}>
+                <select
+                  value={form.customerId}
+                  onChange={(e) => {
+                    if (e.target.value === '__new__') { setAddingClient(true); return }
+                    setF({ customerId: e.target.value })
+                  }}
+                  style={inp}
+                  disabled={!!editId}
+                >
                   <option value="">Select…</option>
                   {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  {!editId && <option value="__new__">+ Add new client…</option>}
                 </select>
               </Field>
               <div style={twoCol}>
@@ -238,6 +287,25 @@ export default function Invoices({ app }) {
                 <Field label="Due date"><input value={form.dueDate || ''} onChange={(e) => setF({ dueDate: e.target.value })} style={inp} type="date" /></Field>
               </div>
             </div>
+
+            {addingClient && (
+              <div style={{ background: '#f7f9f7', border: '1px solid #e6eae6', borderRadius: 11, padding: 14, marginBottom: 4 }}>
+                <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 10 }}>New client</div>
+                <div style={twoCol}>
+                  <Field label="Name *"><input value={newClient.name} onChange={(e) => setNewClient((c) => ({ ...c, name: e.target.value }))} style={inp} placeholder="Business or person" autoFocus /></Field>
+                  <Field label="Contact name"><input value={newClient.contactName} onChange={(e) => setNewClient((c) => ({ ...c, contactName: e.target.value }))} style={inp} placeholder="Optional" /></Field>
+                </div>
+                <div style={twoCol}>
+                  <Field label="Email"><input value={newClient.email} onChange={(e) => setNewClient((c) => ({ ...c, email: e.target.value }))} style={inp} type="email" placeholder="Optional" /></Field>
+                  <Field label="Phone"><input value={newClient.phone} onChange={(e) => setNewClient((c) => ({ ...c, phone: e.target.value }))} style={inp} placeholder="Optional" /></Field>
+                </div>
+                <Field label="Address"><input value={newClient.address} onChange={(e) => setNewClient((c) => ({ ...c, address: e.target.value }))} style={inp} placeholder="Optional" /></Field>
+                <div style={{ display: 'flex', gap: 9, marginTop: 4 }}>
+                  <button type="button" onClick={cancelNewClient} disabled={savingClient} style={cancelBtn}>Cancel</button>
+                  <button type="button" onClick={saveNewClient} disabled={savingClient || !newClient.name.trim()} style={{ ...primaryBtn, opacity: savingClient || !newClient.name.trim() ? 0.6 : 1 }}>{savingClient ? 'Saving…' : 'Save client'}</button>
+                </div>
+              </div>
+            )}
 
             <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.1em', color: '#9aa69e', margin: '8px 0 8px', paddingTop: 10, borderTop: '1px solid #eef0ed' }}>LINE ITEMS</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
