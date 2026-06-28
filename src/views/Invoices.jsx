@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { MONO } from '../data.js'
 import { hasSupabase } from '../lib/supabaseClient.js'
 import { loadCustomers, createClient } from '../lib/customersData.js'
@@ -41,6 +41,7 @@ export default function Invoices({ app }) {
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState(null)
   const [filter, setFilter] = useState('all')
+  const [search, setSearch] = useState('')
   const [selId, setSelId] = useState(null)
   const [stripeOk, setStripeOk] = useState(false)
 
@@ -75,10 +76,15 @@ export default function Invoices({ app }) {
     return () => unsub && unsub()
   }, [])
 
-  const list = useMemo(
-    () => (filter === 'all' ? invoices : invoices.filter((i) => i.status === filter)),
-    [invoices, filter]
-  )
+  const list = useMemo(() => {
+    let rows = filter === 'all' ? invoices : invoices.filter((i) => i.status === filter)
+    const q = search.trim().toLowerCase()
+    if (q) rows = rows.filter((i) =>
+      (i.customerName || '').toLowerCase().includes(q) ||
+      (i.number || '').toLowerCase().includes(q)
+    )
+    return rows
+  }, [invoices, filter, search])
   const cur = invoices.find((i) => i.id === selId) || null
 
   const outstanding = round2(invoices.filter((i) => i.status === 'sent').reduce((s, i) => s + i.total, 0))
@@ -216,6 +222,17 @@ export default function Invoices({ app }) {
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '0.85fr 1.15fr', gap: 18 }}>
         {/* list */}
         <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: 8 }}>
+          <div style={{ position: 'relative', padding: '4px 4px 8px' }}>
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search by client or invoice #…"
+              style={{ ...inp, fontSize: 13, padding: '8px 30px 8px 11px' }}
+            />
+            {search && (
+              <button onClick={() => setSearch('')} title="Clear search" style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: '#9aa69e', fontSize: 16, cursor: 'pointer', padding: 0, lineHeight: 1 }}>×</button>
+            )}
+          </div>
           <div style={{ display: 'flex', gap: 5, padding: '4px 4px 8px', flexWrap: 'wrap' }}>
             {FILTERS.map(([id, label]) => {
               const on = filter === id
@@ -228,7 +245,7 @@ export default function Invoices({ app }) {
 
           {loading && <div style={empty}>Loading invoices…</div>}
           {!loading && !invoices.length && <div style={empty}>No invoices yet. Create your first with “New invoice”.</div>}
-          {!loading && !!invoices.length && !list.length && <div style={empty}>No {filter} invoices.</div>}
+          {!loading && !!invoices.length && !list.length && <div style={empty}>{search.trim() ? `No invoices match “${search.trim()}”.` : `No ${filter} invoices.`}</div>}
 
           {list.map((inv) => {
             const on = inv.id === selId
@@ -268,19 +285,13 @@ export default function Invoices({ app }) {
 
             <div style={twoCol}>
               <Field label="Customer *">
-                <select
+                <CustomerSelect
+                  customers={customers}
                   value={form.customerId}
-                  onChange={(e) => {
-                    if (e.target.value === '__new__') { setAddingClient(true); return }
-                    setF({ customerId: e.target.value })
-                  }}
-                  style={inp}
                   disabled={!!editId}
-                >
-                  <option value="">Select…</option>
-                  {!editId && <option value="__new__">+ Add new client…</option>}
-                  {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                </select>
+                  onChange={(id) => setF({ customerId: id })}
+                  onAddNew={() => setAddingClient(true)}
+                />
               </Field>
               <div style={twoCol}>
                 <Field label="Issue date"><input value={form.issueDate || ''} onChange={(e) => setF({ issueDate: e.target.value })} style={inp} type="date" /></Field>
@@ -422,6 +433,56 @@ function InvoiceDetail({ inv, stripeOk, busy, onEdit, onMarkPaid, onSend, onText
         <div style={{ flex: 1 }} />
         <button onClick={onDelete} disabled={busy} style={{ background: '#fff', border: '1px solid #f0c9c2', color: '#c0492f', borderRadius: 9, padding: '10px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Delete</button>
       </div>
+    </div>
+  )
+}
+
+// Searchable customer picker used in the invoice form. Type to filter; the
+// "+ Add new client…" row stays pinned at the top.
+function CustomerSelect({ customers, value, onChange, onAddNew, disabled }) {
+  const selected = customers.find((c) => c.id === value) || null
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const boxRef = useRef(null)
+
+  useEffect(() => {
+    function onDoc(e) { if (boxRef.current && !boxRef.current.contains(e.target)) setOpen(false) }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [])
+
+  if (disabled) {
+    return <input value={selected?.name || ''} readOnly style={{ ...inp, background: '#f3f5f2', color: '#5d6b63' }} />
+  }
+
+  const q = query.trim().toLowerCase()
+  const filtered = q ? customers.filter((c) => (c.name || '').toLowerCase().includes(q)) : customers
+
+  return (
+    <div ref={boxRef} style={{ position: 'relative' }}>
+      <input
+        value={open ? query : (selected?.name || '')}
+        onChange={(e) => { setQuery(e.target.value); setOpen(true) }}
+        onFocus={() => { setOpen(true); setQuery('') }}
+        placeholder={selected ? selected.name : 'Search clients…'}
+        style={inp}
+      />
+      {open && (
+        <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, marginTop: 4, background: '#fff', border: '1px solid #dde2dd', borderRadius: 9, boxShadow: '0 12px 32px rgba(0,0,0,.14)', zIndex: 20, maxHeight: 240, overflowY: 'auto', padding: 4 }}>
+          <div
+            onMouseDown={(e) => { e.preventDefault(); setOpen(false); setQuery(''); onAddNew() }}
+            style={{ padding: '8px 10px', borderRadius: 7, cursor: 'pointer', fontSize: 13, fontWeight: 600, color: '#1f7a4d' }}
+          >+ Add new client…</div>
+          {filtered.length === 0 && <div style={{ padding: '8px 10px', fontSize: 12.5, color: '#9aa69e' }}>No clients match.</div>}
+          {filtered.map((c) => (
+            <div
+              key={c.id}
+              onMouseDown={(e) => { e.preventDefault(); onChange(c.id); setQuery(''); setOpen(false) }}
+              style={{ padding: '8px 10px', borderRadius: 7, cursor: 'pointer', fontSize: 13, background: c.id === value ? '#f3faf5' : 'transparent' }}
+            >{c.name}</div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
