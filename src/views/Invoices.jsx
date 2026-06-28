@@ -278,8 +278,8 @@ export default function Invoices({ app }) {
                   disabled={!!editId}
                 >
                   <option value="">Select…</option>
-                  {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                   {!editId && <option value="__new__">+ Add new client…</option>}
+                  {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
               </Field>
               <div style={twoCol}>
