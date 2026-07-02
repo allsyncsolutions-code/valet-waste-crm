@@ -3,6 +3,7 @@ import { MONO } from '../data.js'
 import { listTags, createTag, updateTag, deleteTag, tagUsageCounts, subscribeTags, TAG_COLORS } from '../lib/tagsData.js'
 import { loadSettings, saveDepot, geocodeAddress, subscribeSettings, saveSmsTemplates, saveRandyTone, RANDY_TONES } from '../lib/settingsData.js'
 import { stripeStatus, stripeOnboard } from '../lib/stripeData.js'
+import { platformBillingStatus, platformBillingCheckout, platformBillingPortal } from '../lib/platformBillingData.js'
 import { getSmsConfig, saveSmsConfig, sendTestSms, listSmsSubscriptions, ensureSmsSubscription } from '../lib/smsData.js'
 
 const EMPTY_SMS = {
@@ -30,6 +31,7 @@ export default function Settings({ app }) {
   const [geoBusy, setGeoBusy] = useState(false)
   const [depotSaving, setDepotSaving] = useState(false)
   const [stripe, setStripe] = useState({ loading: true, data: null, busy: false, err: null })
+  const [billing, setBilling] = useState({ loading: true, data: null, busy: false, err: null })
   const [sms, setSms] = useState(EMPTY_SMS)
   const [smsFlags, setSmsFlags] = useState({ rc_secret_set: false, rc_jwt_set: false, rc_webhook_token_set: false })
   const [smsWebhookUrl, setSmsWebhookUrl] = useState('')
@@ -131,6 +133,41 @@ export default function Settings({ app }) {
       else throw new Error('Could not start Stripe onboarding.')
     } catch (e) {
       setStripe((s) => ({ ...s, busy: false, err: e.message || String(e) }))
+    }
+  }
+
+  async function refreshBilling() {
+    try {
+      const d = await platformBillingStatus()
+      setBilling((s) => ({ ...s, loading: false, data: d, err: null }))
+    } catch (e) {
+      setBilling((s) => ({ ...s, loading: false, err: e.message || String(e) }))
+    }
+  }
+  useEffect(() => {
+    refreshBilling()
+    // returning from Checkout / Billing Portal — clean the ?crm_billing= param
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('crm_billing')) window.history.replaceState({}, '', window.location.pathname)
+  }, [])
+  async function startBilling() {
+    setBilling((s) => ({ ...s, busy: true, err: null }))
+    try {
+      const d = await platformBillingCheckout()
+      if (d && d.url) window.location.href = d.url
+      else throw new Error('Could not start checkout.')
+    } catch (e) {
+      setBilling((s) => ({ ...s, busy: false, err: e.message || String(e) }))
+    }
+  }
+  async function manageBilling() {
+    setBilling((s) => ({ ...s, busy: true, err: null }))
+    try {
+      const d = await platformBillingPortal()
+      if (d && d.url) window.location.href = d.url
+      else throw new Error('Could not open the billing portal.')
+    } catch (e) {
+      setBilling((s) => ({ ...s, busy: false, err: e.message || String(e) }))
     }
   }
 
@@ -338,6 +375,44 @@ export default function Settings({ app }) {
         ) : (
           <button onClick={connectStripe} disabled={stripe.busy} style={{ background: '#635bff', color: '#fff', border: 'none', borderRadius: 9, padding: '11px 18px', fontSize: 13.5, fontWeight: 600, cursor: 'pointer', opacity: stripe.busy ? 0.6 : 1 }}>{stripe.busy ? 'Opening…' : 'Connect with Stripe'}</button>
         )}
+      </div>
+
+      {/* CRM subscription (platform billing — our own $250/mo) */}
+      <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '20px 22px', marginBottom: 16 }}>
+        <div style={{ fontWeight: 700, fontSize: 16 }}>CRM subscription</div>
+        <div style={{ fontSize: 12.5, color: '#7c8a82', marginTop: 3, marginBottom: 16 }}>
+          Your Valet Waste CRM plan — $250/mo, billed on the 2nd. Card is entered and managed securely on Stripe.
+        </div>
+        {billing.err && <div style={{ background: '#fdecea', border: '1px solid #f3b7b0', color: '#9a2c1e', borderRadius: 10, padding: '9px 12px', fontSize: 12.5, marginBottom: 14 }}>{billing.err}</div>}
+        {billing.loading ? (
+          <div style={{ color: '#9aa69e', fontSize: 13 }}>Checking subscription…</div>
+        ) : (() => {
+          const st = (billing.data && billing.data.status) || 'none'
+          const active = st === 'active' || st === 'trialing'
+          const pastDue = st === 'past_due' || st === 'unpaid' || st === 'incomplete'
+          const dot = active ? '#22b06b' : pastDue ? '#c0392b' : '#c08a2e'
+          const label = active ? 'Active' : pastDue ? 'Payment needed' : st === 'canceled' ? 'Canceled' : 'Not set up'
+          const nextDate = billing.data && billing.data.currentPeriodEnd
+            ? new Date(billing.data.currentPeriodEnd).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+            : null
+          const hasCustomer = billing.data && billing.data.hasCustomer
+          return (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+              <span style={{ width: 10, height: 10, borderRadius: '50%', background: dot, flex: 'none' }} />
+              <div style={{ flex: 1, minWidth: 180 }}>
+                <div style={{ fontWeight: 600, fontSize: 13.5 }}>{label}{active ? ' — $250/mo' : ''}</div>
+                <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 2 }}>
+                  {active && nextDate ? `Next charge ${nextDate}` : billing.data && billing.data.cancelAtPeriodEnd && nextDate ? `Ends ${nextDate}` : pastDue ? 'Update the card to keep service active' : 'Add a card to activate billing'}
+                </div>
+              </div>
+              {active || (hasCustomer && billing.data.hasSubscription) ? (
+                <button onClick={manageBilling} disabled={billing.busy} style={{ background: '#fff', border: '1px solid #635bff', color: '#635bff', borderRadius: 9, padding: '9px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: billing.busy ? 0.6 : 1 }}>{billing.busy ? 'Opening…' : 'Manage billing'}</button>
+              ) : (
+                <button onClick={startBilling} disabled={billing.busy} style={{ background: '#635bff', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 18px', fontSize: 13.5, fontWeight: 600, cursor: 'pointer', opacity: billing.busy ? 0.6 : 1 }}>{billing.busy ? 'Opening…' : 'Set up billing'}</button>
+              )}
+            </div>
+          )
+        })()}
       </div>
 
       {/* text messaging (SMS) */}
