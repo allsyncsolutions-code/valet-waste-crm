@@ -399,6 +399,71 @@ const tools = [
       },
     },
   },
+  {
+    name: "list_route_stops",
+    description:
+      "List the stops on a route for a given day, in driving order — address, client, and status (pending / checked in / done) for each. Use when asked things like 'what are the stops on route A today?' or 'give me tomorrow's stop list'. Omit route_code to get every route that day.",
+    input_schema: {
+      type: "object",
+      properties: {
+        route_code: { type: "string", description: "Route code/letter (e.g. 'A'). Omit for all routes." },
+        date: { type: "string", description: "Service date YYYY-MM-DD. Defaults to today." },
+      },
+    },
+  },
+  {
+    name: "list_services",
+    description:
+      "List the services the company offers (plain names, derived from the service recorded on each property). Use when asked 'what services do we offer?'. When answering, give just the list of names — no descriptions or commentary per item.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "list_automations",
+    description:
+      "List the automations on the CRM's Automations tab — things that run on a schedule (like the daily outstanding-balance digest) plus suggested ones awaiting staff approval. Use when asked what's automated or what Randy runs automatically.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "suggest_automation",
+    description:
+      "Log a new automation idea to the Automations tab as 'suggested' for staff to approve. Use when staff ask for something recurring/automatic that you can't do yet, or when you notice a task you keep repeating that could run on a schedule. Never claim it's active — it starts as a suggestion.",
+    input_schema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Short name, e.g. 'Weekly missed-pickup summary'." },
+        description: { type: "string", description: "What it would do, when it runs, and who gets notified." },
+        requested_by: { type: "string", description: "Who asked for it, if a staff member did." },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "text_invoice",
+    description:
+      "Text a client their invoice with a Stripe payment link. Finds the invoice by its number, or by client name (their newest unpaid invoice). Creates the payment link if the invoice doesn't have one yet, sends the invoice SMS template to the client's phone, and marks the invoice sent. Use for 'text the Smith invoice', 'send Bee Clean a payment link', overdue-balance nudges, etc.",
+    input_schema: {
+      type: "object",
+      properties: {
+        invoice_number: { type: "string", description: "Invoice number, if known." },
+        client_name: { type: "string", description: "Client name — uses their newest unpaid invoice." },
+        custom_message: { type: "string", description: "Optional custom SMS text; supports {customerName} {invoiceNumber} {total} {payLink} {companyName} tokens. Omit to use the saved template." },
+        preview_to: { type: "string", description: "Staff member's name to send a PREVIEW to instead of the client — they receive exactly what the client would (real pay link included) but the invoice is NOT marked sent. Use when staff want to see it first, then call again without preview_to to send for real." },
+      },
+    },
+  },
+  {
+    name: "send_sms",
+    description:
+      "Send a text message (SMS) from the company's RingCentral number to a team member, a client, or a raw phone number. Use for things like telling a driver their route is ready, or sending a client a quick note. Give the recipient as a staff name, client name, or phone number. The text goes out under the company's name to a real phone: the message body must ALWAYS be clean and professional — no cussing or slang in the SMS itself, regardless of your tone setting.",
+    input_schema: {
+      type: "object",
+      properties: {
+        to: { type: "string", description: "Recipient: a team member's name, a client's name, or a phone number." },
+        message: { type: "string", description: "The text message to send. Plain, clean, professional." },
+      },
+      required: ["to", "message"],
+    },
+  },
 ]
 
 // ---- PostgREST helpers (service role) ----
@@ -466,6 +531,9 @@ function logForTool(name: string, out: any): Promise<void> | undefined {
     case "edit_property": return out.needs_clarification ? undefined : logActivity("property_updated", `Updated property ${out.address}${out.needs_review === false ? " (reviewed)" : ""}`, "property", out.id)
     case "flag_properties": return out.changed ? logActivity("properties_flagged", `${out.needs_review ? "Flagged" : "Cleared review on"} ${out.changed} propert${out.changed === 1 ? "y" : "ies"}`, "customer") : undefined
     case "add_property_photo": return out.needs_clarification ? undefined : logActivity("property_photo_added", `Logged a ${out.date} photo on ${out.address}`, "property", out.id)
+    case "send_sms": return out.ok ? logActivity("sms_sent", `Texted ${out.to}`) : undefined
+    case "text_invoice": return out.ok ? logActivity(out.preview ? "invoice_previewed" : "invoice_texted", out.preview ? `Previewed invoice ${out.invoice} to ${out.sent_to}` : `Texted invoice ${out.invoice} to ${out.client}`, "invoice") : undefined
+    case "suggest_automation": return out.ok ? logActivity("automation_suggested", `Suggested automation: ${out.name}`) : undefined
     default: return undefined
   }
 }
@@ -1071,6 +1139,204 @@ async function listSkippedStops(a: any) {
   }
 }
 
+async function listRouteStops(a: any) {
+  const date = a.date ? String(a.date).trim() : today()
+  let routes = await sbGet(`routes?service_date=eq.${enc(date)}&select=id,code,name,driver,driver_id&order=code.asc`)
+  if (a.route_code) {
+    const code = String(a.route_code).trim().toUpperCase()
+    routes = routes.filter((r: any) => (r.code || "").toUpperCase() === code)
+    if (!routes.length) return { date, routes: [], note: `No route ${code} on ${date}.` }
+  }
+  if (!routes.length) return { date, routes: [], note: `No routes on ${date}.` }
+  const ids = routes.map((r: any) => r.id)
+  const stops = await sbGet(
+    `route_stops?route_id=in.(${ids.join(",")})&select=route_id,seq,status,check_in,check_out,properties(name,address,customer_id)&order=seq.asc&limit=300`,
+  )
+  const custIds = [...new Set(stops.map((s: any) => s.properties?.customer_id).filter(Boolean))]
+  const nameById: Record<string, string> = {}
+  if (custIds.length) {
+    for (const c of await sbGet(`customers?id=in.(${custIds.join(",")})&select=id,name`)) nameById[c.id] = c.name
+  }
+  const out = []
+  for (const r of routes) {
+    out.push({
+      route: r.code,
+      name: r.name,
+      driver: r.driver || (await driverName(r.driver_id)),
+      stops: stops.filter((s: any) => s.route_id === r.id).map((s: any) => ({
+        seq: s.seq,
+        address: s.properties?.address || s.properties?.name || "(unknown)",
+        client: s.properties?.customer_id ? (nameById[s.properties.customer_id] || null) : null,
+        status: s.check_out ? "done" : s.check_in ? "checked in" : (s.status || "pending"),
+      })),
+    })
+  }
+  return { date, routes: out }
+}
+
+async function listServices() {
+  const rows = await sbGet(`properties?select=service&service=not.is.null&limit=2000`)
+  const services = [...new Set(rows.map((r: any) => String(r.service || "").trim()).filter(Boolean))].sort()
+  return services.length ? { services } : { services, note: "No services recorded on properties yet." }
+}
+
+async function listAutomations() {
+  const rows = await sbGet(`automations?select=kind,name,description,status,last_run_at&order=created_at.asc`)
+  return { automations: rows }
+}
+
+async function suggestAutomation(a: any) {
+  const name = String(a.name || "").trim()
+  if (!name) return { error: "Give the automation a short name." }
+  const kind = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40)
+  try {
+    const rows = await sbPost("automations", {
+      kind,
+      name,
+      description: a.description ? String(a.description) : null,
+      status: "suggested",
+      requested_by: a.requested_by ? String(a.requested_by) : "Trashy Randy",
+    })
+    return { ok: true, id: rows?.[0]?.id, name, note: "Logged as suggested — staff can approve it on the Automations tab." }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (msg.includes("duplicate") || msg.includes("23505")) return { error: "An automation like that is already on the Automations tab." }
+    throw e
+  }
+}
+
+async function textInvoiceTool(a: any) {
+  let inv: any = null
+  if (a.invoice_number) {
+    const rows = await sbGet(`invoices?number=ilike.*${enc(String(a.invoice_number).trim())}*&select=*&order=created_at.desc&limit=3`)
+    if (rows.length > 1) return { needs_clarification: true, matches: rows.map((r: any) => r.number), note: "Multiple invoices match — which number?" }
+    inv = rows[0]
+  } else if (a.client_name) {
+    const cs = await sbGet(`customers?name=ilike.*${enc(String(a.client_name).trim())}*&select=id,name&limit=5`)
+    if (!cs.length) return { error: `No client matched "${a.client_name}".` }
+    if (cs.length > 1) return { needs_clarification: true, matches: cs.map((c: any) => c.name), note: "Multiple clients match — which one?" }
+    const rows = await sbGet(`invoices?customer_id=eq.${cs[0].id}&status=neq.paid&select=*&order=created_at.desc&limit=3`)
+    if (!rows.length) return { error: `${cs[0].name} has no unpaid invoices.` }
+    if (rows.length > 1) return { needs_clarification: true, matches: rows.map((r: any) => `${r.number} ($${r.total}, ${r.status})`), note: "They have multiple unpaid invoices — which one?" }
+    inv = rows[0]
+  } else {
+    return { error: "Give me an invoice number or a client name." }
+  }
+  if (!inv) return { error: "No matching invoice found." }
+
+  const cust = (await sbGet(`customers?id=eq.${inv.customer_id}&select=id,name,phone`))[0]
+  if (!cust?.phone) return { error: `${cust?.name || "That client"} has no phone number on file.` }
+  if (!inv.total || Number(inv.total) < 0.5) return { error: "Invoice total must be at least $0.50 for a payment link." }
+
+  // Reuse the stored Stripe link or mint one via the stripe function.
+  let payUrl = inv.stripe_payment_url
+  if (!payUrl) {
+    const r = await fetch(`${SUPABASE_URL}/functions/v1/stripe`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "payment_link",
+        amount: inv.total,
+        description: `${inv.number}${cust.name ? " — " + cust.name : ""}`,
+        customerName: cust.name,
+        origin: "https://valet-waste-crm.vercel.app",
+      }),
+    })
+    const d = await r.json().catch(() => ({}))
+    if (!d?.url) return { error: `Couldn't create a payment link: ${d?.error || "Stripe error"}` }
+    payUrl = d.url
+  }
+
+  const s = (await sbGet(`app_settings?id=eq.1&select=company_name,sms_invoice_template`))[0] || {}
+  const fmt = (v: number) => `$${Number(v).toFixed(2)}`
+  const tpl = (a.custom_message && String(a.custom_message).trim()) ||
+    s.sms_invoice_template ||
+    "Hi {customerName}, invoice {invoiceNumber} for {total} is ready. Pay here: {payLink} — {companyName}"
+  const body = tpl
+    .replaceAll("{customerName}", cust.name || "there")
+    .replaceAll("{invoiceNumber}", inv.number || "")
+    .replaceAll("{total}", fmt(inv.total))
+    .replaceAll("{payLink}", payUrl)
+    .replaceAll("{companyName}", s.company_name || "Valet Waste FL")
+
+  // Preview mode: text a STAFF member what the client would get; invoice untouched.
+  if (a.preview_to) {
+    const staff = await sbGet(`profiles?select=full_name,phone&full_name=ilike.*${enc(String(a.preview_to).trim())}*&phone=not.is.null`)
+    if (!staff.length) return { error: `No team member with a phone matched "${a.preview_to}".` }
+    if (staff.length > 1) return { needs_clarification: true, matches: staff.map((s: any) => s.full_name), note: "Multiple team members match — which one?" }
+    const pr = await fetch(`${SUPABASE_URL}/functions/v1/sms`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "send", to: staff[0].phone, body: `[PREVIEW — would go to ${cust.name}]\n${body}`, purpose: "invoice_preview", sentBy: "Trashy Randy" }),
+    })
+    const pd = await pr.json().catch(() => ({}))
+    if (!pd?.ok) return { error: `SMS failed: ${pd?.error || pr.status}` }
+    // Persist the minted link so the real send reuses it, but don't mark sent.
+    if (!inv.stripe_payment_url) await sbPatch(`invoices?id=eq.${inv.id}`, { stripe_payment_url: payUrl })
+    return { ok: true, preview: true, sent_to: staff[0].full_name, invoice: inv.number, client: cust.name, note: "Preview only — the invoice was NOT marked sent. Call again without preview_to to text the client." }
+  }
+
+  const sr = await fetch(`${SUPABASE_URL}/functions/v1/sms`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "send", to: cust.phone, body, customerId: cust.id, purpose: "invoice", sentBy: "Trashy Randy" }),
+  })
+  const sd = await sr.json().catch(() => ({}))
+  if (!sd?.ok) return { error: `SMS failed: ${sd?.error || sr.status}` }
+
+  await sbPatch(`invoices?id=eq.${inv.id}`, {
+    stripe_payment_url: payUrl,
+    status: inv.status === "paid" ? inv.status : "sent",
+    sent_at: inv.sent_at || new Date().toISOString(),
+  })
+  return { ok: true, invoice: inv.number, client: cust.name, total: inv.total, pay_link: payUrl }
+}
+
+async function sendSmsTool(a: any) {
+  const to = String(a.to || "").trim()
+  const message = String(a.message || "").trim()
+  if (!to || !message) throw new Error("Both a recipient and a message are required.")
+
+  let phone: string | null = null
+  let recipient = to
+  let customerId: string | null = null
+
+  if (to.replace(/\D/g, "").length >= 10) {
+    phone = to
+  } else {
+    // Team member first…
+    const staff = await sbGet(`profiles?select=id,full_name,phone&full_name=ilike.*${enc(to)}*`)
+    if (staff.length > 1) {
+      return { needs_clarification: true, matches: staff.map((s: any) => s.full_name), note: "Multiple team members match — which one?" }
+    }
+    if (staff.length === 1) {
+      if (!staff[0].phone) return { error: `${staff[0].full_name} has no phone number on file — add one first.` }
+      phone = staff[0].phone
+      recipient = staff[0].full_name
+    } else {
+      // …then clients.
+      const clients = await sbGet(`customers?select=id,name,phone&name=ilike.*${enc(to)}*`)
+      if (clients.length > 1) {
+        return { needs_clarification: true, matches: clients.map((c: any) => c.name), note: "Multiple clients match — which one?" }
+      }
+      if (!clients.length) return { error: `No team member or client matched "${to}". Give me a phone number instead.` }
+      if (!clients[0].phone) return { error: `${clients[0].name} has no phone number on file.` }
+      phone = clients[0].phone
+      recipient = clients[0].name
+      customerId = clients[0].id
+    }
+  }
+
+  const r = await fetch(`${SUPABASE_URL}/functions/v1/sms`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "send", to: phone, body: message, customerId, purpose: "manual", sentBy: "Trashy Randy" }),
+  })
+  const d = await r.json().catch(() => ({}))
+  if (!d?.ok) throw new Error(`SMS failed: ${d?.error || `sms function returned ${r.status}`}`)
+  return { ok: true, to: recipient, phone, provider: d.provider || null }
+}
+
 async function runTool(name: string, input: any): Promise<unknown> {
   switch (name) {
     case "find_clients": return await findClients(input)
@@ -1095,6 +1361,12 @@ async function runTool(name: string, input: any): Promise<unknown> {
     case "bulk_add_properties": return await bulkAddProperties(input)
     case "add_property_photo": return await addPropertyPhoto(input)
     case "list_skipped_stops": return await listSkippedStops(input)
+    case "list_route_stops": return await listRouteStops(input)
+    case "list_services": return await listServices()
+    case "list_automations": return await listAutomations()
+    case "suggest_automation": return await suggestAutomation(input)
+    case "text_invoice": return await textInvoiceTool(input)
+    case "send_sms": return await sendSmsTool(input)
     default: throw new Error(`Unknown tool: ${name}`)
   }
 }
@@ -1121,16 +1393,21 @@ Deno.serve(async (req) => {
 
   try {
     // Randy can mutate data via the service role, so require an authenticated
-    // staff caller (the frontend sends the signed-in user's token).
+    // staff caller (the frontend sends the signed-in user's token). Backend
+    // services (e.g. the sms-webhook relaying staff texts) authenticate by
+    // presenting the service role key itself — it never reaches the browser.
     const token = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "")
-    const ures = token
-      ? await fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${token}` } })
-      : null
-    if (!ures || !ures.ok) return json({ text: "Please sign in to use Trashy Randy.", actions: [] }, 401)
-    const callerId = (await ures.json())?.id
-    const prof = callerId ? await sbGet(`profiles?id=eq.${enc(callerId)}&select=role`) : []
-    if (!["admin", "staff"].includes(prof?.[0]?.role)) {
-      return json({ text: "Trashy Randy is only available to staff accounts.", actions: [] }, 403)
+    const isSystemCaller = !!token && token === SERVICE_KEY
+    if (!isSystemCaller) {
+      const ures = token
+        ? await fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${token}` } })
+        : null
+      if (!ures || !ures.ok) return json({ text: "Please sign in to use Trashy Randy.", actions: [] }, 401)
+      const callerId = (await ures.json())?.id
+      const prof = callerId ? await sbGet(`profiles?id=eq.${enc(callerId)}&select=role`) : []
+      if (!["admin", "staff"].includes(prof?.[0]?.role)) {
+        return json({ text: "Trashy Randy is only available to staff accounts.", actions: [] }, 403)
+      }
     }
 
     const apiKey = Deno.env.get("ANTHROPIC_API_KEY")
@@ -1141,7 +1418,7 @@ Deno.serve(async (req) => {
       })
     }
 
-    const { messages: incoming } = await req.json()
+    const { messages: incoming, sms } = await req.json()
     const messages: any[] = (incoming || [])
       .filter((m: any) => m && m.text)
       .map((m: any) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.text }))
@@ -1149,7 +1426,10 @@ Deno.serve(async (req) => {
     // Personality is configured in Settings (app_settings.randy_tone).
     let tone: string | null = null
     try { tone = (await sbGet(`app_settings?id=eq.1&select=randy_tone`))?.[0]?.randy_tone ?? null } catch (_) { /* fall back to default */ }
-    const system = buildSystem(tone)
+    let system = buildSystem(tone)
+    if (isSystemCaller && sms?.staff_name) {
+      system += `\n\nSMS MODE: You are replying by TEXT MESSAGE to ${sms.staff_name}, a staff member texting the company's business number from their phone. Rules: reply in plain conversational text only (no markdown, no bullet lists, no headers); keep it under 450 characters; keep the language clean and professional regardless of your tone setting — this is a real SMS from the business number. Your reply text is automatically delivered back to them as a text, so do NOT use the send_sms tool to answer them; only use send_sms if they ask you to text someone ELSE.`
+    }
 
     const actions: Array<{ tool: string; result: unknown }> = []
     let finalText = ""
@@ -1170,7 +1450,7 @@ Deno.serve(async (req) => {
         if (block.type !== "tool_use") continue
         try {
           const out = await runTool(block.name, block.input)
-          if (block.name !== "find_clients" && block.name !== "get_overview" && block.name !== "list_routes" && block.name !== "list_needs_review" && block.name !== "find_duplicates" && block.name !== "list_skipped_stops") {
+          if (block.name !== "find_clients" && block.name !== "get_overview" && block.name !== "list_routes" && block.name !== "list_needs_review" && block.name !== "find_duplicates" && block.name !== "list_skipped_stops" && block.name !== "list_route_stops" && block.name !== "list_services" && block.name !== "list_automations") {
             actions.push({ tool: block.name, result: out })
             await logForTool(block.name, out)
           }

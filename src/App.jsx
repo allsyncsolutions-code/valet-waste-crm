@@ -13,6 +13,7 @@ import Drivers from './views/Drivers.jsx'
 import Team from './views/Team.jsx'
 import Import from './views/Import.jsx'
 import Annotations from './views/Annotations.jsx'
+import Automations from './views/Automations.jsx'
 import AnnotationLayer from './components/AnnotationLayer.jsx'
 import AiDock from './AiDock.jsx'
 
@@ -37,6 +38,7 @@ const NAV_FIELD = [
   { id: 'clients', glyph: '◎', label: 'Clients' },
   { id: 'import', glyph: '⇪', label: 'Import' },
   { id: 'activity', glyph: '◷', label: 'Activity Log' },
+  { id: 'automations', glyph: '⟳', label: 'Automations' },
   { id: 'drivers', glyph: '⛟', label: 'Drivers & Field' },
   { id: 'team', glyph: '⚇', label: 'Team' },
   { id: 'portal', glyph: '◫', label: 'Client Portal' },
@@ -115,6 +117,7 @@ export default function App({ user, onSignOut }) {
     portal: ['Client Portal', 'What your clients see when they log in'],
     settings: ['Settings', 'Manage tags and configuration'],
     annotations: ['Annotations', 'Admin notes flagged with the ✎ tool — review with Claude'],
+    automations: ['Automations', 'Scheduled jobs Trashy Randy runs — plus his suggestions awaiting approval'],
   }
   const [viewTitle, viewSubtitle] = VIEW_META[activeView] || VIEW_META.dashboard
 
@@ -208,6 +211,7 @@ export default function App({ user, onSignOut }) {
     team: <Team app={app} />,
     settings: <Settings app={app} />,
     annotations: <Annotations app={app} />,
+    automations: <Automations app={app} />,
   }
 
   const showInlineDock = aiOpen && !isMobile && !isTablet

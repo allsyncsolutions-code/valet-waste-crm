@@ -58,6 +58,64 @@ async function logInbound(row: Record<string, unknown>) {
   })
 }
 
+// ---- Trashy Randy over SMS --------------------------------------------------
+// When the sender is a STAFF phone (profiles.phone), relay the text to the
+// dispatch-ai function (authenticated with the service key) with recent thread
+// history, then text Randy's answer back. Client/unknown numbers only get
+// logged — Randy never auto-replies to customers.
+async function maybeRandyReply(fromNumber: string, text: string) {
+  const body = (text || "").trim()
+  const last10 = digits(fromNumber).slice(-10)
+  if (!body || last10.length < 10) return
+
+  const staff: Array<{ full_name: string; phone?: string; role?: string }> = await fetch(
+    `${SUPABASE_URL}/rest/v1/profiles?select=full_name,phone,role&phone=not.is.null`,
+    { headers: restHeaders },
+  ).then((r) => r.json()).catch(() => [])
+  const me = (staff || []).find((s) => digits(s.phone || "").slice(-10) === last10 && ["admin", "staff"].includes(s.role || ""))
+  if (!me) return
+
+  // Recent thread with this number: their inbound texts + Randy's SMS replies.
+  const hist: any[] = await fetch(
+    `${SUPABASE_URL}/rest/v1/sms_messages?or=(and(direction.eq.in,from_number.like.*${last10}*),and(direction.eq.out,to_number.like.*${last10}*,purpose.eq.randy_sms))&order=created_at.desc&limit=12`,
+    { headers: restHeaders },
+  ).then((r) => r.json()).catch(() => [])
+
+  // Chronological, merged so roles alternate (Anthropic requires it).
+  const turns: Array<{ role: string; text: string }> = []
+  for (const m of (Array.isArray(hist) ? hist : []).reverse()) {
+    const role = m.direction === "in" ? "user" : "assistant"
+    const t = (m.body || "").trim()
+    if (!t) continue
+    if (turns.length && turns[turns.length - 1].role === role) turns[turns.length - 1].text += `\n${t}`
+    else turns.push({ role, text: t })
+  }
+  if (!turns.length || turns[turns.length - 1].role !== "user") turns.push({ role: "user", text: body })
+
+  const r = await fetch(`${SUPABASE_URL}/functions/v1/dispatch-ai`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${SERVICE_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ messages: turns, sms: { staff_name: me.full_name } }),
+  })
+  const d = await r.json().catch(() => ({}))
+  const reply = (d?.text || "").trim()
+  if (!reply) return
+
+  await fetch(`${SUPABASE_URL}/functions/v1/sms`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "send", to: fromNumber, body: reply.slice(0, 1200), purpose: "randy_sms", sentBy: "Trashy Randy" }),
+  })
+}
+
+// Run work after the HTTP response has been sent (RingCentral needs a fast 200).
+function afterResponse(p: Promise<unknown>) {
+  const safe = p.catch((e) => console.error("randy-sms:", e))
+  // deno-lint-ignore no-explicit-any
+  const rt = (globalThis as any).EdgeRuntime
+  if (rt?.waitUntil) rt.waitUntil(safe)
+}
+
 Deno.serve(async (req) => {
   // 1) Validation handshake (header is case-insensitive)
   const validation = req.headers.get("validation-token")
@@ -104,6 +162,8 @@ Deno.serve(async (req) => {
         external_id: m?.id ? String(m.id) : null,
         raw: payload,
       })
+      // Staff texting the business number chat with Trashy Randy.
+      afterResponse(maybeRandyReply(String(fromNumber), String(text)))
     } else {
       // Couldn't parse a sender — still store the raw payload for debugging.
       await logInbound({ direction: "in", provider: "ringcentral", status: "received", raw: payload })
