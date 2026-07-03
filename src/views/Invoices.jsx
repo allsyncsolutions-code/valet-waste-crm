@@ -58,7 +58,7 @@ export default function Invoices({ app }) {
   const [busy, setBusy] = useState(false) // detail-pane action in flight
 
   async function refresh() {
-    const rows = await loadInvoices()
+    const rows = await loadInvoices(app.activeLine)
     setInvoices(rows)
     setSelId((cur) => (cur && rows.some((r) => r.id === cur) ? cur : rows[0]?.id || null))
   }
@@ -74,7 +74,7 @@ export default function Invoices({ app }) {
     stripeStatus().then((d) => setStripeOk(!!(d && d.connected && d.chargesEnabled))).catch(() => {})
     const unsub = subscribeInvoices(() => refresh().catch(() => {}))
     return () => unsub && unsub()
-  }, [])
+  }, [app.activeLine])
 
   const list = useMemo(() => {
     let rows = filter === 'all' ? invoices : invoices.filter((i) => i.status === filter)

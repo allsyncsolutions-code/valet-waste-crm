@@ -141,16 +141,20 @@ Deno.serve(async (req) => {
   const json = (b: unknown, status = 200) =>
     new Response(JSON.stringify(b), { status, headers: { ...CORS, "Content-Type": "application/json" } })
 
-  // Auth: service key (cron) OR a signed-in staff user (Run now button).
+  // Auth: service key, the internal cron token, or a signed-in staff user.
   const token = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "")
   if (token !== SERVICE_KEY) {
-    const ures = token
-      ? await fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${token}` } })
-      : null
-    if (!ures || !ures.ok) return json({ error: "Sign in required." }, 401)
-    const uid = (await ures.json())?.id
-    const prof = uid ? await sbGet(`profiles?id=eq.${uid}&select=role`) : []
-    if (!["admin", "staff"].includes(prof?.[0]?.role)) return json({ error: "Staff only." }, 403)
+    const internal = await sbGet(`internal_secrets?id=eq.1&select=cron_token`).catch(() => [])
+    const cronToken = internal?.[0]?.cron_token
+    if (!(cronToken && token === cronToken)) {
+      const ures = token
+        ? await fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${token}` } })
+        : null
+      if (!ures || !ures.ok) return json({ error: "Sign in required." }, 401)
+      const uid = (await ures.json())?.id
+      const prof = uid ? await sbGet(`profiles?id=eq.${uid}&select=role`) : []
+      if (!["admin", "staff"].includes(prof?.[0]?.role)) return json({ error: "Staff only." }, 403)
+    }
   }
 
   let kindFilter: string | null = null

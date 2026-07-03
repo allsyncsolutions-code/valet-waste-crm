@@ -98,11 +98,12 @@ export function subscribeSchedules(cb) {
 // --- per-property pickup days (the source of truth for routing) --------------
 // The Schedules view and Dashboard read these so a single address can be
 // serviced on more than one weekday.
-export async function loadPropertyPickups() {
-  const { data, error } = await supabase
+export async function loadPropertyPickups(line) {
+  let q = supabase
     .from('properties')
-    .select('id, name, address, service, pickup_days, pickup_frequency, pickup_start_date, needs_review, customer_id, customers(name,status)')
-    .order('name', { ascending: true })
+    .select('id, name, address, service, pickup_days, pickup_frequency, pickup_start_date, needs_review, business_line, customer_id, customers(name,status)')
+  if (line) q = q.eq('business_line', line)
+  const { data, error } = await q.order('name', { ascending: true })
   if (error) throw error
   return (data || []).map((p) => ({
     id: p.id,

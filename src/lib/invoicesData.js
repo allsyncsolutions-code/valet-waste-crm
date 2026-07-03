@@ -61,15 +61,16 @@ function mapInvoice(row) {
   }
 }
 
-const SELECT = '*, customers(name,email,phone,address), invoice_line_items(*)'
+const SELECT = '*, customers(name,email,phone,address,business_line), invoice_line_items(*)'
 
-export async function loadInvoices() {
+export async function loadInvoices(line) {
   const { data, error } = await supabase
     .from('invoices')
     .select(SELECT)
     .order('created_at', { ascending: false })
   if (error) throw error
-  return (data || []).map(mapInvoice)
+  const rows = line ? (data || []).filter((r) => (r.customers?.business_line || 'waste') === line) : (data || [])
+  return rows.map(mapInvoice)
 }
 
 // Replace all line items for an invoice (simplest correct edit path).

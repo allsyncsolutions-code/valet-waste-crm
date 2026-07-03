@@ -34,8 +34,8 @@ export default function Dashboard({ app }) {
   const [err, setErr] = useState(null)
 
   async function refresh() {
-    const [c, i, s] = await Promise.all([loadCustomers(), loadInvoices(), loadPropertyPickups()])
-    setCustomers(c)
+    const [c, i, s] = await Promise.all([loadCustomers(), loadInvoices(app.activeLine), loadPropertyPickups(app.activeLine)])
+    setCustomers(c.filter((x) => (x.business_line || 'waste') === (app.activeLine || 'waste')))
     setInvoices(i)
     setSchedules(s)
   }
@@ -53,7 +53,7 @@ export default function Dashboard({ app }) {
     const unsubI = subscribeInvoices(reload)
     const unsubS = subscribeSchedules(reload)
     return () => { clearTimeout(t); unsubC && unsubC(); unsubI && unsubI(); unsubS && unsubS() }
-  }, [])
+  }, [app.activeLine])
 
   const stats = useMemo(() => {
     const activeClients = customers.filter((c) => c.status === 'active').length

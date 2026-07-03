@@ -31,7 +31,7 @@ export default function Schedule({ app }) {
   const [saving, setSaving] = useState(false)
 
   async function refresh() {
-    setPickups(await loadPropertyPickups())
+    setPickups(await loadPropertyPickups(app.activeLine))
   }
 
   useEffect(() => {
@@ -43,7 +43,7 @@ export default function Schedule({ app }) {
     refresh().catch((e) => setErr(e.message || String(e))).finally(() => setLoading(false))
     const unsub = subscribeSchedules(() => { refresh().catch(() => {}) })
     return () => unsub && unsub()
-  }, [])
+  }, [app.activeLine])
 
   const q = search.toLowerCase().trim()
   const rows = useMemo(() => {

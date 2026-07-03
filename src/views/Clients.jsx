@@ -150,7 +150,12 @@ export default function Clients({ app }) {
     () => (q ? lineCustomers.filter((c) => (c.name + ' ' + c.address).toLowerCase().includes(q)) : lineCustomers),
     [lineCustomers, q]
   )
-  const cur = customers.find((c) => c.id === selId) || null
+  const cur = lineCustomers.find((c) => c.id === selId) || null
+
+  // Switching business line: drop any selection from the previous line.
+  useEffect(() => {
+    setSelId((cur) => (customers.find((c) => c.id === cur && (c.business_line || 'waste') === (app.activeLine || 'waste')) ? cur : (customers.find((c) => (c.business_line || 'waste') === (app.activeLine || 'waste'))?.id ?? null)))
+  }, [app.activeLine, customers])
   const set = (patch) => setForm((f) => ({ ...f, ...patch }))
 
   async function addTag() {
