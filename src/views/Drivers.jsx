@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { MONO } from '../data.js'
 import { STATUS_META } from '../lib/routeModel.js'
-import { loadDayDispatch, checkInStop, checkOutStop, resetStopStatus } from '../lib/routesData.js'
+import { loadDayDispatch, checkInStop, checkOutStop, resetStopStatus, flagStopExcess, unflagStopExcess, markStopNudged } from '../lib/routesData.js'
 import { loadStopPhotos, uploadStopPhoto, deleteStopPhoto } from '../lib/photosData.js'
 import { loadDrivers } from '../lib/teamData.js'
 import { logActivity } from '../lib/activityData.js'
@@ -82,9 +82,35 @@ export default function Drivers({ app }) {
       const gps = await getGps()
       await checkInStop(stop.id, gps)
       logActivity({ type: 'check_in', summary: `Checked in at ${stop.name}`, entityType: 'route_stop', entityId: stop.id })
+      maybeNudge(stop) // fire-and-forget; never blocks the check-in
       await refresh()
     } catch (e) { setErr(e.message || String(e)) }
     setBusyStop(null)
+  }
+
+  // Lawn pay is gated on check-in + photos. If a tech checks into the NEXT
+  // stop while a previous one is missing photos or checkout, Randy texts them
+  // right away (once per stop) so they can fix it before leaving the area.
+  async function maybeNudge(stop) {
+    try {
+      const route = routes.find((r) => r.stops.some((x) => x.id === stop.id))
+      if (!route || route.line !== 'lawn') return
+      const prev = route.stops.find((x) =>
+        x.id !== stop.id && x.checkIn && !x.nudgeSent && (!x.checkOut || (photos[x.id] || []).length === 0))
+      if (!prev) return
+      const drv = drivers.find((d) => d.id === route.driverId)
+      if (!drv || !drv.phone) return
+      const missing = !prev.checkOut ? 'checking out' : 'photos'
+      await supabase.functions.invoke('sms', { body: {
+        action: 'send',
+        to: drv.phone,
+        body: `Randy here — looks like you left ${prev.address || prev.name} without ${missing}. Add ${missing === 'photos' ? 'a photo' : 'a check-out'} when you can, or an admin will have to approve pay for that job.`,
+        purpose: 'reminder',
+        sentBy: 'Trashy Randy',
+      } })
+      await markStopNudged(prev.id)
+      logActivity({ type: 'pay_nudge', summary: `Texted ${drv.full_name || 'tech'} about missing ${missing} at ${prev.address || prev.name}`, entityType: 'route_stop', entityId: prev.id })
+    } catch (e) { /* nudges must never break dispatch */ }
   }
   async function doCheckOut(stop) {
     setBusyStop(stop.id)
@@ -104,9 +130,27 @@ export default function Drivers({ app }) {
     catch (e) { setErr(e.message || String(e)) }
     setBusyStop(null)
   }
+  async function doFlagExcess(stop) {
+    if (stop.excessFlagged) {
+      if (!window.confirm('Remove the excess flag from this stop?')) return
+      setBusyStop(stop.id)
+      try { await unflagStopExcess(stop.id); await refresh() } catch (e) { setErr(e.message || String(e)) }
+      setBusyStop(null)
+      return
+    }
+    const note = window.prompt('Flag this pickup as excessive.\nQuick note (e.g. "3 extra bags", "furniture left out"):')
+    if (note === null) return
+    setBusyStop(stop.id)
+    try {
+      await flagStopExcess(stop.id, note)
+      logActivity({ type: 'excess_flagged', summary: `Flagged excessive pickup at ${stop.name}${note ? ` — ${note}` : ''}`, entityType: 'route_stop', entityId: stop.id })
+      await refresh()
+    } catch (e) { setErr(e.message || String(e)) }
+    setBusyStop(null)
+  }
 
   async function refresh(d = date) {
-    const [drv, rts] = await Promise.all([loadDrivers(), loadDayDispatch(d)])
+    const [drv, rts] = await Promise.all([loadDrivers(), loadDayDispatch(d, app.activeLine)])
     setDrivers(drv)
     setRoutes(rts)
     refreshPhotos(rts)
@@ -203,7 +247,7 @@ export default function Drivers({ app }) {
                     {rts.length > 1 && <div style={{ fontFamily: MONO, fontSize: 11, color: '#7c8a82', margin: '6px 2px' }}>{r.code} · {r.name}</div>}
                     {r.stops.length === 0 ? (
                       <div style={{ fontSize: 12, color: '#9aa69e', padding: '6px 2px' }}>No stops on this route.</div>
-                    ) : r.stops.map((s) => <StopRow key={s.id} s={s} busy={busyStop === s.id} photos={photos[s.id] || []} uploading={uploadingStop === s.id} onCheckIn={() => doCheckIn(s)} onCheckOut={() => doCheckOut(s)} onUndo={() => doUndo(s)} onAddPhoto={(f) => addPhoto(s, f)} onDeletePhoto={removePhoto} />)}
+                    ) : r.stops.map((s) => <StopRow key={s.id} s={s} busy={busyStop === s.id} photos={photos[s.id] || []} uploading={uploadingStop === s.id} onCheckIn={() => doCheckIn(s)} onCheckOut={() => doCheckOut(s)} onUndo={() => doUndo(s)} onFlagExcess={() => doFlagExcess(s)} onAddPhoto={(f) => addPhoto(s, f)} onDeletePhoto={removePhoto} />)}
                   </div>
                 ))}
               </div>
@@ -253,7 +297,7 @@ export default function Drivers({ app }) {
   )
 }
 
-function StopRow({ s, busy, photos = [], uploading, onCheckIn, onCheckOut, onUndo, onAddPhoto, onDeletePhoto }) {
+function StopRow({ s, busy, photos = [], uploading, onCheckIn, onCheckOut, onUndo, onFlagExcess, onAddPhoto, onDeletePhoto }) {
   const meta = STATUS_META[s.status] || STATUS_META.pending
   const fileRef = useRef(null)
   return (
@@ -286,6 +330,16 @@ function StopRow({ s, busy, photos = [], uploading, onCheckIn, onCheckOut, onUnd
             <span style={{ fontSize: 11, color: '#1f7a4d', fontWeight: 600 }}>✓ {hhmm(s.checkIn)}–{hhmm(s.checkOut)}</span>
             <button onClick={onUndo} disabled={busy} style={fieldBtnGhost} title="Reopen stop">undo</button>
           </>
+        )}
+        {s.status !== 'pending' && (
+          <button
+            onClick={onFlagExcess}
+            disabled={busy}
+            title={s.excessFlagged ? `Flagged: ${s.excessNote || 'excessive'} — click to remove` : 'Flag this pickup as over the usual volume (extra charge review)'}
+            style={{ background: s.excessFlagged ? '#faf3e2' : '#fff', border: `1px solid ${s.excessFlagged ? '#b07d18' : '#dde2dd'}`, color: '#8a6414', borderRadius: 8, padding: '6px 10px', fontSize: 11.5, fontWeight: 700, cursor: 'pointer' }}
+          >
+            {s.excessFlagged ? '⚠ Excess flagged' : '⚠ Excess'}
+          </button>
         )}
       </div>
 

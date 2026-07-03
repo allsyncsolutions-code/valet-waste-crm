@@ -292,11 +292,13 @@ export async function setRouteDefault(code, driverId) {
 // --- route catalog (the set of routes the business runs) --------------------
 // route_defaults doubles as the catalog: one row per route code, with its
 // carry-forward default driver (driver_id) plus name/color/sort.
-export async function loadRouteDefs() {
-  const { data, error } = await supabase
+export async function loadRouteDefs(line) {
+  let q = supabase
     .from('route_defaults')
-    .select('code, name, color, driver_id, active, sort')
+    .select('code, name, color, driver_id, active, sort, business_line')
     .eq('active', true)
+  if (line) q = q.eq('business_line', line)
+  const { data, error } = await q
     .order('sort', { ascending: true })
     .order('code', { ascending: true })
   if (error) throw error
@@ -319,12 +321,12 @@ export async function deleteRouteDef(code) {
   return data
 }
 
-export async function createRouteDef({ code, name, color }) {
+export async function createRouteDef({ code, name, color, line }) {
   const c = String(code || '').trim().toUpperCase()
   if (!c) throw new Error('A route code is required.')
   const { data, error } = await supabase
     .from('route_defaults')
-    .insert({ code: c, name: (name && name.trim()) || `Route ${c}`, color: color || null })
+    .insert({ code: c, name: (name && name.trim()) || `Route ${c}`, color: color || null, business_line: line || 'waste' })
     .select('code, name, color, driver_id, active, sort')
     .single()
   if (error) {
@@ -411,18 +413,20 @@ export async function addPropertiesToRoute(code, date, props) {
 
 // All routes (with their stops + driver) for a single date — powers the
 // Drivers & Field per-driver dispatch board.
-export async function loadDayDispatch(date) {
+export async function loadDayDispatch(date, line) {
   if (!date) throw new Error('A date is required.')
-  const { data, error } = await supabase
+  let q = supabase
     .from('routes')
-    .select('id, code, name, driver_id, route_stops(id, seq, status, service, time_window, lat, lng, check_in, check_out, properties(name, address, lat, lng))')
+    .select('id, code, name, driver_id, business_line, route_stops(id, seq, status, service, time_window, lat, lng, check_in, check_out, excess_flagged, excess_note, tech_pay, nudge_sent, properties(name, address, lat, lng, price, tech_pay), stop_photos(id))')
     .eq('service_date', date)
-    .order('code', { ascending: true })
+  if (line) q = q.eq('business_line', line)
+  const { data, error } = await q.order('code', { ascending: true })
   if (error) throw error
   return (data || []).map((r) => ({
     id: r.id,
     code: r.code,
     name: r.name || `Route ${r.code}`,
+    line: r.business_line || 'waste',
     driverId: r.driver_id,
     stops: (r.route_stops || [])
       .slice()
@@ -431,8 +435,48 @@ export async function loadDayDispatch(date) {
         id: s.id, seq: s.seq, status: s.status, service: s.service, window: s.time_window,
         lat: s.properties?.lat ?? s.lat, lng: s.properties?.lng ?? s.lng, checkIn: s.check_in, checkOut: s.check_out,
         name: s.properties?.name || '—', address: s.properties?.address || '',
+        excessFlagged: !!s.excess_flagged, excessNote: s.excess_note || '',
+        nudgeSent: !!s.nudge_sent,
+        photoCount: (s.stop_photos || []).length,
+        techPay: s.tech_pay ?? s.properties?.tech_pay ?? null,
+        price: s.properties?.price ?? null,
       })),
   }))
+}
+
+// Admin override: pay the tech for a stop that's missing photos/check-out.
+// Recorded (who + when) so timesheets show the approval trail.
+export async function overrideStopPay(stopId, adminName) {
+  const { error } = await supabase.from('route_stops').update({
+    pay_override: true,
+    pay_override_by: adminName || 'Admin',
+    pay_override_at: new Date().toISOString(),
+  }).eq('id', stopId)
+  if (error) throw error
+}
+
+export async function markStopNudged(stopId) {
+  await supabase.from('route_stops').update({ nudge_sent: true }).eq('id', stopId)
+}
+
+// Driver flags a pickup as excessive (over the usual volume). Starts the
+// review flow: Randy drafts an extra invoice line, an admin approves, and the
+// customer sees the flag (and approved charge) in their portal.
+export async function flagStopExcess(stopId, note) {
+  const { error } = await supabase.from('route_stops').update({
+    excess_flagged: true,
+    excess_note: (note || '').trim() || null,
+    excess_status: 'pending',
+  }).eq('id', stopId)
+  if (error) throw error
+}
+
+export async function unflagStopExcess(stopId) {
+  const { error } = await supabase.from('route_stops').update({
+    excess_flagged: false, excess_note: null, excess_status: null,
+    excess_amount: null, excess_reviewed_by: null, excess_reviewed_at: null,
+  }).eq('id', stopId)
+  if (error) throw error
 }
 
 // --- field ops: driver check-in / check-out (with best-effort GPS) ----------
@@ -485,9 +529,11 @@ export async function ensureRoute(code, date) {
   if (route) return route
   const defDriver = await getRouteDefault(code).catch(() => null)
   const defName = await driverDisplayName(defDriver)
+  // Inherit the business line from the route catalog (codes are line-unique).
+  const { data: def } = await supabase.from('route_defaults').select('business_line').eq('code', code).maybeSingle()
   const { data: r, error: cErr } = await supabase
     .from('routes')
-    .insert({ code, name: `Route ${code}`, service_date: date, driver_id: defDriver, driver: defName })
+    .insert({ code, name: `Route ${code}`, service_date: date, driver_id: defDriver, driver: defName, business_line: def?.business_line || 'waste' })
     .select('id, code, name, driver_id, service_date').single()
   if (cErr) throw cErr
   return r

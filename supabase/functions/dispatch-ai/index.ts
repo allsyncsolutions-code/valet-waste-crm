@@ -31,6 +31,8 @@ const BASE_SYSTEM = `You are Trashy Randy, the dispatch assistant inside Valet W
 
 CRITICAL — CUSTOMER-FACING TEXT IS ALWAYS CLEAN: anything a customer could ever see — invoice line-item descriptions, invoice notes, SMS message text, and any names/notes you write into records — must be 100% professional and free of profanity or slang, no matter your chat tone. Your personality ONLY colors your chat replies to staff inside this dispatch console.
 
+CRITICAL — YOUR NAME: "Trashy Randy" is an INTERNAL nickname for staff only. In anything a customer could see (texts to clients, invoice messages, notes on records), you are "Randy AI" — the Valet Waste assistant. Never use the name "Trashy Randy" in customer-facing text.
+
 Guidelines:
 - When the user refers to a client by name, business, phone or email, call find_clients FIRST to resolve the exact customer_id before acting. If multiple match, ask which one. If none match and the action needs an existing client, say so. find_clients also resolves a SERVICE ADDRESS to its owning client (it falls back to matching properties), so use it to answer "who is the client for <address>?".
 - Infer sensible defaults: weekly pickup on Monday, monthly invoicing. Invoices are created as drafts unless told otherwise.
@@ -45,7 +47,8 @@ Guidelines:
 - Use find_duplicates when the user asks about duplicate stops/addresses/properties. It returns groups of the same address used under more than one client; summarize the count and call out a few examples (address + the clients involved). To then flag those for cleanup, use flag_properties.
 - Use list_skipped_stops to report addresses that were NOT checked in (skipped) on a day — e.g. "what got skipped yesterday?" or "which stops weren't picked up on June 24?". It defaults to today; pass a date or a route_code to narrow it.
 - Use add_property_photo to log a dated photo/missed-pickup entry onto an ADDRESS's file (e.g. "log that 123 Main wasn't picked up June 24, bin not out"). You can't take a picture yourself, so unless the user gives you an image_url this logs a dated note the owner attaches the real photo to in Clients › property › Photos. Always set the date to the day it applies to. Resolve the property by address (add client_name if ambiguous); if it returns needs_clarification, ask which match.
-- You cannot send payment links or charge cards — tell the user to use the "Send payment link" button on the invoice for that.
+- Use text_invoice to text a client their invoice with a Stripe payment link (by invoice number, or client name for their newest unpaid). Pass preview_to with a staff member's name to send them a preview first — the invoice isn't marked sent until you call it for real. You still cannot charge cards directly.
+- BUSINESS LINES: the company runs three lines — waste (Waste & Recycling: recurring routed pickups), junk (Junk Removal: ONE-TIME jobs on a calendar, no routes), and lawn (Lawn Care). You see across ALL lines. Junk jobs are created with create_job and live on the Junk calendar. When staff ask when a junk job could fit, look at that day's trash routes (list_route_stops) and the job addresses, and recommend a slot near where a route already passes — e.g. "route A hits Palm Coast around midday; do the junk job after stop 8".
 - After making a change, confirm what you did in one short sentence.`
 
 // Selectable personalities for Randy's STAFF chat replies. The customer-facing
@@ -418,6 +421,37 @@ const tools = [
     input_schema: { type: "object", properties: {} },
   },
   {
+    name: "create_job",
+    description:
+      "Schedule a ONE-TIME job (Junk Removal) on the job calendar for a specific date. Not for recurring pickups — those are schedules. Resolve the client with find_clients first when a client is named; address defaults to the client's if omitted.",
+    input_schema: {
+      type: "object",
+      properties: {
+        date: { type: "string", description: "Job date YYYY-MM-DD. Required." },
+        client_name: { type: "string", description: "Client the job is for (optional)." },
+        address: { type: "string", description: "Job address. Defaults to the client's address." },
+        time_window: { type: "string", description: "e.g. '9-11am' (optional)." },
+        amount: { type: "number", description: "Price for the job (optional)." },
+        driver_name: { type: "string", description: "Driver to assign (optional)." },
+        notes: { type: "string", description: "Notes (optional)." },
+        business_line: { type: "string", description: "Defaults to 'junk'." },
+      },
+      required: ["date"],
+    },
+  },
+  {
+    name: "list_jobs",
+    description:
+      "List one-time jobs (Junk Removal calendar) for a date or date range — who, where, price, status, driver. Use for 'what junk jobs are scheduled this week?' or to check the calendar before recommending a slot.",
+    input_schema: {
+      type: "object",
+      properties: {
+        date: { type: "string", description: "Single date YYYY-MM-DD. Defaults to today." },
+        end_date: { type: "string", description: "Optional range end (inclusive)." },
+      },
+    },
+  },
+  {
     name: "list_automations",
     description:
       "List the automations on the CRM's Automations tab — things that run on a schedule (like the daily outstanding-balance digest) plus suggested ones awaiting staff approval. Use when asked what's automated or what Randy runs automatically.",
@@ -534,6 +568,7 @@ function logForTool(name: string, out: any): Promise<void> | undefined {
     case "send_sms": return out.ok ? logActivity("sms_sent", `Texted ${out.to}`) : undefined
     case "text_invoice": return out.ok ? logActivity(out.preview ? "invoice_previewed" : "invoice_texted", out.preview ? `Previewed invoice ${out.invoice} to ${out.sent_to}` : `Texted invoice ${out.invoice} to ${out.client}`, "invoice") : undefined
     case "suggest_automation": return out.ok ? logActivity("automation_suggested", `Suggested automation: ${out.name}`) : undefined
+    case "create_job": return out.ok ? logActivity("job_created", `Scheduled a job${out.address ? ` at ${out.address}` : ""} for ${out.date}`, "job", out.id) : undefined
     default: return undefined
   }
 }
@@ -1139,6 +1174,9 @@ async function listSkippedStops(a: any) {
   }
 }
 
+// "Trashy Randy" is staff-only; customers only ever see "Randy AI".
+const externalName = (s: string) => s.replace(/trashy\s+randy/gi, "Randy AI")
+
 async function listRouteStops(a: any) {
   const date = a.date ? String(a.date).trim() : today()
   let routes = await sbGet(`routes?service_date=eq.${enc(date)}&select=id,code,name,driver,driver_id&order=code.asc`)
@@ -1178,6 +1216,71 @@ async function listServices() {
   const rows = await sbGet(`properties?select=service&service=not.is.null&limit=2000`)
   const services = [...new Set(rows.map((r: any) => String(r.service || "").trim()).filter(Boolean))].sort()
   return services.length ? { services } : { services, note: "No services recorded on properties yet." }
+}
+
+async function createJobTool(a: any) {
+  const date = String(a.date || "").trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { error: "Give me the job date as YYYY-MM-DD." }
+
+  let customerId: string | null = null
+  let address = a.address ? String(a.address).trim() : ""
+  let clientName: string | null = null
+  if (a.client_name) {
+    const cs = await sbGet(`customers?name=ilike.*${enc(String(a.client_name).trim())}*&select=id,name,address&limit=5`)
+    if (!cs.length) return { error: `No client matched "${a.client_name}".` }
+    if (cs.length > 1) return { needs_clarification: true, matches: cs.map((c: any) => c.name), note: "Multiple clients match — which one?" }
+    customerId = cs[0].id
+    clientName = cs[0].name
+    if (!address) address = cs[0].address || ""
+  }
+
+  let driverId: string | null = null
+  let driverName: string | null = null
+  if (a.driver_name) {
+    const ds = await sbGet(`profiles?is_driver=eq.true&full_name=ilike.*${enc(String(a.driver_name).trim())}*&select=id,full_name`)
+    if (!ds.length) return { error: `No driver matched "${a.driver_name}".` }
+    if (ds.length > 1) return { needs_clarification: true, matches: ds.map((d: any) => d.full_name), note: "Multiple drivers match — which one?" }
+    driverId = ds[0].id
+    driverName = ds[0].full_name
+  }
+
+  const rows = await sbPost("jobs", {
+    business_line: a.business_line === "lawn" || a.business_line === "waste" ? a.business_line : "junk",
+    customer_id: customerId,
+    address: address || null,
+    scheduled_date: date,
+    time_window: a.time_window ? String(a.time_window) : null,
+    amount: a.amount != null ? round2(Number(a.amount)) : null,
+    driver_id: driverId,
+    notes: a.notes ? String(a.notes) : null,
+  })
+  return { ok: true, id: rows?.[0]?.id, date, client: clientName, address, driver: driverName, amount: a.amount ?? null }
+}
+
+async function listJobs(a: any) {
+  const date = a.date ? String(a.date).trim() : today()
+  const end = a.end_date ? String(a.end_date).trim() : date
+  const rows = await sbGet(
+    `jobs?scheduled_date=gte.${enc(date)}&scheduled_date=lte.${enc(end)}&select=scheduled_date,address,time_window,status,amount,notes,customer_id,driver_id&order=scheduled_date.asc&limit=100`,
+  )
+  const custIds = [...new Set(rows.map((j: any) => j.customer_id).filter(Boolean))]
+  const names: Record<string, string> = {}
+  if (custIds.length) for (const c of await sbGet(`customers?id=in.(${custIds.join(",")})&select=id,name`)) names[c.id] = c.name
+  return {
+    from: date,
+    to: end,
+    count: rows.length,
+    jobs: await Promise.all(rows.map(async (j: any) => ({
+      date: j.scheduled_date,
+      client: j.customer_id ? (names[j.customer_id] || null) : null,
+      address: j.address,
+      window: j.time_window,
+      status: j.status,
+      amount: j.amount,
+      driver: await driverName(j.driver_id),
+      notes: j.notes,
+    }))),
+  }
 }
 
 async function listAutomations() {
@@ -1252,7 +1355,7 @@ async function textInvoiceTool(a: any) {
   const tpl = (a.custom_message && String(a.custom_message).trim()) ||
     s.sms_invoice_template ||
     "Hi {customerName}, invoice {invoiceNumber} for {total} is ready. Pay here: {payLink} — {companyName}"
-  const body = tpl
+  const body = externalName(tpl)
     .replaceAll("{customerName}", cust.name || "there")
     .replaceAll("{invoiceNumber}", inv.number || "")
     .replaceAll("{total}", fmt(inv.total))
@@ -1300,6 +1403,7 @@ async function sendSmsTool(a: any) {
   let phone: string | null = null
   let recipient = to
   let customerId: string | null = null
+  let isStaff = false
 
   if (to.replace(/\D/g, "").length >= 10) {
     phone = to
@@ -1313,6 +1417,7 @@ async function sendSmsTool(a: any) {
       if (!staff[0].phone) return { error: `${staff[0].full_name} has no phone number on file — add one first.` }
       phone = staff[0].phone
       recipient = staff[0].full_name
+      isStaff = true
     } else {
       // …then clients.
       const clients = await sbGet(`customers?select=id,name,phone&name=ilike.*${enc(to)}*`)
@@ -1327,10 +1432,12 @@ async function sendSmsTool(a: any) {
     }
   }
 
+  // Staff keep the inside joke; clients and unknown numbers get "Randy AI".
+  const finalBody = isStaff ? message : externalName(message)
   const r = await fetch(`${SUPABASE_URL}/functions/v1/sms`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "send", to: phone, body: message, customerId, purpose: "manual", sentBy: "Trashy Randy" }),
+    body: JSON.stringify({ action: "send", to: phone, body: finalBody, customerId, purpose: "manual", sentBy: "Trashy Randy" }),
   })
   const d = await r.json().catch(() => ({}))
   if (!d?.ok) throw new Error(`SMS failed: ${d?.error || `sms function returned ${r.status}`}`)
@@ -1365,6 +1472,8 @@ async function runTool(name: string, input: any): Promise<unknown> {
     case "list_services": return await listServices()
     case "list_automations": return await listAutomations()
     case "suggest_automation": return await suggestAutomation(input)
+    case "create_job": return await createJobTool(input)
+    case "list_jobs": return await listJobs(input)
     case "text_invoice": return await textInvoiceTool(input)
     case "send_sms": return await sendSmsTool(input)
     default: throw new Error(`Unknown tool: ${name}`)
@@ -1450,7 +1559,7 @@ Deno.serve(async (req) => {
         if (block.type !== "tool_use") continue
         try {
           const out = await runTool(block.name, block.input)
-          if (block.name !== "find_clients" && block.name !== "get_overview" && block.name !== "list_routes" && block.name !== "list_needs_review" && block.name !== "find_duplicates" && block.name !== "list_skipped_stops" && block.name !== "list_route_stops" && block.name !== "list_services" && block.name !== "list_automations") {
+          if (block.name !== "find_clients" && block.name !== "get_overview" && block.name !== "list_routes" && block.name !== "list_needs_review" && block.name !== "find_duplicates" && block.name !== "list_skipped_stops" && block.name !== "list_route_stops" && block.name !== "list_services" && block.name !== "list_automations" && block.name !== "list_jobs") {
             actions.push({ tool: block.name, result: out })
             await logForTool(block.name, out)
           }

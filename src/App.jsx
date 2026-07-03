@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useResponsive } from './useResponsive.js'
 import { LINES, MONO } from './data.js'
 import { supabase } from './lib/supabaseClient.js'
+import { loadSettings, saveLogoFile } from './lib/settingsData.js'
 import RoutesView from './views/Routes.jsx'
 import Clients from './views/Clients.jsx'
 import Settings from './views/Settings.jsx'
@@ -14,6 +15,8 @@ import Team from './views/Team.jsx'
 import Import from './views/Import.jsx'
 import Annotations from './views/Annotations.jsx'
 import Automations from './views/Automations.jsx'
+import JobCalendar from './views/JobCalendar.jsx'
+import EmployeePay from './views/EmployeePay.jsx'
 import AnnotationLayer from './components/AnnotationLayer.jsx'
 import AiDock from './AiDock.jsx'
 
@@ -89,10 +92,14 @@ export default function App({ user, onSignOut }) {
   const logoInputRef = useRef(null)
 
   useEffect(() => {
+    // Local cache first for instant paint, then the shared logo from settings.
     try {
       const saved = localStorage.getItem('vw_logo')
       if (saved) setLogoSrc(saved)
     } catch (e) {}
+    loadSettings()
+      .then((s) => { if (s && s.logo_url) { setLogoSrc(s.logo_url); try { localStorage.setItem('vw_logo', s.logo_url) } catch (e) {} } })
+      .catch(() => {})
   }, [])
 
   // lock body scroll when an overlay is open on mobile
@@ -104,10 +111,31 @@ export default function App({ user, onSignOut }) {
 
   const activeLineObj = LINES.find((l) => l.id === activeLine) || LINES[0]
 
+  // Business-line access: members only see/switch to lines they're assigned.
+  const myLines = (user && user.business_lines && user.business_lines.length) ? user.business_lines : ['waste', 'junk', 'lawn']
+  const visibleLines = LINES.filter((l) => myLines.includes(l.id))
+
+  // Junk Removal is one-time work — no recurring routes. Its Schedules tab is
+  // the job calendar, and Routes & Dispatch is hidden entirely.
+  const isJunk = activeLine === 'junk'
+  const isLawn = activeLine === 'lawn'
+  const navMain = isJunk
+    ? NAV_MAIN.filter((n) => n.id !== 'routes')
+    : isLawn
+      ? [...NAV_MAIN, { id: 'employees', glyph: '✂', label: 'Employees' }]
+      : NAV_MAIN
+
+  // If the current view doesn't exist on this line, land on the dashboard.
+  useEffect(() => {
+    if (isJunk && activeView === 'routes') setActiveView('dashboard')
+    if (!isLawn && activeView === 'employees') setActiveView('dashboard')
+    if (!myLines.includes(activeLine)) setActiveLine(myLines[0] || 'waste')
+  }, [activeLine, activeView])
+
   const VIEW_META = {
     dashboard: ['Dispatch Overview', activeLineObj.name],
     routes: ['Routes & Dispatch', 'Live sequencing, GPS tracking and AI optimization'],
-    schedule: ['Recurring Schedules', 'Set pickup cadence — nth weekday, alternating weeks'],
+    schedule: isJunk ? ['Job Calendar', 'One-time junk jobs — click a day to schedule'] : ['Recurring Schedules', 'Set pickup cadence — nth weekday, alternating weeks'],
     invoices: ['Invoicing', 'Per-stop line items · monthly batch billing'],
     clients: ['Clients', 'Add and manage your customers'],
     import: ['Import Properties', 'Bulk-add service locations to a client'],
@@ -118,6 +146,7 @@ export default function App({ user, onSignOut }) {
     settings: ['Settings', 'Manage tags and configuration'],
     annotations: ['Annotations', 'Admin notes flagged with the ✎ tool — review with Claude'],
     automations: ['Automations', 'Scheduled jobs Trashy Randy runs — plus his suggestions awaiting approval'],
+    employees: ['Employees', 'Lawn jobs, per-job pay, overrides, and timesheets (Sun–Sat)'],
   }
   const [viewTitle, viewSubtitle] = VIEW_META[activeView] || VIEW_META.dashboard
 
@@ -181,13 +210,13 @@ export default function App({ user, onSignOut }) {
 
   function onLogoFile(file) {
     if (!file) return
+    // Instant local preview, then persist to storage + settings for everyone.
     const reader = new FileReader()
-    reader.onload = () => {
-      const src = reader.result
-      setLogoSrc(src)
-      try { localStorage.setItem('vw_logo', src) } catch (e) {}
-    }
+    reader.onload = () => setLogoSrc(reader.result)
     reader.readAsDataURL(file)
+    saveLogoFile(file)
+      .then((url) => { setLogoSrc(url); try { localStorage.setItem('vw_logo', url) } catch (e) {} })
+      .catch((e) => console.error('logo upload failed:', e))
   }
 
   function startNewPickup() {
@@ -201,7 +230,7 @@ export default function App({ user, onSignOut }) {
   const views = {
     dashboard: <Dashboard app={app} />,
     routes: <RoutesView app={app} />,
-    schedule: <Schedule app={app} />,
+    schedule: isJunk ? <JobCalendar app={app} line="junk" accent={activeLineObj.color} /> : <Schedule app={app} />,
     invoices: <Invoices app={app} />,
     clients: <Clients app={app} />,
     import: <Import app={app} />,
@@ -212,6 +241,7 @@ export default function App({ user, onSignOut }) {
     settings: <Settings app={app} />,
     annotations: <Annotations app={app} />,
     automations: <Automations app={app} />,
+    employees: <EmployeePay app={app} />,
   }
 
   const showInlineDock = aiOpen && !isMobile && !isTablet
@@ -263,7 +293,7 @@ export default function App({ user, onSignOut }) {
           <div style={{ color: '#5f7568', fontSize: 10 }}>▾</div>
           {lineMenuOpen && (
             <div style={{ position: 'absolute', top: 'calc(100% + 6px)', left: 0, right: 0, background: '#22332b', border: '1px solid #324840', borderRadius: 10, padding: 5, zIndex: 50, boxShadow: '0 14px 30px rgba(0,0,0,.4)' }}>
-              {LINES.map((bl) => (
+              {visibleLines.map((bl) => (
                 <div key={bl.id} onClick={(e) => { e.stopPropagation(); setActiveLine(bl.id); setLineMenuOpen(false) }} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 9px', borderRadius: 7, cursor: 'pointer' }}>
                   <div style={{ width: 8, height: 8, borderRadius: 3, background: bl.color, flex: 'none' }} />
                   <div style={{ flex: 1 }}>
@@ -284,7 +314,7 @@ export default function App({ user, onSignOut }) {
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto', padding: '4px 12px' }}>
-        <NavGroup label="OPERATIONS" items={NAV_MAIN} activeView={activeView} onGo={go} />
+        <NavGroup label="OPERATIONS" items={navMain} activeView={activeView} onGo={go} />
         <NavGroup label="FIELD & CLIENTS" items={isAdmin ? [...NAV_FIELD, { id: 'annotations', glyph: '✎', label: 'Annotations' }] : NAV_FIELD} activeView={activeView} onGo={go} top={14} />
       </div>
 

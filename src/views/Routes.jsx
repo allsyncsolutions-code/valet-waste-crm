@@ -113,7 +113,7 @@ export default function RoutesView({ app }) {
   useEffect(() => {
     loadActiveSchedules().then(setSchedules).catch(() => {})
     loadDrivers().then(setDrivers).catch(() => {})
-    loadRouteDefs().then((defs) => {
+    loadRouteDefs(app.activeLine).then((defs) => {
       setRouteDefs(defs)
       if (defs.length && !defs.some((d) => d.code === routeCode)) setRouteCode(defs[0].code)
     }).catch(() => {})
@@ -422,7 +422,7 @@ export default function RoutesView({ app }) {
     setErr(null)
     try {
       await updateRouteDef(routeCode, { name: name.trim() })
-      setRouteDefs(await loadRouteDefs())
+      setRouteDefs(await loadRouteDefs(app.activeLine))
     } catch (e) {
       setErr(e.message || String(e))
     }
@@ -437,7 +437,7 @@ export default function RoutesView({ app }) {
     setErr(null)
     try {
       await deleteRouteDef(routeCode)
-      const defs = await loadRouteDefs()
+      const defs = await loadRouteDefs(app.activeLine)
       setRouteDefs(defs)
       setRouteCode((defs[0] && defs[0].code) || 'A')
     } catch (e) {
@@ -455,8 +455,8 @@ export default function RoutesView({ app }) {
     if (code == null || !code.trim()) return
     setErr(null)
     try {
-      const def = await createRouteDef({ code, name })
-      setRouteDefs(await loadRouteDefs())
+      const def = await createRouteDef({ code, name, line: app.activeLine })
+      setRouteDefs(await loadRouteDefs(app.activeLine))
       setRouteCode(def.code)
     } catch (e) {
       setErr(e.message || String(e))

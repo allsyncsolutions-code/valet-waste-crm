@@ -75,6 +75,19 @@ export async function geocodeAddress(q) {
   return { lat: parseFloat(d[0].lat), lng: parseFloat(d[0].lon), display: d[0].display_name }
 }
 
+// Business logo: upload to the public `branding` bucket and persist the URL on
+// app_settings so every device (and the customer portal) shows it.
+export async function saveLogoFile(file) {
+  const ext = ((file.name || 'logo.png').split('.').pop() || 'png').toLowerCase().replace(/[^a-z0-9]/g, '') || 'png'
+  const path = `logo-${Date.now()}.${ext}`
+  const { error: upErr } = await supabase.storage.from('branding').upload(path, file, { upsert: true, contentType: file.type || undefined })
+  if (upErr) throw upErr
+  const url = supabase.storage.from('branding').getPublicUrl(path).data.publicUrl
+  const { error } = await supabase.from('app_settings').update({ logo_url: url, updated_at: new Date().toISOString() }).eq('id', 1)
+  if (error) throw error
+  return url
+}
+
 export function subscribeSettings(cb) {
   const ch = supabase
     .channel('settings-live')

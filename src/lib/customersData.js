@@ -16,6 +16,8 @@ function mapCustomer(row) {
     address: row.address || '',
     status: row.status || 'active',
     notes: row.notes || '',
+    portal_slug: row.portal_slug || null,
+    business_line: row.business_line || 'waste',
     tags: (row.customer_tags || []).map((ct) => ct.tag).filter(Boolean),
     createdAt: row.created_at,
     pickup: pickup
@@ -48,6 +50,7 @@ export async function createClient(payload) {
       address: payload.address || null,
       status: payload.status || 'active',
       notes: payload.notes || null,
+      business_line: payload.businessLine || 'waste',
     })
     .select('*')
     .single()
@@ -117,7 +120,7 @@ export async function updateCustomer(id, payload) {
 export async function loadProperties(customerId) {
   const { data, error } = await supabase
     .from('properties')
-    .select('id, code, name, address, service, notes, price, lat, lng, pickup_days, pickup_frequency, pickup_start_date, needs_review')
+    .select('id, code, name, address, service, notes, price, tech_pay, lat, lng, pickup_days, pickup_frequency, pickup_start_date, needs_review')
     .eq('customer_id', customerId)
     .order('created_at', { ascending: true })
   if (error) throw error
@@ -167,7 +170,7 @@ export async function loadPropertyVisits(propertyId, limit = 20) {
 // geocode-attempt counter so it gets re-geocoded on the next pass.
 export async function updateProperty(id, patch) {
   const fields = {}
-  for (const k of ['code', 'name', 'address', 'service', 'notes', 'price', 'pickup_days', 'pickup_frequency', 'needs_review']) {
+  for (const k of ['code', 'name', 'address', 'service', 'notes', 'price', 'tech_pay', 'pickup_days', 'pickup_frequency', 'needs_review']) {
     if (patch[k] !== undefined) fields[k] = patch[k]
   }
   if (patch.pickup_start_date !== undefined) fields.pickup_start_date = patch.pickup_start_date || null

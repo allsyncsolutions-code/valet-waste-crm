@@ -64,7 +64,7 @@ export default function Clients({ app }) {
   const [payErr, setPayErr] = useState(null)
   const [props, setProps] = useState([])
   const [editPid, setEditPid] = useState(null)
-  const [editP, setEditP] = useState({ address: '', service: '', notes: '', price: '', days: [], frequency: 'weekly' })
+  const [editP, setEditP] = useState({ address: '', service: '', notes: '', price: '', techPay: '', days: [], frequency: 'weekly' })
   const [pBusy, setPBusy] = useState(false)
   const [histPid, setHistPid] = useState(null)
   const [hist, setHist] = useState([])
@@ -140,10 +140,15 @@ export default function Clients({ app }) {
     finally { setDupBusy(false) }
   }
 
+  // Only clients on the active business line (legacy rows count as waste).
+  const lineCustomers = useMemo(
+    () => customers.filter((c) => (c.business_line || 'waste') === (app.activeLine || 'waste')),
+    [customers, app.activeLine],
+  )
   const q = search.toLowerCase().trim()
   const list = useMemo(
-    () => (q ? customers.filter((c) => (c.name + ' ' + c.address).toLowerCase().includes(q)) : customers),
-    [customers, q]
+    () => (q ? lineCustomers.filter((c) => (c.name + ' ' + c.address).toLowerCase().includes(q)) : lineCustomers),
+    [lineCustomers, q]
   )
   const cur = customers.find((c) => c.id === selId) || null
   const set = (patch) => setForm((f) => ({ ...f, ...patch }))
@@ -189,7 +194,7 @@ export default function Clients({ app }) {
   }
   function startEditProp(p) {
     setEditPid(p.id)
-    setEditP({ address: p.address || '', service: p.service || '', notes: p.notes || '', price: p.price ?? '', days: p.pickup_days || [], frequency: p.pickup_frequency || 'weekly' })
+    setEditP({ address: p.address || '', service: p.service || '', notes: p.notes || '', price: p.price ?? '', techPay: p.tech_pay ?? '', days: p.pickup_days || [], frequency: p.pickup_frequency || 'weekly' })
   }
   async function toggleHistory(p) {
     if (histPid === p.id) { setHistPid(null); setHist([]); return }
@@ -246,6 +251,7 @@ export default function Clients({ app }) {
         service: editP.service.trim(),
         notes: editP.notes.trim(),
         price: editP.price === '' || editP.price == null ? null : Number(editP.price),
+        tech_pay: editP.techPay === '' || editP.techPay == null ? null : Number(editP.techPay),
         pickup_days: orderDays(editP.days),
         pickup_frequency: editP.frequency,
       }
@@ -327,7 +333,7 @@ export default function Clients({ app }) {
         await refresh()
         setSelId(editingId)
       } else {
-        const id = await createClient(payload)
+        const id = await createClient({ ...payload, businessLine: app.activeLine || 'waste' })
         setShowForm(false)
         setForm(BLANK)
         await refresh()
@@ -433,6 +439,13 @@ export default function Clients({ app }) {
                   <div style={{ fontWeight: 700, fontSize: 18 }}>{cur.name}</div>
                   <div style={{ fontSize: 12.5, color: '#7c8a82' }}>{cur.address || 'No address'}</div>
                 </div>
+                {cur.portal_slug && (
+                  <button
+                    onClick={() => { navigator.clipboard.writeText(`${window.location.origin}/?portal=${cur.portal_slug}`).then(() => window.alert('Portal link copied — share it with this client. They sign in with the email on file.')).catch(() => window.prompt('Copy this portal link:', `${window.location.origin}/?portal=${cur.portal_slug}`)) }}
+                    title="Copy this client's shareable portal link"
+                    style={{ background: '#fff', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 9, padding: '9px 13px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', flex: 'none' }}
+                  >◫ Portal link</button>
+                )}
                 <button onClick={openEdit} style={{ background: '#fff', border: '1px solid #dde2dd', color: '#1a2420', borderRadius: 9, padding: '9px 13px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', flex: 'none' }}>Edit</button>
                 <button onClick={app.openAssistant} style={{ background: '#fff', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 9, padding: '9px 13px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', flex: 'none' }}>✦ Ask AI</button>
               </div>
@@ -494,6 +507,7 @@ export default function Clients({ app }) {
                           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                             <span style={{ fontSize: 13, color: '#7c8a82' }}>$</span>
                             <input value={editP.price} onChange={(e) => setEditP({ ...editP, price: e.target.value })} inputMode="decimal" style={{ ...inp, fontSize: 13, maxWidth: 140 }} placeholder="Price (e.g. 15)" />
+                            <input value={editP.techPay} onChange={(e) => setEditP({ ...editP, techPay: e.target.value })} inputMode="decimal" style={{ ...inp, fontSize: 13, maxWidth: 140 }} placeholder="Tech pay $ (lawn)" title="What the assigned tech earns for servicing this address (Lawn Care per-job pay)" />
                             <span style={{ fontSize: 11.5, color: '#9aa69e' }}>per pickup</span>
                           </div>
                           <div style={{ fontSize: 10.5, color: '#7c8a82', fontFamily: MONO, letterSpacing: '.06em', marginTop: 2 }}>PICKUP DAYS</div>

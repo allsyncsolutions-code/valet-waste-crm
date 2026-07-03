@@ -70,7 +70,7 @@ Deno.serve(async (req) => {
     const rows = await rest(`profiles?id=eq.${callerId}&select=role`)
     if (!rows?.[0] || rows[0].role !== "admin") return json({ error: "Admins only." }, 403)
 
-    const { action, email, full_name, role, password, id, is_driver } = await req.json()
+    const { action, email, full_name, role, password, id, is_driver, business_lines } = await req.json()
 
     if (action === "invite") {
       const cleanEmail = String(email || "").trim().toLowerCase()
@@ -103,6 +103,14 @@ Deno.serve(async (req) => {
     if (action === "set_driver") {
       if (!id || typeof is_driver !== "boolean") return json({ error: "Bad request." }, 400)
       await rest(`profiles?id=eq.${id}`, { method: "PATCH", prefer: "return=minimal", body: { is_driver } })
+      return json({ ok: true })
+    }
+
+    if (action === "set_lines") {
+      const VALID = ["waste", "junk", "lawn"]
+      const lines = Array.isArray(business_lines) ? business_lines.filter((l: string) => VALID.includes(l)) : null
+      if (!id || !lines || !lines.length) return json({ error: "Pick at least one business line." }, 400)
+      await rest(`profiles?id=eq.${id}`, { method: "PATCH", prefer: "return=minimal", body: { business_lines: lines } })
       return json({ ok: true })
     }
 

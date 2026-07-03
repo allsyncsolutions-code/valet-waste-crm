@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react'
 import { MONO } from '../data.js'
-import { loadTeam, inviteMember, setMemberRole, setMemberDriver, removeMember, subscribeTeam } from '../lib/teamData.js'
+import { loadTeam, inviteMember, setMemberRole, setMemberDriver, setMemberLines, removeMember, subscribeTeam } from '../lib/teamData.js'
+
+const LINE_OPTS = [
+  ['waste', 'Waste', '#1f7a4d'],
+  ['junk', 'Junk', '#2f6db0'],
+  ['lawn', 'Lawn', '#7a9e2e'],
+]
 
 const ROLE_STYLE = {
   admin: ['#1f7a4d', '#e7f1eb', 'Admin'],
@@ -63,6 +69,16 @@ export default function Team({ app }) {
     // optimistic flip
     setMembers((list) => list.map((x) => (x.id === m.id ? { ...x, is_driver: !x.is_driver } : x)))
     try { await setMemberDriver(m.id, !m.is_driver); refresh() }
+    catch (e) { setErr((e && e.message) || String(e)); refresh() }
+  }
+
+  async function toggleLine(m, lid) {
+    setErr('')
+    const cur = m.business_lines && m.business_lines.length ? m.business_lines : ['waste', 'junk', 'lawn']
+    const next = cur.includes(lid) ? cur.filter((x) => x !== lid) : [...cur, lid]
+    if (!next.length) { setErr('Each member needs at least one business line.'); return }
+    setMembers((list) => list.map((x) => (x.id === m.id ? { ...x, business_lines: next } : x)))
+    try { await setMemberLines(m.id, next); refresh() }
     catch (e) { setErr((e && e.message) || String(e)); refresh() }
   }
 
@@ -160,6 +176,22 @@ export default function Team({ app }) {
                         <option value="pending">Pending (no access)</option>
                       </select>
                       <button onClick={() => remove(m)} disabled={isMe} title={isMe ? "You can't remove yourself" : 'Remove'} style={{ ...btnGhost, color: isMe ? '#bbb' : '#c0492f', borderColor: isMe ? '#eee' : '#f0d4cd', cursor: isMe ? 'not-allowed' : 'pointer' }}>Remove</button>
+                    </div>
+                    <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+                      <span style={{ fontSize: 11.5, color: '#7c8a82', marginRight: 2 }}>Lines:</span>
+                      {LINE_OPTS.map(([lid, label, color]) => {
+                        const has = (m.business_lines && m.business_lines.length ? m.business_lines : ['waste', 'junk', 'lawn']).includes(lid)
+                        return (
+                          <button
+                            key={lid}
+                            type="button"
+                            onClick={() => toggleLine(m, lid)}
+                            disabled={m.role === 'pending'}
+                            title={has ? `Remove ${label} access` : `Grant ${label} access`}
+                            style={{ background: has ? `${color}18` : '#fff', border: `1px solid ${has ? color : '#dde2dd'}`, color: has ? color : '#9aa69e', borderRadius: 20, padding: '4px 11px', fontSize: 11.5, fontWeight: 700, cursor: m.role === 'pending' ? 'not-allowed' : 'pointer' }}
+                          >{has ? '✓ ' : ''}{label}</button>
+                        )
+                      })}
                     </div>
                     <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, fontSize: 12.5, color: '#5d6b63', cursor: m.role === 'pending' ? 'not-allowed' : 'pointer', opacity: m.role === 'pending' ? 0.5 : 1 }} title={m.role === 'pending' ? 'Give them access first' : 'Show this person in the route driver list'}>
                       <input type="checkbox" checked={!!m.is_driver} disabled={m.role === 'pending'} onChange={() => toggleDriver(m)} style={{ width: 15, height: 15, accentColor: '#1f7a4d', cursor: 'inherit' }} />

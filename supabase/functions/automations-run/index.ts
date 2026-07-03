@@ -31,6 +31,15 @@ async function sbGet(path: string) {
 async function sbPatch(path: string, body: unknown) {
   await fetch(`${SUPABASE_URL}/rest/v1/${path}`, { method: "PATCH", headers: restHeaders, body: JSON.stringify(body) })
 }
+async function sbPost(path: string, body: unknown) {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    method: "POST",
+    headers: { ...restHeaders, Prefer: "return=representation" },
+    body: JSON.stringify(body),
+  })
+  if (!r.ok) throw new Error(`POST ${path}: ${r.status} ${await r.text()}`)
+  return await r.json()
+}
 
 const fmtMoney = (v: number) => `$${Number(v || 0).toFixed(2)}`
 const fmtDay = (ts: string | null) => {
@@ -92,6 +101,40 @@ async function runOutstandingDigest(): Promise<string> {
   return `Digest of ${invoices.length} outstanding invoices texted to ${sent}/${recipients.length} staff.`
 }
 
+// ---- lawn_invoice_weekly_lines ----------------------------------------------
+// Lawns are billed monthly, itemized per visit: each completed lawn stop from
+// yesterday becomes a line item on the client's current-month draft invoice.
+async function runLawnInvoiceLines(): Promise<string> {
+  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10)
+  const stops = await sbGet(
+    `route_stops?check_out=not.is.null&select=id,property_id,routes!inner(service_date,business_line),properties(address,price,customer_id)&routes.business_line=eq.lawn&routes.service_date=eq.${yesterday}`,
+  )
+  if (!stops.length) return `No completed lawn stops on ${yesterday}.`
+  const monthStart = yesterday.slice(0, 8) + "01"
+  let added = 0
+  let skipped = 0
+  for (const s of stops) {
+    const p = s.properties
+    if (!p?.customer_id || p.price == null) { skipped++; continue }
+    let inv = (await sbGet(
+      `invoices?customer_id=eq.${p.customer_id}&status=eq.draft&created_at=gte.${monthStart}&select=id,subtotal,discount&order=created_at.desc&limit=1`,
+    ))[0]
+    if (!inv) inv = (await sbPost("invoices", { customer_id: p.customer_id, status: "draft", subtotal: 0, total: 0, discount: 0 }))[0]
+    const desc = `Lawn care — ${p.address} — ${yesterday}`
+    const dup = await sbGet(`invoice_line_items?invoice_id=eq.${inv.id}&description=eq.${encodeURIComponent(desc)}&select=id&limit=1`)
+    if (dup.length) { skipped++; continue }
+    const last = await sbGet(`invoice_line_items?invoice_id=eq.${inv.id}&select=position&order=position.desc.nullslast&limit=1`)
+    await sbPost("invoice_line_items", {
+      invoice_id: inv.id, description: desc, quantity: 1,
+      unit_price: p.price, amount: p.price, position: ((last[0]?.position ?? -1) + 1),
+    })
+    const subtotal = Number(inv.subtotal || 0) + Number(p.price)
+    await sbPatch(`invoices?id=eq.${inv.id}`, { subtotal, total: Math.max(0, subtotal - Number(inv.discount || 0)) })
+    added++
+  }
+  return `Added ${added} lawn line item(s) for ${yesterday}${skipped ? `, skipped ${skipped}` : ""}.`
+}
+
 // ---- HTTP entry -------------------------------------------------------------
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS })
@@ -123,6 +166,7 @@ Deno.serve(async (req) => {
       let result = "Unknown automation kind — nothing to run."
       try {
         if (a.kind === "outstanding_digest") result = await runOutstandingDigest()
+        if (a.kind === "lawn_invoice_weekly_lines") result = await runLawnInvoiceLines()
       } catch (e) {
         result = `Error: ${e instanceof Error ? e.message : String(e)}`
       }

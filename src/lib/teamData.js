@@ -6,7 +6,7 @@ import { supabase } from './supabaseClient.js'
 export async function loadTeam() {
   const { data, error } = await supabase
     .from('profiles')
-    .select('id, email, full_name, role, is_driver, created_at')
+    .select('id, email, full_name, role, is_driver, business_lines, created_at')
     .order('created_at', { ascending: true })
   if (error) throw error
   return data || []
@@ -16,7 +16,7 @@ export async function loadTeam() {
 export async function loadDrivers() {
   const { data, error } = await supabase
     .from('profiles')
-    .select('id, full_name, email')
+    .select('id, full_name, email, phone')
     .eq('is_driver', true)
     .order('full_name', { ascending: true })
   if (error) throw error
@@ -44,6 +44,8 @@ export const inviteMember = ({ email, full_name, role, password }) =>
 export const setMemberRole = (id, role) => call({ action: 'set_role', id, role })
 
 export const setMemberDriver = (id, is_driver) => call({ action: 'set_driver', id, is_driver })
+
+export const setMemberLines = (id, business_lines) => call({ action: 'set_lines', id, business_lines })
 
 export const removeMember = (id) => call({ action: 'remove', id })
 
