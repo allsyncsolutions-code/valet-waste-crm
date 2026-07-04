@@ -5,7 +5,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { MONO } from '../data.js'
 import { loadTeam } from '../lib/teamData.js'
-import { loadWeekPay, approveStopPay, loadWeekTimesheets, clockIn, clockOut, weekStartOf, addDaysStr } from '../lib/payData.js'
+import { loadWeekPay, loadMonthPay, approveStopPay, loadWeekTimesheets, clockIn, clockOut, weekStartOf, addDaysStr } from '../lib/payData.js'
 
 const GREEN = '#1f7a4d'
 const LAWN = '#7a9e2e'
@@ -24,6 +24,7 @@ export default function EmployeePay({ app }) {
   const [byDriver, setByDriver] = useState({})
   const [team, setTeam] = useState([])
   const [sheets, setSheets] = useState([])
+  const [month, setMonth] = useState(null) // { monthLabel, payDateLabel, totals }
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
@@ -32,10 +33,11 @@ export default function EmployeePay({ app }) {
     setLoading(true)
     setErr('')
     try {
-      const [pay, tm, ts] = await Promise.all([loadWeekPay(weekStart), loadTeam(), loadWeekTimesheets(weekStart)])
+      const [pay, tm, ts, mo] = await Promise.all([loadWeekPay(weekStart), loadTeam(), loadWeekTimesheets(weekStart), loadMonthPay(weekStart)])
       setByDriver(pay)
       setTeam(tm)
       setSheets(ts)
+      setMonth(mo)
     } catch (e) { setErr(e.message || String(e)) }
     setLoading(false)
   }
@@ -106,6 +108,7 @@ export default function EmployeePay({ app }) {
             const pending = stops.filter((s) => !s.payable)
             const mySheets = sheets.filter((s) => s.profile_id === did && (s.clock_in || s.clock_out))
             const totalHrs = mySheets.reduce((n, t) => n + (hrs(t) || 0), 0)
+            const mo = month?.totals?.[did]
             return (
               <div key={did} style={card}>
                 <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
@@ -115,6 +118,17 @@ export default function EmployeePay({ app }) {
                   <div style={{ fontFamily: MONO, fontWeight: 700, fontSize: 15, color: GREEN }}>{money(total)} <span style={{ fontSize: 11, color: '#7c8a82', fontWeight: 400 }}>payable this week</span></div>
                   {pending.length > 0 && <span style={{ fontSize: 11.5, fontWeight: 700, color: '#8a6414', background: '#faf3e2', borderRadius: 7, padding: '3px 9px' }}>{pending.length} needs review</span>}
                 </div>
+
+                {/* month accrual — paid on the 1st for the previous month */}
+                {month && mo && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', background: '#f4f8f0', border: '1px solid #dde5c9', borderRadius: 9, padding: '8px 12px', marginBottom: 10, fontSize: 12.5 }}>
+                    <span style={{ fontWeight: 700, color: '#4c651d' }}>{month.monthLabel} accrued:</span>
+                    <span style={{ fontFamily: MONO, fontWeight: 700, color: GREEN }}>{money(mo.payable)}</span>
+                    {mo.pending > 0 && <span style={{ color: '#8a6414' }}>+ {money(mo.pending)} awaiting photos/approval</span>}
+                    <span style={{ flex: 1 }} />
+                    <span style={{ color: '#7c8a82' }}>pays {month.payDateLabel}</span>
+                  </div>
+                )}
 
                 {stops.sort((a, b) => (a.date < b.date ? -1 : 1)).map((s) => (
                   <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '8px 0', borderTop: '1px solid #f2f4f2', flexWrap: 'wrap' }}>

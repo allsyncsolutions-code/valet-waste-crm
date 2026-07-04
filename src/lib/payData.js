@@ -61,6 +61,40 @@ export async function loadWeekPay(weekStart) {
   return byDriver
 }
 
+// Month accrual — techs are paid on the 1st for the PREVIOUS month, so the
+// Employees tab shows what each tech has racked up in the month being viewed.
+// Returns { monthLabel, payDateLabel, totals: { driverId: { payable, pending } } }.
+export async function loadMonthPay(anyDateStr) {
+  const d = new Date(anyDateStr + 'T12:00:00')
+  const monthStart = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`
+  const monthEnd = new Date(d.getFullYear(), d.getMonth() + 1, 0)
+  const monthEndStr = `${monthEnd.getFullYear()}-${String(monthEnd.getMonth() + 1).padStart(2, '0')}-${String(monthEnd.getDate()).padStart(2, '0')}`
+  const payDate = new Date(d.getFullYear(), d.getMonth() + 1, 1)
+
+  const { data, error } = await supabase
+    .from('route_stops')
+    .select('id, check_in, check_out, tech_pay, pay_override, properties(tech_pay), routes!inner(driver_id, business_line, service_date), stop_photos(id)')
+    .eq('routes.business_line', 'lawn')
+    .gte('routes.service_date', monthStart)
+    .lte('routes.service_date', monthEndStr)
+  if (error) throw error
+
+  const totals = {}
+  for (const s of data || []) {
+    const k = s.routes.driver_id || '__unassigned__'
+    totals[k] ||= { payable: 0, pending: 0 }
+    const pay = Number(s.tech_pay ?? s.properties?.tech_pay ?? 0)
+    const complete = !!(s.check_in && s.check_out && (s.stop_photos || []).length > 0)
+    if (complete || s.pay_override) totals[k].payable += pay
+    else totals[k].pending += pay
+  }
+  return {
+    monthLabel: d.toLocaleDateString(undefined, { month: 'long', year: 'numeric' }),
+    payDateLabel: payDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+    totals,
+  }
+}
+
 export async function approveStopPay(stopId, adminName, label) {
   const { error } = await supabase.from('route_stops').update({
     pay_override: true,

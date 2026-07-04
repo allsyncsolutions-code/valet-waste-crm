@@ -417,7 +417,7 @@ export async function loadDayDispatch(date, line) {
   if (!date) throw new Error('A date is required.')
   let q = supabase
     .from('routes')
-    .select('id, code, name, driver_id, business_line, route_stops(id, seq, status, service, time_window, lat, lng, check_in, check_out, excess_flagged, excess_note, tech_pay, nudge_sent, properties(name, address, lat, lng, price, tech_pay), stop_photos(id))')
+    .select('id, code, name, driver_id, business_line, route_stops(id, seq, status, service, time_window, lat, lng, check_in, check_out, on_my_way_at, excess_flagged, excess_note, tech_pay, nudge_sent, properties(name, address, notes, lat, lng, price, tech_pay, customers(name, phone)), stop_photos(id))')
     .eq('service_date', date)
   if (line) q = q.eq('business_line', line)
   const { data, error } = await q.order('code', { ascending: true })
@@ -435,6 +435,10 @@ export async function loadDayDispatch(date, line) {
         id: s.id, seq: s.seq, status: s.status, service: s.service, window: s.time_window,
         lat: s.properties?.lat ?? s.lat, lng: s.properties?.lng ?? s.lng, checkIn: s.check_in, checkOut: s.check_out,
         name: s.properties?.name || '—', address: s.properties?.address || '',
+        notes: s.properties?.notes || '',
+        clientName: s.properties?.customers?.name || null,
+        clientPhone: s.properties?.customers?.phone || null,
+        onMyWayAt: s.on_my_way_at || null,
         excessFlagged: !!s.excess_flagged, excessNote: s.excess_note || '',
         nudgeSent: !!s.nudge_sent,
         photoCount: (s.stop_photos || []).length,
@@ -457,6 +461,12 @@ export async function overrideStopPay(stopId, adminName) {
 
 export async function markStopNudged(stopId) {
   await supabase.from('route_stops').update({ nudge_sent: true }).eq('id', stopId)
+}
+
+// "On my way" — stamps the stop (button shows once) and lets My Day text the client.
+export async function markStopOnMyWay(stopId) {
+  const { error } = await supabase.from('route_stops').update({ on_my_way_at: new Date().toISOString() }).eq('id', stopId)
+  if (error) throw error
 }
 
 // Driver flags a pickup as excessive (over the usual volume). Starts the
@@ -497,7 +507,7 @@ export async function checkOutStop(stopId, gps) {
 // Undo: back to pending and clear the check-in/out trail.
 export async function resetStopStatus(stopId) {
   const { error } = await supabase.from('route_stops').update({
-    status: 'pending', check_in: null, check_out: null,
+    status: 'pending', check_in: null, check_out: null, on_my_way_at: null,
     check_in_lat: null, check_in_lng: null, check_out_lat: null, check_out_lng: null,
   }).eq('id', stopId)
   if (error) throw error

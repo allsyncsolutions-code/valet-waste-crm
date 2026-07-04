@@ -17,6 +17,7 @@ import Annotations from './views/Annotations.jsx'
 import Automations from './views/Automations.jsx'
 import JobCalendar from './views/JobCalendar.jsx'
 import EmployeePay from './views/EmployeePay.jsx'
+import MyDay from './views/MyDay.jsx'
 import AnnotationLayer from './components/AnnotationLayer.jsx'
 import AiDock from './AiDock.jsx'
 
@@ -124,11 +125,17 @@ export default function App({ user, onSignOut }) {
     : isLawn
       ? [...NAV_MAIN, { id: 'employees', glyph: '✂', label: 'Employees' }]
       : NAV_MAIN
+  // Lawn techs work per-JOB, not per-truck-route — swap Drivers & Field for My Day.
+  const navField = isLawn
+    ? NAV_FIELD.map((n) => (n.id === 'drivers' ? { id: 'myday', glyph: '☀', label: 'My Day' } : n))
+    : NAV_FIELD
 
   // If the current view doesn't exist on this line, land on the dashboard.
   useEffect(() => {
     if (isJunk && activeView === 'routes') setActiveView('dashboard')
     if (!isLawn && activeView === 'employees') setActiveView('dashboard')
+    if (isLawn && activeView === 'drivers') setActiveView('myday')
+    if (!isLawn && activeView === 'myday') setActiveView('drivers')
     if (!myLines.includes(activeLine)) setActiveLine(myLines[0] || 'waste')
   }, [activeLine, activeView])
 
@@ -141,6 +148,7 @@ export default function App({ user, onSignOut }) {
     import: ['Import Properties', 'Bulk-add service locations to a client'],
     activity: ['Activity Log', 'Everything you and Trashy Randy have done'],
     drivers: ['Drivers & Field', 'Check-in / check-out, photos and GPS'],
+    myday: ['My Day', 'Your jobs — on my way, clock in, complete, photos'],
     team: ['Team', 'Members and their business-line assignments'],
     portal: ['Client Portal', 'What your clients see when they log in'],
     settings: ['Settings', 'Manage tags and configuration'],
@@ -236,6 +244,7 @@ export default function App({ user, onSignOut }) {
     import: <Import app={app} />,
     activity: <Activity app={app} />,
     drivers: <Drivers app={app} />,
+    myday: <MyDay app={app} />,
     portal: <Placeholder title="Client Portal" />,
     team: <Team app={app} />,
     settings: <Settings app={app} />,
@@ -315,7 +324,7 @@ export default function App({ user, onSignOut }) {
 
       <div style={{ flex: 1, overflowY: 'auto', padding: '4px 12px' }}>
         <NavGroup label="OPERATIONS" items={navMain} activeView={activeView} onGo={go} />
-        <NavGroup label="FIELD & CLIENTS" items={isAdmin ? [...NAV_FIELD, { id: 'annotations', glyph: '✎', label: 'Annotations' }] : NAV_FIELD} activeView={activeView} onGo={go} top={14} />
+        <NavGroup label="FIELD & CLIENTS" items={isAdmin ? [...navField, { id: 'annotations', glyph: '✎', label: 'Annotations' }] : navField} activeView={activeView} onGo={go} top={14} />
       </div>
 
       <div onClick={openAssistant} style={{ margin: '10px 12px', padding: '11px 12px', borderRadius: 10, background: 'linear-gradient(135deg,#1f7a4d,#155e3a)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10 }}>
