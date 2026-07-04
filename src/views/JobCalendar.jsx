@@ -149,25 +149,7 @@ export default function JobCalendar({ app, line = 'junk', accent = '#2f6db0' }) 
             <button onClick={() => setAdding(!adding)} style={{ background: adding ? '#fff' : accent, color: adding ? '#5d6b63' : '#fff', border: `1px solid ${adding ? '#dde2dd' : accent}`, borderRadius: 9, padding: '8px 14px', fontSize: 12.5, fontWeight: 700, cursor: 'pointer' }}>{adding ? 'Cancel' : '+ Add job'}</button>
           </div>
 
-          {adding && (
-            <form onSubmit={submitJob} style={{ display: 'grid', gridTemplateColumns: app.isMobile ? '1fr' : '1fr 1fr', gap: 10, marginBottom: 14, background: '#fafbfa', border: '1px solid #eef0ee', borderRadius: 10, padding: 12 }}>
-              <select value={form.customerId} onChange={(e) => setForm({ ...form, customerId: e.target.value })} style={inp}>
-                <option value="">Client (optional)</option>
-                {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-              </select>
-              <input value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} placeholder="Address (defaults to client's)" style={inp} />
-              <input value={form.window} onChange={(e) => setForm({ ...form, window: e.target.value })} placeholder="Time window, e.g. 9–11am" style={inp} />
-              <input value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} placeholder="Price $" type="number" step="0.01" style={inp} />
-              <select value={form.driverId} onChange={(e) => setForm({ ...form, driverId: e.target.value })} style={inp}>
-                <option value="">Driver (optional)</option>
-                {drivers.map((d) => <option key={d.id} value={d.id}>{d.full_name}</option>)}
-              </select>
-              <input value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Notes" style={inp} />
-              <button type="submit" disabled={busy} style={{ gridColumn: '1 / -1', background: accent, color: '#fff', border: 'none', borderRadius: 9, padding: '10px 0', fontSize: 13.5, fontWeight: 700, cursor: 'pointer' }}>{busy ? 'Saving…' : `Schedule job for ${selDate}`}</button>
-            </form>
-          )}
-
-          {!selJobs.length && !adding && <div style={{ fontSize: 13, color: '#9aa69e' }}>No jobs this day.</div>}
+          {!selJobs.length && <div style={{ fontSize: 13, color: '#9aa69e' }}>No jobs this day.</div>}
           {selJobs.map((j) => (
             <div key={j.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 0', borderTop: '1px solid #f2f4f2', flexWrap: 'wrap' }}>
               <span style={{ fontFamily: MONO, fontSize: 10, fontWeight: 700, color: '#fff', background: STATUS_COLOR[j.status] || accent, borderRadius: 5, padding: '3px 7px' }}>{j.status.toUpperCase()}</span>
@@ -181,6 +163,41 @@ export default function JobCalendar({ app, line = 'junk', accent = '#2f6db0' }) 
               <button onClick={() => remove(j)} disabled={busy} style={{ background: '#fff', border: '1px solid #c0492f55', color: '#c0492f', borderRadius: 8, padding: '6px 11px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Delete</button>
             </div>
           ))}
+        </div>
+      )}
+
+      {adding && selDate && (
+        <div
+          onClick={() => !busy && setAdding(false)}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(20,28,23,.45)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}
+        >
+          <div onClick={(e) => e.stopPropagation()} style={{ background: '#fff', borderRadius: 14, boxShadow: '0 18px 50px rgba(0,0,0,.22)', width: '100%', maxWidth: 620, padding: '18px 20px', maxHeight: '90vh', overflowY: 'auto' }}>
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 14 }}>
+              <div style={{ fontWeight: 800, fontSize: 15.5 }}>
+                Schedule job — {new Date(selDate + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}
+              </div>
+              <span style={{ flex: 1 }} />
+              <button onClick={() => setAdding(false)} aria-label="Close" style={{ background: 'transparent', border: 'none', fontSize: 20, color: '#7c8a82', cursor: 'pointer', lineHeight: 1, padding: 4 }}>×</button>
+            </div>
+            <form onSubmit={submitJob} style={{ display: 'grid', gridTemplateColumns: app.isMobile ? '1fr' : '1fr 1fr', gap: 10 }}>
+              <select value={form.customerId} onChange={(e) => setForm({ ...form, customerId: e.target.value })} style={inp}>
+                <option value="">Client (optional)</option>
+                {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+              <input value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} placeholder="Address (defaults to client's)" style={inp} />
+              <input value={form.window} onChange={(e) => setForm({ ...form, window: e.target.value })} placeholder="Time window, e.g. 9–11am" style={inp} />
+              <input value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} placeholder="Price $" type="number" step="0.01" style={inp} />
+              <select value={form.driverId} onChange={(e) => setForm({ ...form, driverId: e.target.value })} style={inp}>
+                <option value="">Driver (optional)</option>
+                {drivers.map((d) => <option key={d.id} value={d.id}>{d.full_name}</option>)}
+              </select>
+              <input value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Notes" style={inp} />
+              <div style={{ gridColumn: '1 / -1', display: 'flex', gap: 10 }}>
+                <button type="button" onClick={() => setAdding(false)} disabled={busy} style={{ flex: 1, background: '#fff', color: '#5d6b63', border: '1px solid #dde2dd', borderRadius: 9, padding: '10px 0', fontSize: 13.5, fontWeight: 700, cursor: 'pointer' }}>Cancel</button>
+                <button type="submit" disabled={busy} style={{ flex: 2, background: accent, color: '#fff', border: 'none', borderRadius: 9, padding: '10px 0', fontSize: 13.5, fontWeight: 700, cursor: 'pointer' }}>{busy ? 'Saving…' : `Schedule job for ${selDate}`}</button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
     </div>

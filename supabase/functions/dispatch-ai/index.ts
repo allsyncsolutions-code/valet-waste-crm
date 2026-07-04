@@ -48,7 +48,7 @@ Guidelines:
 - Use list_skipped_stops to report addresses that were NOT checked in (skipped) on a day — e.g. "what got skipped yesterday?" or "which stops weren't picked up on June 24?". It defaults to today; pass a date or a route_code to narrow it.
 - Use add_property_photo to log a dated photo/missed-pickup entry onto an ADDRESS's file (e.g. "log that 123 Main wasn't picked up June 24, bin not out"). You can't take a picture yourself, so unless the user gives you an image_url this logs a dated note the owner attaches the real photo to in Clients › property › Photos. Always set the date to the day it applies to. Resolve the property by address (add client_name if ambiguous); if it returns needs_clarification, ask which match.
 - Use text_invoice to text a client their invoice with a Stripe payment link (by invoice number, or client name for their newest unpaid). Pass preview_to with a staff member's name to send them a preview first — the invoice isn't marked sent until you call it for real. You still cannot charge cards directly.
-- BUSINESS LINES: the company runs three lines — waste (Waste & Recycling: recurring routed pickups), junk (Junk Removal: ONE-TIME jobs on a calendar, no routes), and lawn (Lawn Care). You see across ALL lines. Junk jobs are created with create_job and live on the Junk calendar. When staff ask when a junk job could fit, look at that day's trash routes (list_route_stops) and the job addresses, and recommend a slot near where a route already passes — e.g. "route A hits Palm Coast around midday; do the junk job after stop 8".
+- BUSINESS LINES: the company runs three lines — waste (Waste & Recycling: recurring routed pickups), junk (Junk Removal: ONE-TIME jobs on a calendar, no routes), and lawn (Lawn Care). You see across ALL lines. Junk jobs are created with create_job and live on the Junk calendar. create_job automatically checks how close the job address is to that day's route stops and returns route_proximity — always mention it when scheduling (e.g. "booked it — it's 0.4 mi from stop 8 on Route A, so slot it after that stop" or "heads up, nearest route stop that day is 11 mi away"). If the proximity is far, offer to check other days' routes with list_route_stops to find a better date. When staff ask when a junk job could fit BEFORE booking, look at that day's trash routes (list_route_stops) and the job addresses, and recommend a slot near where a route already passes.
 - After making a change, confirm what you did in one short sentence.`
 
 // Selectable personalities for Randy's STAFF chat replies. The customer-facing
@@ -423,7 +423,7 @@ const tools = [
   {
     name: "create_job",
     description:
-      "Schedule a ONE-TIME job (Junk Removal) on the job calendar for a specific date. Not for recurring pickups — those are schedules. Resolve the client with find_clients first when a client is named; address defaults to the client's if omitted.",
+      "Schedule a ONE-TIME job (Junk Removal) on the job calendar for a specific date. Not for recurring pickups — those are schedules. Resolve the client with find_clients first when a client is named; address defaults to the client's if omitted. The result includes route_proximity: how close the job address is to the nearest stop on any route running that date — ALWAYS relay this to the user (e.g. 'that's 0.4 mi from stop 8 on Route A — Randy can hit it after that stop').",
     input_schema: {
       type: "object",
       properties: {
@@ -583,6 +583,55 @@ async function geocode(address: string): Promise<{ lat: number; lng: number } | 
     const rows = await r.json()
     if (!rows?.length) return null
     return { lat: Number(rows[0].lat), lng: Number(rows[0].lon) }
+  } catch {
+    return null
+  }
+}
+
+// Great-circle distance in miles.
+const toRad = (d: number) => (d * Math.PI) / 180
+function milesBetween(aLat: number, aLng: number, bLat: number, bLng: number): number {
+  const R = 3958.8
+  const h =
+    Math.sin(toRad(bLat - aLat) / 2) ** 2 +
+    Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(toRad(bLng - aLng) / 2) ** 2
+  return 2 * R * Math.asin(Math.sqrt(h))
+}
+
+// Best-effort: find the route stop nearest to `address` among routes running on
+// `date`. Used by create_job so Randy can say "that's 0.4 mi from stop 8 on
+// Route A" and suggest slotting the junk job around the truck's path.
+const NEARBY_MILES = 2
+async function nearbyRouteStop(address: string, date: string) {
+  try {
+    const loc = await geocode(address)
+    if (!loc) return { note: "Couldn't geocode the job address, so no route-proximity check was done." }
+    const routes = await sbGet(`routes?service_date=eq.${enc(date)}&select=id,code,name,driver,driver_id`)
+    if (!routes.length) return { note: `No routes run on ${date} — nothing to be near.` }
+    const ids = routes.map((r: any) => r.id)
+    const stops = await sbGet(`route_stops?route_id=in.(${ids.join(",")})&select=route_id,seq,properties(address,name,lat,lng)&limit=500`)
+    let best: any = null
+    for (const s of stops) {
+      const p = s.properties
+      const lat = p?.lat == null ? null : Number(p.lat)
+      const lng = p?.lng == null ? null : Number(p.lng)
+      if (lat == null || lng == null || (lat === 0 && lng === 0)) continue
+      const miles = milesBetween(loc.lat, loc.lng, lat, lng)
+      if (!best || miles < best.miles) {
+        const r = routes.find((x: any) => x.id === s.route_id)
+        best = { miles, route: r?.code, route_name: r?.name, driver: r?.driver || null, driver_id: r?.driver_id || null, stop_seq: s.seq, stop_address: p.address || p.name }
+      }
+    }
+    if (!best) return { note: `Routes exist on ${date} but their stops have no coordinates yet.` }
+    return {
+      near_route: best.miles <= NEARBY_MILES,
+      distance_miles: Math.round(best.miles * 10) / 10,
+      route: best.route,
+      route_name: best.route_name,
+      driver: best.driver || (await driverName(best.driver_id)),
+      nearest_stop_seq: best.stop_seq,
+      nearest_stop_address: best.stop_address,
+    }
   } catch {
     return null
   }
@@ -1254,7 +1303,11 @@ async function createJobTool(a: any) {
     driver_id: driverId,
     notes: a.notes ? String(a.notes) : null,
   })
-  return { ok: true, id: rows?.[0]?.id, date, client: clientName, address, driver: driverName, amount: a.amount ?? null }
+
+  // Route-proximity check: is this job near a stop on a route running that day?
+  const route_proximity = address ? await nearbyRouteStop(address, date) : { note: "No address on the job — no route-proximity check." }
+
+  return { ok: true, id: rows?.[0]?.id, date, client: clientName, address, driver: driverName, amount: a.amount ?? null, route_proximity }
 }
 
 async function listJobs(a: any) {
