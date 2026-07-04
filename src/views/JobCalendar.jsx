@@ -124,7 +124,7 @@ export default function JobCalendar({ app, line = 'junk', accent = '#2f6db0' }) 
               return (
                 <div
                   key={ds}
-                  onClick={() => { setSelDate(ds); setAdding(false) }}
+                  onClick={() => { setSelDate(ds); setAdding(!(byDate[ds] || []).length) }}
                   style={{ minHeight: 84, padding: 6, cursor: 'pointer', background: isSel ? '#eef6f1' : inMonth ? '#fff' : '#fafbfa', borderRight: '1px solid #eef0ee', position: 'relative' }}
                 >
                   <div style={{ fontFamily: MONO, fontSize: 11, fontWeight: ds === todayStr ? 800 : 600, color: ds === todayStr ? accent : inMonth ? '#5d6b63' : '#c2c9c2' }}>{day.getDate()}</div>
