@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { MONO } from '../data.js'
 import { hasSupabase } from '../lib/supabaseClient.js'
-import { loadCustomers, createClient } from '../lib/customersData.js'
+import { loadCustomers, createClient, loadProperties } from '../lib/customersData.js'
 import { stripeStatus } from '../lib/stripeData.js'
 import {
   loadInvoices,
@@ -55,6 +55,12 @@ export default function Invoices({ app }) {
   const [newClient, setNewClient] = useState(blankClient())
   const [savingClient, setSavingClient] = useState(false)
 
+  // The selected customer's addresses (properties) — pick some/all, choose how
+  // many weeks of service, and drop them onto the invoice as line items.
+  const [custProps, setCustProps] = useState([])
+  const [selProps, setSelProps] = useState([]) // property ids ticked
+  const [weeks, setWeeks] = useState('4')
+
   const [busy, setBusy] = useState(false) // detail-pane action in flight
 
   async function refresh() {
@@ -98,6 +104,43 @@ export default function Invoices({ app }) {
   const addLine = () => setForm((f) => ({ ...f, items: [...f.items, blankLine()] }))
   const removeLine = (idx) => setForm((f) => ({ ...f, items: f.items.length > 1 ? f.items.filter((_, i) => i !== idx) : f.items }))
   const { subtotal, total } = invoiceTotals(form.items, form.discount)
+
+  // Load the picked customer's addresses whenever the form's customer changes.
+  useEffect(() => {
+    if (!showForm || !form.customerId) { setCustProps([]); setSelProps([]); return }
+    let alive = true
+    loadProperties(form.customerId)
+      .then((r) => {
+        if (!alive) return
+        const withAddr = (r || []).filter((p) => p.address)
+        setCustProps(withAddr)
+        setSelProps(withAddr.map((p) => p.id)) // default: all selected
+      })
+      .catch(() => { if (alive) { setCustProps([]); setSelProps([]) } })
+    return () => { alive = false }
+  }, [form.customerId, showForm])
+
+  const togglePropSel = (id) =>
+    setSelProps((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]))
+
+  // Append the ticked addresses as line items: qty = weeks, price = the
+  // address's per-pickup price. Quantities stay editable afterward.
+  function addSelectedProps() {
+    const wk = Math.max(1, Number(weeks) || 1)
+    const lines = custProps
+      .filter((p) => selProps.includes(p.id))
+      .map((p) => ({
+        description: [(p.code ? p.code + ' · ' : '') + p.address, p.service].filter(Boolean).join(' — '),
+        quantity: wk,
+        unitPrice: p.price != null ? String(p.price) : '',
+      }))
+    if (!lines.length) return
+    setForm((f) => {
+      const isBlank = (it) => !String(it.description || '').trim() && (it.unitPrice === '' || it.unitPrice == null)
+      const kept = f.items.filter((it) => !isBlank(it))
+      return { ...f, items: [...kept, ...lines] }
+    })
+  }
 
   // Save a brand-new client created inline, then select it for this invoice.
   async function saveNewClient() {
@@ -314,6 +357,45 @@ export default function Invoices({ app }) {
                 <div style={{ display: 'flex', gap: 9, marginTop: 4 }}>
                   <button type="button" onClick={cancelNewClient} disabled={savingClient} style={cancelBtn}>Cancel</button>
                   <button type="button" onClick={saveNewClient} disabled={savingClient || !newClient.name.trim()} style={{ ...primaryBtn, opacity: savingClient || !newClient.name.trim() ? 0.6 : 1 }}>{savingClient ? 'Saving…' : 'Save client'}</button>
+                </div>
+              </div>
+            )}
+
+            {custProps.length > 0 && (
+              <div style={{ background: '#f7faf8', border: '1px solid #cfe0d5', borderRadius: 11, padding: '12px 14px', marginBottom: 4 }}>
+                <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10, marginBottom: 8 }}>
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>Addresses on file ({custProps.length})</div>
+                  <button type="button" onClick={() => setSelProps(selProps.length === custProps.length ? [] : custProps.map((p) => p.id))} style={{ background: 'none', border: 'none', color: '#1f7a4d', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: 0 }}>
+                    {selProps.length === custProps.length ? 'Select none' : 'Select all'}
+                  </button>
+                </div>
+                <div style={{ maxHeight: 180, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 2, marginBottom: 10 }}>
+                  {custProps.map((p) => (
+                    <label key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 6px', borderRadius: 7, cursor: 'pointer', background: selProps.includes(p.id) ? '#eaf4ee' : 'transparent' }}>
+                      <input type="checkbox" checked={selProps.includes(p.id)} onChange={() => togglePropSel(p.id)} style={{ flex: 'none' }} />
+                      <span style={{ flex: 1, minWidth: 0, fontSize: 12.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {p.code ? <b style={{ color: '#7c8a82', marginRight: 5 }}>{p.code}</b> : null}{p.address}
+                        {p.service ? <span style={{ color: '#9aa69e' }}> · {p.service}</span> : null}
+                      </span>
+                      <span style={{ flex: 'none', fontFamily: MONO, fontSize: 12, color: p.price != null ? '#1f7a4d' : '#c08a2e' }}>
+                        {p.price != null ? money(p.price) : 'no price'}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 12.5, color: '#5d6b63', fontWeight: 600 }}>Weeks of service:</span>
+                  {[4, 5].map((n) => (
+                    <button key={n} type="button" onClick={() => setWeeks(String(n))} style={{ flex: 'none', cursor: 'pointer', fontSize: 12.5, fontWeight: 600, padding: '5px 11px', borderRadius: 7, border: `1px solid ${weeks === String(n) ? '#1f7a4d' : '#dde2dd'}`, background: weeks === String(n) ? '#e7f1eb' : '#fff', color: weeks === String(n) ? '#1f7a4d' : '#7c8a82' }}>× {n}</button>
+                  ))}
+                  <input value={weeks} onChange={(e) => setWeeks(e.target.value)} type="number" min="1" step="1" style={{ width: 58, border: '1px solid #dde2dd', borderRadius: 7, padding: '5px 8px', fontSize: 13, textAlign: 'center', boxSizing: 'border-box' }} title="Custom number of weeks" />
+                  <div style={{ flex: 1 }} />
+                  <button type="button" onClick={addSelectedProps} disabled={!selProps.length} style={{ flex: 'none', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 13px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', opacity: selProps.length ? 1 : 0.5 }}>
+                    Add {selProps.length} to invoice
+                  </button>
+                </div>
+                <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 8 }}>
+                  Each address becomes a line: qty = weeks, price = its per-pickup rate. You can still edit any quantity or price below after adding.
                 </div>
               </div>
             )}

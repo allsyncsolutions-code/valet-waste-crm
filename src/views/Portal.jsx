@@ -5,6 +5,7 @@
 // client's portal link and send them a quote from here.
 import { useEffect, useRef, useState } from 'react'
 import { supabase } from '../lib/supabaseClient.js'
+import { logActivity } from '../lib/activityData.js'
 import PortalPage from '../portal/PortalPage.jsx'
 
 const GREEN = '#1f7a4d'
@@ -54,7 +55,28 @@ export default function Portal({ app }) {
   const [copied, setCopied] = useState(false)
   const [quoteOpen, setQuoteOpen] = useState(false)
   const [previewKey, setPreviewKey] = useState(0) // bump to refetch preview
+  const [loginBusy, setLoginBusy] = useState(false)
   const debounceRef = useRef(null)
+
+  // Open the client's REAL portal in a new tab, signed in as them — the portal
+  // fn mints a one-time login code (staff JWT required), skipping the email.
+  async function signInAsClient() {
+    if (!selected || loginBusy) return
+    setLoginBusy(true)
+    setErr('')
+    try {
+      const { data, error } = await supabase.functions.invoke('portal', {
+        body: { action: 'admin_login', customer_id: selected.id },
+      })
+      if (error) throw error
+      if (data?.error) throw new Error(data.error)
+      logActivity({ type: 'portal_admin_login', summary: `Admin signed in to ${selected.name}'s portal`, entityType: 'customer', entityId: selected.id })
+      window.open(data.url, '_blank', 'noopener')
+    } catch (e) {
+      setErr(e.message || String(e))
+    }
+    setLoginBusy(false)
+  }
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
@@ -136,6 +158,13 @@ export default function Portal({ app }) {
               <div style={{ fontSize: 11.5, color: '#7c8a82' }}>Viewing their portal as they see it (actions disabled)</div>
             </div>
             <button onClick={() => setQuoteOpen(true)} style={btnPrimary}>+ New quote</button>
+            {selected.portal_slug && (
+              <button
+                onClick={signInAsClient} disabled={loginBusy}
+                title="Opens their live portal in a new tab, signed in as them — actions are real, no email needed"
+                style={{ ...btnGhost, color: GREEN, borderColor: '#bcd9c8', opacity: loginBusy ? 0.6 : 1 }}
+              >{loginBusy ? 'Opening…' : '→ Sign in as client'}</button>
+            )}
             {portalLink && (
               <button onClick={copyLink} style={btnGhost}>{copied ? '✓ Copied' : 'Copy portal link'}</button>
             )}
