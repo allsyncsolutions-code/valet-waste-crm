@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { MONO } from '../data.js'
-import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, addProperty, updateProperty, loadPropertyVisits, loadPropertyAddressIndex, countDuplicateProperties, findDuplicateProperties, mergeProperties, deleteProperty } from '../lib/customersData.js'
+import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, addProperty, updateProperty, loadPropertyVisits, loadPropertyAddressIndex, countDuplicateProperties, findDuplicateProperties, mergeProperties, deleteProperty, sendPortalInvite } from '../lib/customersData.js'
 import { geocodeAll } from '../lib/importData.js'
 import { listTags, findOrCreateTag, subscribeTags } from '../lib/tagsData.js'
 import { stripeStatus, stripePaymentLink } from '../lib/stripeData.js'
@@ -82,6 +82,8 @@ export default function Clients({ app }) {
   const [dupGroups, setDupGroups] = useState(null)
   const [dupBusy, setDupBusy] = useState(false)
   const [addrIdx, setAddrIdx] = useState({}) // customer_id → its property addresses (for search)
+  const [inviteBusy, setInviteBusy] = useState(false)
+  const [inviteMsg, setInviteMsg] = useState('')
 
   // Load the selected client's service properties.
   useEffect(() => {
@@ -323,6 +325,22 @@ export default function Clients({ app }) {
     }
   }
 
+  // Email the client their portal invite (login link + save-a-card / 5th-week-free pitch).
+  async function invitePortal() {
+    if (!cur || inviteBusy) return
+    setInviteBusy(true)
+    setErr(null)
+    setInviteMsg('')
+    try {
+      const r = await sendPortalInvite(cur.id)
+      setInviteMsg(`✓ Invite sent to ${r.email} — portal login link + the save-a-card / 5th-week-free offer.`)
+    } catch (e) {
+      setErr(e.message || String(e))
+    } finally {
+      setInviteBusy(false)
+    }
+  }
+
   async function doDelete() {
     if (!cur) return
     const id = cur.id
@@ -449,12 +467,13 @@ export default function Clients({ app }) {
         {list.map((c) => {
           const on = c.id === selId
           return (
-            <div key={c.id} onClick={() => { setSelId(c.id); setConfirmDelete(false); setTagInput(''); setPayLink(null); setPayErr(null); setAddingAddr(false); setNewP(BLANK_PROP); setEditPid(null) }} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '11px 10px', borderRadius: 10, cursor: 'pointer', marginBottom: 2, background: on ? '#f3faf5' : '#fff', border: `1px solid ${on ? '#cfe0d5' : 'transparent'}` }}>
+            <div key={c.id} onClick={() => { setSelId(c.id); setConfirmDelete(false); setTagInput(''); setPayLink(null); setPayErr(null); setAddingAddr(false); setNewP(BLANK_PROP); setEditPid(null); setInviteMsg('') }} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '11px 10px', borderRadius: 10, cursor: 'pointer', marginBottom: 2, background: on ? '#f3faf5' : '#fff', border: `1px solid ${on ? '#cfe0d5' : 'transparent'}` }}>
               <div style={{ width: 36, height: 36, borderRadius: 9, background: '#e7f1eb', color: '#1f7a4d', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontWeight: 600, fontSize: 12, flex: 'none' }}>{initialsOf(c.name)}</div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.name}</div>
                 <div style={{ fontSize: 11, color: '#7c8a82' }}>{c.pickup ? freqLabel(c.pickup.frequency) : 'No schedule'}</div>
               </div>
+              {c.autopay?.saved && <span title={`Autopay on — ${(c.autopay.brand || 'card').toUpperCase()} ••${c.autopay.last4 || ''} · 5th week free`} style={{ flex: 'none', fontFamily: MONO, fontSize: 9, fontWeight: 700, color: '#1f7a4d', background: '#e7f1eb', padding: '1px 6px', borderRadius: 5 }}>💳 CARD</span>}
               {c.status !== 'active' && <span style={{ flex: 'none', fontFamily: MONO, fontSize: 9, color: '#b07a1e', background: '#fdf2e0', padding: '1px 6px', borderRadius: 5 }}>{c.status}</span>}
             </div>
           )
@@ -464,6 +483,12 @@ export default function Clients({ app }) {
       {/* detail */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         {err && <div style={{ background: '#fdecea', border: '1px solid #f3b7b0', color: '#9a2c1e', borderRadius: 11, padding: '10px 14px', fontSize: 12.5 }}>{err}</div>}
+        {inviteMsg && (
+          <div style={{ background: '#e7f1eb', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 11, padding: '10px 14px', fontSize: 12.5, display: 'flex', gap: 10 }}>
+            <span style={{ flex: 1 }}>{inviteMsg}</span>
+            <span onClick={() => setInviteMsg('')} style={{ cursor: 'pointer', fontWeight: 700 }}>✕</span>
+          </div>
+        )}
 
         {!cur && !loading && (
           <div style={{ background: '#fff', border: '1px dashed #d8ddd6', borderRadius: 13, padding: '40px 22px', textAlign: 'center', color: '#9aa69e', fontSize: 13 }}>
@@ -477,9 +502,24 @@ export default function Clients({ app }) {
               <div style={{ display: 'flex', alignItems: 'center', gap: 13 }}>
                 <div style={{ width: 48, height: 48, borderRadius: 11, background: '#e7f1eb', color: '#1f7a4d', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontWeight: 600, fontSize: 15, flex: 'none' }}>{initialsOf(cur.name)}</div>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: 700, fontSize: 18 }}>{cur.name}</div>
+                  <div style={{ fontWeight: 700, fontSize: 18, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    {cur.name}
+                    {cur.autopay?.saved && (
+                      <span title="This client has a saved payment method — invoices are charged automatically and 5th-week-free applies" style={{ fontFamily: MONO, fontSize: 10.5, fontWeight: 700, color: '#1f7a4d', background: '#e7f1eb', padding: '3px 9px', borderRadius: 7, letterSpacing: '.03em' }}>
+                        💳 AUTOPAY · {(cur.autopay.brand || 'CARD').toUpperCase()} ••{cur.autopay.last4 || ''}
+                      </span>
+                    )}
+                  </div>
                   <div style={{ fontSize: 12.5, color: '#7c8a82' }}>{cur.address || 'No address'}</div>
                 </div>
+                {cur.portal_slug && !cur.autopay?.saved && (
+                  <button
+                    onClick={invitePortal}
+                    disabled={inviteBusy || !cur.email}
+                    title={cur.email ? `Email ${cur.email} a portal login link with the save-a-card offer (5th week free)` : 'Add an email to this client first'}
+                    style={{ background: '#1f7a4d', border: 'none', color: '#fff', borderRadius: 9, padding: '9px 13px', fontSize: 12.5, fontWeight: 600, cursor: cur.email ? 'pointer' : 'not-allowed', flex: 'none', opacity: inviteBusy || !cur.email ? 0.6 : 1 }}
+                  >{inviteBusy ? 'Sending…' : '✉ 5th-week-free invite'}</button>
+                )}
                 {cur.portal_slug && (
                   <button
                     onClick={() => { navigator.clipboard.writeText(`${window.location.origin}/?portal=${cur.portal_slug}`).then(() => window.alert('Portal link copied — share it with this client. They sign in with the email on file.')).catch(() => window.prompt('Copy this portal link:', `${window.location.origin}/?portal=${cur.portal_slug}`)) }}

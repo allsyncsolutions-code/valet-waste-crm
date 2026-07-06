@@ -18,6 +18,11 @@ function mapCustomer(row) {
     notes: row.notes || '',
     portal_slug: row.portal_slug || null,
     business_line: row.business_line || 'waste',
+    autopay: {
+      saved: !!row.autopay_pm_id,
+      brand: row.autopay_card_brand || null,
+      last4: row.autopay_card_last4 || null,
+    },
     tags: (row.customer_tags || []).map((ct) => ct.tag).filter(Boolean),
     createdAt: row.created_at,
     pickup: pickup
@@ -149,6 +154,21 @@ export async function addProperty(customerId, fields) {
   if (error) throw error
   logActivity({ type: 'property_added', summary: `Added address ${fields.address}`, entityType: 'property', entityId: data.id })
   return data.id
+}
+
+// Email the client a portal invite: one-time login link (7-day expiry) plus
+// the save-a-card pitch (autopay + 5th week free). Staff JWT required.
+export async function sendPortalInvite(customerId) {
+  const { data, error } = await supabase.functions.invoke('portal', {
+    body: { action: 'admin_invite', customer_id: customerId },
+  })
+  if (error) {
+    let msg = error.message || String(error)
+    try { const j = await error.context?.json?.(); if (j?.error) msg = j.error } catch (e) { /* keep msg */ }
+    throw new Error(msg)
+  }
+  if (data?.error) throw new Error(data.error)
+  return data
 }
 
 // Lightweight index for client search: customer_id → all its property
