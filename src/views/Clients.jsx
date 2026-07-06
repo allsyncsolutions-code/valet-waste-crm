@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { MONO } from '../data.js'
-import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, addProperty, updateProperty, loadPropertyVisits, countDuplicateProperties, findDuplicateProperties, mergeProperties, deleteProperty } from '../lib/customersData.js'
+import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, addProperty, updateProperty, loadPropertyVisits, loadPropertyAddressIndex, countDuplicateProperties, findDuplicateProperties, mergeProperties, deleteProperty } from '../lib/customersData.js'
 import { geocodeAll } from '../lib/importData.js'
 import { listTags, findOrCreateTag, subscribeTags } from '../lib/tagsData.js'
 import { stripeStatus, stripePaymentLink } from '../lib/stripeData.js'
@@ -81,6 +81,7 @@ export default function Clients({ app }) {
   const [dupOpen, setDupOpen] = useState(false)
   const [dupGroups, setDupGroups] = useState(null)
   const [dupBusy, setDupBusy] = useState(false)
+  const [addrIdx, setAddrIdx] = useState({}) // customer_id → its property addresses (for search)
 
   // Load the selected client's service properties.
   useEffect(() => {
@@ -94,6 +95,8 @@ export default function Clients({ app }) {
     const rows = await loadCustomers()
     setCustomers(rows)
     setSelId((cur) => cur || (rows[0] && rows[0].id) || null)
+    // Rebuild the address search index in the background (search matches property addresses too).
+    loadPropertyAddressIndex().then(setAddrIdx).catch(() => {})
   }
 
   useEffect(() => {
@@ -150,8 +153,8 @@ export default function Clients({ app }) {
   )
   const q = search.toLowerCase().trim()
   const list = useMemo(
-    () => (q ? lineCustomers.filter((c) => (c.name + ' ' + c.address).toLowerCase().includes(q)) : lineCustomers),
-    [lineCustomers, q]
+    () => (q ? lineCustomers.filter((c) => (c.name + ' ' + c.address).toLowerCase().includes(q) || (addrIdx[c.id] || '').includes(q)) : lineCustomers),
+    [lineCustomers, q, addrIdx]
   )
   const cur = lineCustomers.find((c) => c.id === selId) || null
 
@@ -434,7 +437,7 @@ export default function Clients({ app }) {
       <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: 8 }}>
         <div style={{ display: 'flex', gap: 8, margin: '6px 6px 8px' }}>
           <div style={{ position: 'relative', flex: 1 }}>
-            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search clients…" style={searchInput} />
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search clients or addresses…" style={searchInput} />
             <div style={searchIcon}>⌕</div>
           </div>
           <button onClick={() => { setForm(BLANK); setEditingId(null); setShowForm(true) }} style={{ flex: 'none', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '0 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' }}>+ Add client</button>
@@ -517,7 +520,7 @@ export default function Clients({ app }) {
             <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '18px 20px' }}>
               <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 12 }}>Details</div>
               <Row label="Service" value={cur.pickup?.service || '—'} />
-              <Row label="Contact" value={cur.contactName || '—'} />
+              <Row label="Contact Name" value={cur.contactName || '—'} />
               <Row label="Email" value={cur.email || '—'} />
               <Row label="Phone" value={cur.phone || '—'} />
               <Row label="Status" value={cap(cur.status)} />
@@ -742,12 +745,12 @@ export default function Clients({ app }) {
             <div style={{ fontSize: 12, color: '#7c8a82', marginBottom: 16 }}>{editingId ? 'Update this client and its pickup / invoice schedule.' : 'Creates the customer plus a pickup schedule and invoice schedule.'}</div>
 
             <Field label="Business name *"><input autoFocus value={form.name} onChange={(e) => set({ name: e.target.value })} style={inp} placeholder="Acme Property Group" /></Field>
+            <Field label="Contact Name"><input value={form.contactName} onChange={(e) => set({ contactName: e.target.value })} style={inp} /></Field>
             <Field label="Address"><input value={form.address} onChange={(e) => set({ address: e.target.value })} style={inp} placeholder="123 Main St" /></Field>
             <div style={twoCol}>
-              <Field label="Contact"><input value={form.contactName} onChange={(e) => set({ contactName: e.target.value })} style={inp} /></Field>
               <Field label="Phone"><input value={form.phone} onChange={(e) => set({ phone: e.target.value })} style={inp} /></Field>
+              <Field label="Email"><input value={form.email} onChange={(e) => set({ email: e.target.value })} style={inp} type="email" /></Field>
             </div>
-            <Field label="Email"><input value={form.email} onChange={(e) => set({ email: e.target.value })} style={inp} type="email" /></Field>
 
             <Divider>Pickup defaults</Divider>
             <Field label="Service"><input value={form.service} onChange={(e) => set({ service: e.target.value })} style={inp} placeholder="4yd dumpster x2" /></Field>

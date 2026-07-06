@@ -151,6 +151,19 @@ export async function addProperty(customerId, fields) {
   return data.id
 }
 
+// Lightweight index for client search: customer_id → all its property
+// addresses (lowercased, space-joined) so the Clients list can match on them.
+export async function loadPropertyAddressIndex() {
+  const { data, error } = await supabase.from('properties').select('customer_id, address')
+  if (error) throw error
+  const idx = {}
+  for (const r of data || []) {
+    if (!r.customer_id || !r.address) continue
+    idx[r.customer_id] = (idx[r.customer_id] ? idx[r.customer_id] + ' ' : '') + r.address.toLowerCase()
+  }
+  return idx
+}
+
 // Duplicate-address detection (normalized match across ALL clients).
 export async function findDuplicateProperties() {
   const { data, error } = await supabase.rpc('find_duplicate_properties')
