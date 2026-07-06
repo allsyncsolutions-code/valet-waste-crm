@@ -4,6 +4,9 @@
 // tab's "Run now" (staff user token). Currently implements:
 //   • outstanding_digest — texts staff a summary of unpaid invoices with days
 //     overdue and last-contact date; staff reply to Trashy Randy to act.
+//   • lawn_invoice_weekly_lines — itemized per-visit lawn billing.
+//   • autopay_charge_monthly — on the 1st, charge consenting clients' saved
+//     cards for prior-month open invoices + 5th-week-free credit.
 //
 // Deploy with JWT verification OFF (custom auth below):
 //   supabase functions deploy automations-run --no-verify-jwt
@@ -135,6 +138,170 @@ async function runLawnInvoiceLines(): Promise<string> {
   return `Added ${added} lawn line item(s) for ${yesterday}${skipped ? `, skipped ${skipped}` : ""}.`
 }
 
+// ---- autopay_charge_monthly -------------------------------------------------
+// On the 1st (America/New_York) charge each consenting client's saved card for
+// their open (sent) invoices issued before this month. Before charging, apply
+// the 5th-pickup-week-free credit: any waste property whose pickup day lands 5
+// times in the invoice's issue month gets one visit-price credited. Randy
+// texts admins the results.
+
+function stripeForm(obj: Record<string, unknown>) {
+  const p = new URLSearchParams()
+  const add = (key: string, val: unknown) => {
+    if (val === undefined || val === null) return
+    if (typeof val === "object") {
+      for (const k of Object.keys(val as Record<string, unknown>)) add(`${key}[${k}]`, (val as Record<string, unknown>)[k])
+    } else {
+      p.append(key, String(val))
+    }
+  }
+  for (const k of Object.keys(obj)) add(k, obj[k])
+  return p.toString()
+}
+async function stripeApi(path: string, opts: { method?: string; body?: Record<string, unknown>; account?: string } = {}) {
+  const sk = Deno.env.get("STRIPE_SECRET_KEY")
+  if (!sk) throw new Error("STRIPE_SECRET_KEY missing.")
+  const headers: Record<string, string> = { Authorization: `Bearer ${sk}`, "Content-Type": "application/x-www-form-urlencoded" }
+  if (opts.account) headers["Stripe-Account"] = opts.account
+  const r = await fetch(`https://api.stripe.com/v1/${path}`, {
+    method: opts.method || "POST",
+    headers,
+    body: opts.body ? stripeForm(opts.body) : undefined,
+  })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d?.error?.message || `Stripe ${r.status}`)
+  return d
+}
+
+// How many times does weekday `dow` (0=Sun..6=Sat) occur in year-month `ym` (YYYY-MM)?
+function weekdayCountInMonth(ym: string, dow: number): number {
+  const [y, m] = ym.split("-").map(Number)
+  let count = 0
+  const days = new Date(y, m, 0).getDate()
+  for (let d = 1; d <= days; d++) if (new Date(y, m - 1, d).getDay() === dow) count++
+  return count
+}
+const DOW: Record<string, number> = { sun: 0, sunday: 0, mon: 1, monday: 1, tue: 2, tues: 2, tuesday: 2, wed: 3, wednesday: 3, thu: 4, thur: 4, thurs: 4, thursday: 4, fri: 5, friday: 5, sat: 6, saturday: 6 }
+
+async function textAdminsRandy(body: string) {
+  const staff = await sbGet(`profiles?select=phone,role&phone=not.is.null&role=eq.admin`)
+  for (const s of staff) {
+    try {
+      await fetch(`${SUPABASE_URL}/functions/v1/sms`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "send", to: s.phone, body, purpose: "autopay", sentBy: "Trashy Randy" }),
+      })
+    } catch (_e) { /* best effort */ }
+  }
+}
+
+async function runAutopayCharge(force = false): Promise<string> {
+  const nyDate = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date())
+  if (nyDate.slice(8) !== "01" && !force) return `Skipped — autopay charges run on the 1st (today is ${nyDate}).`
+  const monthStart = nyDate.slice(0, 8) + "01"
+
+  const settings = (await sbGet(`app_settings?id=eq.1&select=stripe_account_id`))[0] || {}
+  const account = settings.stripe_account_id
+  if (!account) return "Skipped — no connected Stripe account."
+
+  const customers = await sbGet(
+    `customers?autopay_consent=is.true&autopay_pm_id=not.is.null&stripe_customer_id=not.is.null&select=id,name,stripe_customer_id,autopay_pm_id`,
+  )
+  if (!customers.length) return "No clients have autopay enabled."
+
+  let charged = 0
+  let credited = 0
+  let failed = 0
+  const failLines: string[] = []
+  let totalCharged = 0
+
+  for (const cust of customers) {
+    const invoices = await sbGet(
+      `invoices?customer_id=eq.${cust.id}&status=eq.sent&issue_date=lt.${monthStart}&select=id,number,subtotal,discount,total,issue_date&order=issue_date.asc&limit=12`,
+    )
+    if (!invoices.length) continue
+    const props = await sbGet(
+      `properties?customer_id=eq.${cust.id}&business_line=eq.waste&price=not.is.null&select=id,address,price,pickup_days`,
+    )
+
+    for (const inv of invoices) {
+      try {
+        // ---- 5th-week-free credit (once per invoice, keyed on description) ----
+        const ym = String(inv.issue_date || monthStart).slice(0, 7)
+        let credit = 0
+        for (const p of props) {
+          const days: string[] = Array.isArray(p.pickup_days) ? p.pickup_days : []
+          const hasFifth = days.some((d) => {
+            const dow = DOW[String(d).trim().toLowerCase()]
+            return dow !== undefined && weekdayCountInMonth(ym, dow) === 5
+          })
+          if (hasFifth && Number(p.price) > 0) credit += Number(p.price)
+        }
+        let newTotal = Number(inv.total || 0)
+        if (credit > 0) {
+          const creditDesc = `5th pickup week free (autopay) — ${ym}`
+          const existing = await sbGet(`invoice_line_items?invoice_id=eq.${inv.id}&description=eq.${encodeURIComponent(creditDesc)}&select=id&limit=1`)
+          if (!existing.length) {
+            credit = Math.min(credit, newTotal) // never push the invoice negative
+            if (credit > 0) {
+              const last = await sbGet(`invoice_line_items?invoice_id=eq.${inv.id}&select=position&order=position.desc.nullslast&limit=1`)
+              await sbPost("invoice_line_items", {
+                invoice_id: inv.id, description: creditDesc, quantity: 1,
+                unit_price: -credit, amount: -credit, position: ((last[0]?.position ?? -1) + 1),
+              })
+              const subtotal = Number(inv.subtotal || 0) - credit
+              newTotal = Math.max(0, subtotal - Number(inv.discount || 0))
+              await sbPatch(`invoices?id=eq.${inv.id}`, { subtotal, total: newTotal })
+              credited++
+            }
+          }
+        }
+
+        if (newTotal <= 0) {
+          await sbPatch(`invoices?id=eq.${inv.id}`, { status: "paid", paid_at: new Date().toISOString() })
+          continue
+        }
+
+        // ---- charge the saved card (off-session) ----
+        const cents = Math.round(newTotal * 100)
+        if (cents < 50) continue
+        const pi = await stripeApi("payment_intents", {
+          account,
+          body: {
+            amount: cents, currency: "usd",
+            customer: cust.stripe_customer_id,
+            payment_method: cust.autopay_pm_id,
+            off_session: "true", confirm: "true",
+            description: `Autopay — invoice ${inv.number} (${cust.name})`,
+            metadata: { invoice_id: inv.id, invoice_number: inv.number, crm_customer_id: cust.id },
+          },
+        })
+        if (pi.status === "succeeded") {
+          await sbPatch(`invoices?id=eq.${inv.id}`, { status: "paid", paid_at: new Date().toISOString() })
+          charged++
+          totalCharged += newTotal
+        } else {
+          failed++
+          failLines.push(`${cust.name} ${inv.number}: ${pi.status}`)
+        }
+      } catch (e) {
+        failed++
+        failLines.push(`${cust.name} ${inv.number}: ${e instanceof Error ? e.message : String(e)}`)
+      }
+    }
+  }
+
+  const summary =
+    `Autopay run for ${nyDate}: charged ${charged} invoice(s) totalling ${fmtMoney(totalCharged)}` +
+    `${credited ? `, applied ${credited} 5th-week-free credit(s)` : ""}` +
+    `${failed ? `, ${failed} FAILED — ${failLines.slice(0, 5).join(" | ")}` : ""}.`
+  if (charged || failed || credited) {
+    await textAdminsRandy(`💳 ${summary}${failed ? " Failed cards need a manual follow-up." : ""} — Trashy Randy`)
+  }
+  return summary
+}
+
 // ---- HTTP entry -------------------------------------------------------------
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS })
@@ -158,7 +325,12 @@ Deno.serve(async (req) => {
   }
 
   let kindFilter: string | null = null
-  try { kindFilter = (await req.json())?.kind ?? null } catch (_e) { /* run all */ }
+  let force = false
+  try {
+    const b = await req.json()
+    kindFilter = b?.kind ?? null
+    force = b?.force === true // only used by autopay for controlled testing
+  } catch (_e) { /* run all */ }
 
   try {
     let autos = await sbGet(`automations?status=eq.enabled&select=id,kind,name`)
@@ -171,6 +343,7 @@ Deno.serve(async (req) => {
       try {
         if (a.kind === "outstanding_digest") result = await runOutstandingDigest()
         if (a.kind === "lawn_invoice_weekly_lines") result = await runLawnInvoiceLines()
+        if (a.kind === "autopay_charge_monthly") result = await runAutopayCharge(force && kindFilter === "autopay_charge_monthly")
       } catch (e) {
         result = `Error: ${e instanceof Error ? e.message : String(e)}`
       }

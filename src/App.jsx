@@ -18,6 +18,7 @@ import Automations from './views/Automations.jsx'
 import JobCalendar from './views/JobCalendar.jsx'
 import EmployeePay from './views/EmployeePay.jsx'
 import MyDay from './views/MyDay.jsx'
+import Portal from './views/Portal.jsx'
 import AnnotationLayer from './components/AnnotationLayer.jsx'
 import AiDock from './AiDock.jsx'
 
@@ -150,7 +151,7 @@ export default function App({ user, onSignOut }) {
     drivers: ['Drivers & Field', 'Check-in / check-out, photos and GPS'],
     myday: ['My Day', 'Your jobs — on my way, clock in, complete, photos'],
     team: ['Team', 'Members and their business-line assignments'],
-    portal: ['Client Portal', 'What your clients see when they log in'],
+    portal: ['Client Portal', 'Search a client to preview their portal, copy their link, or send a quote'],
     settings: ['Settings', 'Manage tags and configuration'],
     annotations: ['Annotations', 'Admin notes flagged with the ✎ tool — review with Claude'],
     automations: ['Automations', 'Scheduled jobs Trashy Randy runs — plus his suggestions awaiting approval'],
@@ -245,7 +246,7 @@ export default function App({ user, onSignOut }) {
     activity: <Activity app={app} />,
     drivers: <Drivers app={app} />,
     myday: <MyDay app={app} />,
-    portal: <Placeholder title="Client Portal" />,
+    portal: <Portal app={app} />,
     team: <Team app={app} />,
     settings: <Settings app={app} />,
     annotations: <Annotations app={app} />,

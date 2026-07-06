@@ -1,12 +1,20 @@
 import { useState } from 'react'
 import { signIn } from '../lib/authData.js'
+import { supabase } from '../lib/supabaseClient.js'
 
-// Sign-in screen for staff. Email + password (invite-only accounts).
+// Sign-in screen: CLIENT portal login (email → magic link, no slug needed) on
+// top, EMPLOYEE email+password (invite-only) below it.
 export default function Login({ pending, onSignOut, email: initialEmail }) {
   const [email, setEmail] = useState(initialEmail || '')
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
+
+  // client login state
+  const [clientEmail, setClientEmail] = useState('')
+  const [clientBusy, setClientBusy] = useState(false)
+  const [clientSent, setClientSent] = useState(false)
+  const [clientErr, setClientErr] = useState('')
 
   async function submit(e) {
     e.preventDefault()
@@ -23,6 +31,24 @@ export default function Login({ pending, onSignOut, email: initialEmail }) {
     }
   }
 
+  async function submitClient(e) {
+    e.preventDefault()
+    if (clientBusy) return
+    setClientErr('')
+    setClientBusy(true)
+    try {
+      const { data, error } = await supabase.functions.invoke('portal', {
+        body: { action: 'login_email', email: clientEmail },
+      })
+      if (error) throw error
+      if (data?.error) throw new Error(data.error)
+      setClientSent(true)
+    } catch (e2) {
+      setClientErr((e2 && e2.message) || String(e2))
+    }
+    setClientBusy(false)
+  }
+
   return (
     <div style={{ minHeight: '100dvh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#15201b', padding: 20, fontSize: 14, color: '#1a2420' }}>
       <div style={{ width: '100%', maxWidth: 380 }}>
@@ -31,7 +57,7 @@ export default function Login({ pending, onSignOut, email: initialEmail }) {
             <div style={{ width: 18, height: 18, border: '3px solid #eafff2', borderRadius: '50%', borderRightColor: 'transparent' }} />
           </div>
           <div style={{ color: '#f3f7f4', fontWeight: 700, fontSize: 20, letterSpacing: '-.01em' }}>Valet Waste</div>
-          <div style={{ fontSize: 11, letterSpacing: '.16em', color: '#5f7568', marginTop: 4 }}>DISPATCH CRM</div>
+          <div style={{ fontSize: 11, letterSpacing: '.16em', color: '#5f7568', marginTop: 4 }}>CLIENT PORTAL & DISPATCH CRM</div>
         </div>
 
         {pending ? (
@@ -43,27 +69,63 @@ export default function Login({ pending, onSignOut, email: initialEmail }) {
             <button onClick={onSignOut} style={btnGhost}>Sign out</button>
           </div>
         ) : (
-          <form onSubmit={submit} style={{ background: '#fff', borderRadius: 14, padding: 24 }}>
-            <label style={lbl}>Email</label>
-            <input
-              type="email" autoComplete="username" value={email}
-              onChange={(e) => setEmail(e.target.value)} required
-              style={inp} placeholder="you@allsynccrm.com"
-            />
-            <label style={{ ...lbl, marginTop: 14 }}>Password</label>
-            <input
-              type="password" autoComplete="current-password" value={password}
-              onChange={(e) => setPassword(e.target.value)} required
-              style={inp} placeholder="••••••••"
-            />
-            {err && <div style={{ color: '#c0492f', fontSize: 12.5, marginTop: 12 }}>{err}</div>}
-            <button type="submit" disabled={busy} style={{ ...btnPrimary, opacity: busy ? 0.7 : 1, marginTop: 18 }}>
-              {busy ? 'Signing in…' : 'Sign in'}
-            </button>
-          </form>
+          <>
+            {/* CLIENT sign-in */}
+            <form onSubmit={submitClient} style={{ background: '#fff', borderRadius: 14, padding: 24 }}>
+              <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 3 }}>Client sign in</div>
+              <div style={{ fontSize: 12, color: '#7c8a82', marginBottom: 14 }}>
+                We'll email you a secure one-time link to your customer portal — no password needed.
+              </div>
+              {clientSent ? (
+                <div style={{ background: '#e7f1eb', color: '#1f7a4d', borderRadius: 10, padding: '11px 13px', fontSize: 13, lineHeight: 1.5 }}>
+                  ✓ Check your email — if <b>{clientEmail}</b> is on file, your login link is on its way (expires in 15 minutes).
+                  <div>
+                    <button type="button" onClick={() => setClientSent(false)} style={{ background: 'none', border: 'none', color: '#1f7a4d', fontSize: 12.5, fontWeight: 700, cursor: 'pointer', padding: '6px 0 0', textDecoration: 'underline' }}>
+                      Use a different email
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <label style={lbl}>Email on file with us</label>
+                  <input
+                    type="email" autoComplete="email" value={clientEmail} required
+                    onChange={(e) => setClientEmail(e.target.value)}
+                    style={inp} placeholder="you@example.com"
+                  />
+                  {clientErr && <div style={{ color: '#c0492f', fontSize: 12.5, marginTop: 10 }}>{clientErr}</div>}
+                  <button type="submit" disabled={clientBusy} style={{ ...btnPrimary, opacity: clientBusy ? 0.7 : 1, marginTop: 14 }}>
+                    {clientBusy ? 'Sending…' : 'Email me my portal link'}
+                  </button>
+                </>
+              )}
+            </form>
+
+            {/* EMPLOYEE sign-in */}
+            <form onSubmit={submit} style={{ background: '#fff', borderRadius: 14, padding: 24, marginTop: 14 }}>
+              <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 3 }}>Employee sign in</div>
+              <div style={{ fontSize: 12, color: '#7c8a82', marginBottom: 14 }}>Staff and drivers — invite-only accounts.</div>
+              <label style={lbl}>Email</label>
+              <input
+                type="email" autoComplete="username" value={email}
+                onChange={(e) => setEmail(e.target.value)} required
+                style={inp} placeholder="you@allsynccrm.com"
+              />
+              <label style={{ ...lbl, marginTop: 14 }}>Password</label>
+              <input
+                type="password" autoComplete="current-password" value={password}
+                onChange={(e) => setPassword(e.target.value)} required
+                style={inp} placeholder="••••••••"
+              />
+              {err && <div style={{ color: '#c0492f', fontSize: 12.5, marginTop: 12 }}>{err}</div>}
+              <button type="submit" disabled={busy} style={{ ...btnPrimary, opacity: busy ? 0.7 : 1, marginTop: 18 }}>
+                {busy ? 'Signing in…' : 'Sign in'}
+              </button>
+            </form>
+          </>
         )}
         <div style={{ textAlign: 'center', fontSize: 11, color: '#5f7568', marginTop: 16 }}>
-          Invite-only · accounts are created by an administrator
+          Employee accounts are invite-only · clients can also use the portal link we texted or emailed them
         </div>
       </div>
     </div>
