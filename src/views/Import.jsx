@@ -25,7 +25,7 @@ export default function Import({ app }) {
   const [service, setService] = useState('Trash / Recycle')
   const [price, setPrice] = useState('11')
   const [createSchedule, setCreateSchedule] = useState(true)
-  const [pickupDay, setPickupDay] = useState('monday')
+  const [pickupDays, setPickupDays] = useState(['monday'])
   const [pickupFreq, setPickupFreq] = useState('weekly')
   const [markReview, setMarkReview] = useState(false)
   const [text, setText] = useState('')
@@ -60,14 +60,17 @@ export default function Import({ app }) {
     setErr(''); setResult(null); setGeo(null)
     if (!clientName.trim()) { setErr('Enter the client name these properties belong to.'); return }
     if (!rows.length) { setErr('No property rows found — paste at least one address.'); return }
+    if (createSchedule && pickupFreq !== 'on_call' && !pickupDays.length) { setErr('Pick at least one pickup day (or uncheck the schedule box).'); return }
     setBusy(true)
     try {
+      const days = DAYS.filter((d) => pickupDays.includes(d)) // ordered Mon→Sun
       const res = await bulkImport({
         customer_name: clientName.trim(),
         default_service: service || null,
         price: price === '' ? null : Number(price),
         create_schedule: createSchedule,
-        pickup_day: pickupDay,
+        pickup_days: days,
+        pickup_day: days[0] || 'monday', // legacy single-day fallback
         pickup_freq: pickupFreq,
         needs_review: markReview,
         properties: rows,
@@ -124,7 +127,7 @@ export default function Import({ app }) {
       <div style={{ fontSize: 13, color: '#5d6b63', marginBottom: 16 }}>
         Paste a property list (or upload a file) to add many service locations to one client at once. Coordinates are filled in automatically after import.
         <div style={{ marginTop: 6 }}>
-          The pickup day you choose below is applied to every property in this batch. For a client with addresses on different days (e.g. some Monday, some Thursday), import each day as a separate batch.
+          The pickup day(s) you choose below apply to every property in this batch — pick more than one if these addresses run multiple days a week. For a client whose addresses run on <i>different</i> days (some Monday-only, some Thursday-only), import each set as a separate batch.
         </div>
       </div>
 
@@ -166,10 +169,19 @@ export default function Import({ app }) {
               <select value={pickupFreq} onChange={(e) => setPickupFreq(e.target.value)} disabled={!createSchedule} style={{ ...inp, flex: 1 }}>
                 {FREQS.map((f) => <option key={f} value={f}>{f}</option>)}
               </select>
-              <select value={pickupDay} onChange={(e) => setPickupDay(e.target.value)} disabled={!createSchedule || pickupFreq === 'on_call'} style={{ ...inp, flex: 1 }}>
-                {DAYS.map((d) => <option key={d} value={d}>{d}</option>)}
-              </select>
             </div>
+            <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginTop: 8, opacity: !createSchedule || pickupFreq === 'on_call' ? 0.45 : 1 }}>
+              {DAYS.map((d) => {
+                const on = pickupDays.includes(d)
+                const off = !createSchedule || pickupFreq === 'on_call'
+                return (
+                  <button type="button" key={d} disabled={off}
+                    onClick={() => setPickupDays((ds) => (ds.includes(d) ? ds.filter((x) => x !== d) : [...ds, d]))}
+                    style={{ flex: 'none', cursor: off ? 'default' : 'pointer', fontSize: 12, fontWeight: 600, padding: '5px 9px', borderRadius: 7, border: `1px solid ${on ? '#1f7a4d' : '#dde2dd'}`, background: on ? '#e7f1eb' : '#fff', color: on ? '#1f7a4d' : '#7c8a82' }}>{DAY_ABBR[d]}</button>
+                )
+              })}
+            </div>
+            <div style={hint}>Pick every day this batch runs — an address can have more than one pickup day a week.</div>
           </div>
         </div>
 

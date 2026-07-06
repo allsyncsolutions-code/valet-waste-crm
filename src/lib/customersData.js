@@ -127,6 +127,30 @@ export async function loadProperties(customerId) {
   return data || []
 }
 
+// Add one property (service address) to a customer. lat/lng stay null so the
+// geocode-pending pass fills them in afterward.
+export async function addProperty(customerId, fields) {
+  const { data, error } = await supabase
+    .from('properties')
+    .insert({
+      customer_id: customerId,
+      code: fields.code || null,
+      name: fields.name || fields.address,
+      address: fields.address,
+      service: fields.service || null,
+      notes: fields.notes || null,
+      price: fields.price ?? null,
+      tech_pay: fields.tech_pay ?? null,
+      pickup_days: fields.pickup_days || [],
+      pickup_frequency: fields.pickup_frequency || 'weekly',
+    })
+    .select('id')
+    .single()
+  if (error) throw error
+  logActivity({ type: 'property_added', summary: `Added address ${fields.address}`, entityType: 'property', entityId: data.id })
+  return data.id
+}
+
 // Duplicate-address detection (normalized match across ALL clients).
 export async function findDuplicateProperties() {
   const { data, error } = await supabase.rpc('find_duplicate_properties')

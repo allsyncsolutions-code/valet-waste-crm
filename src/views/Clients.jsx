@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { MONO } from '../data.js'
-import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, updateProperty, loadPropertyVisits, countDuplicateProperties, findDuplicateProperties, mergeProperties, deleteProperty } from '../lib/customersData.js'
+import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, addProperty, updateProperty, loadPropertyVisits, countDuplicateProperties, findDuplicateProperties, mergeProperties, deleteProperty } from '../lib/customersData.js'
 import { geocodeAll } from '../lib/importData.js'
 import { listTags, findOrCreateTag, subscribeTags } from '../lib/tagsData.js'
 import { stripeStatus, stripePaymentLink } from '../lib/stripeData.js'
@@ -43,6 +43,7 @@ const BLANK = {
   service: '', frequency: 'weekly', dayOfWeek: 'monday',
   cadence: 'monthly', amount: '',
 }
+const BLANK_PROP = { address: '', service: '', notes: '', price: '', techPay: '', days: [], frequency: 'weekly' }
 
 export default function Clients({ app }) {
   const isMobile = app.isMobile
@@ -65,6 +66,8 @@ export default function Clients({ app }) {
   const [props, setProps] = useState([])
   const [editPid, setEditPid] = useState(null)
   const [editP, setEditP] = useState({ address: '', service: '', notes: '', price: '', techPay: '', days: [], frequency: 'weekly' })
+  const [addingAddr, setAddingAddr] = useState(false)
+  const [newP, setNewP] = useState(BLANK_PROP)
   const [pBusy, setPBusy] = useState(false)
   const [histPid, setHistPid] = useState(null)
   const [hist, setHist] = useState([])
@@ -247,6 +250,36 @@ export default function Clients({ app }) {
   }
   const toggleDay = (d) =>
     setEditP((e) => ({ ...e, days: e.days.includes(d) ? e.days.filter((x) => x !== d) : [...e.days, d] }))
+  const toggleNewDay = (d) =>
+    setNewP((e) => ({ ...e, days: e.days.includes(d) ? e.days.filter((x) => x !== d) : [...e.days, d] }))
+  // Create a new address (property) under the selected client, then geocode it.
+  async function saveNewProp() {
+    if (pBusy || !selId) return
+    const addr = newP.address.trim()
+    if (!addr) return
+    setPBusy(true)
+    setErr(null)
+    try {
+      await addProperty(selId, {
+        address: addr,
+        service: newP.service.trim() || null,
+        notes: newP.notes.trim() || null,
+        price: newP.price === '' ? null : Number(newP.price),
+        tech_pay: newP.techPay === '' ? null : Number(newP.techPay),
+        pickup_days: orderDays(newP.days),
+        pickup_frequency: newP.frequency,
+      })
+      setAddingAddr(false)
+      setNewP(BLANK_PROP)
+      setProps(await loadProperties(selId))
+      // Fill in the map pin in the background.
+      geocodeAll(() => {}).then(() => loadProperties(selId).then(setProps).catch(() => {})).catch(() => {})
+    } catch (e) {
+      setErr(e.message || String(e))
+    } finally {
+      setPBusy(false)
+    }
+  }
   async function saveProp(p) {
     if (pBusy) return
     setPBusy(true)
@@ -404,7 +437,7 @@ export default function Clients({ app }) {
             <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search clients…" style={searchInput} />
             <div style={searchIcon}>⌕</div>
           </div>
-          <button onClick={() => { setForm(BLANK); setEditingId(null); setShowForm(true) }} style={{ flex: 'none', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '0 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>+ Add</button>
+          <button onClick={() => { setForm(BLANK); setEditingId(null); setShowForm(true) }} style={{ flex: 'none', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '0 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' }}>+ Add client</button>
         </div>
 
         {loading && <div style={empty}>Loading…</div>}
@@ -413,7 +446,7 @@ export default function Clients({ app }) {
         {list.map((c) => {
           const on = c.id === selId
           return (
-            <div key={c.id} onClick={() => { setSelId(c.id); setConfirmDelete(false); setTagInput(''); setPayLink(null); setPayErr(null) }} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '11px 10px', borderRadius: 10, cursor: 'pointer', marginBottom: 2, background: on ? '#f3faf5' : '#fff', border: `1px solid ${on ? '#cfe0d5' : 'transparent'}` }}>
+            <div key={c.id} onClick={() => { setSelId(c.id); setConfirmDelete(false); setTagInput(''); setPayLink(null); setPayErr(null); setAddingAddr(false); setNewP(BLANK_PROP); setEditPid(null) }} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '11px 10px', borderRadius: 10, cursor: 'pointer', marginBottom: 2, background: on ? '#f3faf5' : '#fff', border: `1px solid ${on ? '#cfe0d5' : 'transparent'}` }}>
               <div style={{ width: 36, height: 36, borderRadius: 9, background: '#e7f1eb', color: '#1f7a4d', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontWeight: 600, fontSize: 12, flex: 'none' }}>{initialsOf(c.name)}</div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.name}</div>
@@ -491,14 +524,54 @@ export default function Clients({ app }) {
               {cur.notes && <Row label="Notes" value={cur.notes} />}
             </div>
 
-            {props.length > 0 && (
+            {(
               <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '18px 20px' }}>
-                <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 10 }}>
-                  <div style={{ fontWeight: 700, fontSize: 14 }}>Properties ({props.length})</div>
-                  {props.some((p) => p.lat == null) && (
-                    <div style={{ fontSize: 11.5, color: '#c08a2e' }}>{props.filter((p) => p.lat == null).length} without map pin</div>
-                  )}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, justifyContent: 'space-between', marginBottom: 10 }}>
+                  <div style={{ fontWeight: 700, fontSize: 14 }}>Addresses ({props.length})</div>
+                  <div style={{ display: 'flex', alignItems: 'baseline', gap: 12 }}>
+                    {props.some((p) => p.lat == null) && (
+                      <div style={{ fontSize: 11.5, color: '#c08a2e' }}>{props.filter((p) => p.lat == null).length} without map pin</div>
+                    )}
+                    {!addingAddr && (
+                      <button onClick={() => { setNewP(BLANK_PROP); setAddingAddr(true); setEditPid(null) }} style={{ flex: 'none', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 8, padding: '7px 12px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>+ Add address</button>
+                    )}
+                  </div>
                 </div>
+                {addingAddr && (
+                  <div style={{ border: '1px solid #cfe0d5', background: '#f7faf8', borderRadius: 10, padding: '10px 12px', marginBottom: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <div style={{ fontSize: 10.5, color: '#1f7a4d', fontFamily: MONO, letterSpacing: '.06em', fontWeight: 700 }}>NEW ADDRESS</div>
+                    <input autoFocus value={newP.address} onChange={(e) => setNewP({ ...newP, address: e.target.value })} style={{ ...inp, fontSize: 13 }} placeholder="Full address, City Zip *" />
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <input value={newP.service} onChange={(e) => setNewP({ ...newP, service: e.target.value })} style={{ ...inp, fontSize: 13 }} placeholder="Service" />
+                      <input value={newP.notes} onChange={(e) => setNewP({ ...newP, notes: e.target.value })} style={{ ...inp, fontSize: 13 }} placeholder="Bin location / notes" />
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ fontSize: 13, color: '#7c8a82' }}>$</span>
+                      <input value={newP.price} onChange={(e) => setNewP({ ...newP, price: e.target.value })} inputMode="decimal" style={{ ...inp, fontSize: 13, maxWidth: 140 }} placeholder="Price (e.g. 15)" />
+                      <input value={newP.techPay} onChange={(e) => setNewP({ ...newP, techPay: e.target.value })} inputMode="decimal" style={{ ...inp, fontSize: 13, maxWidth: 140 }} placeholder="Tech pay $ (lawn)" title="What the assigned tech earns for servicing this address (Lawn Care per-job pay)" />
+                      <span style={{ fontSize: 11.5, color: '#9aa69e' }}>per pickup</span>
+                    </div>
+                    <div style={{ fontSize: 10.5, color: '#7c8a82', fontFamily: MONO, letterSpacing: '.06em', marginTop: 2 }}>PICKUP DAYS</div>
+                    <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+                      {DAYS.map((d) => {
+                        const on = newP.days.includes(d)
+                        return (
+                          <button type="button" key={d} onClick={() => toggleNewDay(d)} style={{ flex: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 600, padding: '5px 9px', borderRadius: 7, border: `1px solid ${on ? '#1f7a4d' : '#dde2dd'}`, background: on ? '#e7f1eb' : '#fff', color: on ? '#1f7a4d' : '#7c8a82' }}>{DAY_ABBR[d]}</button>
+                        )
+                      })}
+                    </div>
+                    <select value={newP.frequency} onChange={(e) => setNewP({ ...newP, frequency: e.target.value })} style={{ ...inp, fontSize: 13 }}>
+                      {FREQ.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                    </select>
+                    <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                      <button onClick={() => { setAddingAddr(false); setNewP(BLANK_PROP) }} disabled={pBusy} style={{ background: '#fff', border: '1px solid #dde2dd', color: '#5d6b63', borderRadius: 8, padding: '6px 12px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
+                      <button onClick={saveNewProp} disabled={pBusy || !newP.address.trim()} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 8, padding: '6px 14px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', opacity: pBusy || !newP.address.trim() ? 0.6 : 1 }}>{pBusy ? 'Saving…' : 'Add address'}</button>
+                    </div>
+                  </div>
+                )}
+                {!props.length && !addingAddr && (
+                  <div style={{ fontSize: 12.5, color: '#9aa69e', padding: '6px 0 2px' }}>No addresses yet — add the first one with the button above, or use the Import tab for a whole list.</div>
+                )}
                 <div style={{ maxHeight: 360, overflowY: 'auto', margin: '0 -6px' }}>
                   {props.map((p) => (
                     <div key={p.id} style={{ padding: '8px 6px', borderTop: '1px solid #f1f3f0' }}>
