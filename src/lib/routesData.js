@@ -46,10 +46,12 @@ export function scheduleHitsDate(sched, dateStr) {
 // property can be serviced on more than one weekday. This returns one synthetic
 // schedule row per (property, day) — the shape scheduleHitsDate expects — so the
 // day dots, "build from schedules", and dashboard counts all stay property-aware.
-export async function loadActiveSchedules() {
-  const { data, error } = await supabase
+export async function loadActiveSchedules(line) {
+  let q = supabase
     .from('properties')
-    .select('id, customer_id, service, pickup_days, pickup_frequency, pickup_start_date')
+    .select('id, customer_id, service, pickup_days, pickup_frequency, pickup_start_date, business_line')
+  if (line) q = q.eq('business_line', line)
+  const { data, error } = await q
   if (error) throw error
   const rows = []
   for (const p of data || []) {
@@ -90,7 +92,7 @@ function mapStop(row) {
 
 // Load one route's depot, ordered stops, and the unrouted properties.
 // A route is identified by code + service_date, so each day has its own route.
-export async function loadRouteSlice(code = 'B', date = null) {
+export async function loadRouteSlice(code = 'B', date = null, line = null) {
   // The configured starting location (Settings) is the map home + optimizer
   // start, unless a specific route overrides it with its own depot.
   const settings = await loadSettings().catch(() => null)
@@ -115,9 +117,11 @@ export async function loadRouteSlice(code = 'B', date = null) {
   if (sErr) throw sErr
   const stops = stopRows.map(mapStop)
 
-  const { data: props, error: pErr } = await supabase
+  let pq = supabase
     .from('properties')
     .select('id, name, service, lat, lng, pickup_days, pickup_frequency, pickup_start_date, needs_review')
+  if (line) pq = pq.eq('business_line', line) // only this line's properties can be "unrouted" here
+  const { data: props, error: pErr } = await pq
   if (pErr) throw pErr
 
   const onRoute = new Set(stops.map((s) => s.propertyId))
@@ -184,8 +188,12 @@ export async function addStopToRoute(routeId, property, seq) {
 export async function buildRouteFromSchedules(code = 'B', date = null) {
   if (!date) throw new Error('A date is required.')
 
-  // Which properties are due on this date?
-  const scheds = await loadActiveSchedules()
+  // Which properties are due on this date? Only the ROUTE's business line —
+  // route codes are line-unique in the catalog, so derive it from there (keeps
+  // trash properties off lawn routes and vice versa).
+  const { data: def } = await supabase
+    .from('route_defaults').select('business_line').eq('code', code).maybeSingle()
+  const scheds = await loadActiveSchedules(def?.business_line || null)
   const due = scheds.filter((s) => scheduleHitsDate(s, date))
   const dueIds = new Set(due.map((s) => s.property_id).filter(Boolean))
 
@@ -379,11 +387,13 @@ export async function copyPreviousWeekday(code, date) {
 }
 
 // Every service property with its owning customer — powers the mass-add picker.
-export async function loadAllProperties() {
-  const { data, error } = await supabase
+// Pass the active business line so lawn dispatch only offers lawn properties.
+export async function loadAllProperties(line) {
+  let q = supabase
     .from('properties')
     .select('id, name, address, service, lat, lng, needs_review, customer_id, customers(name)')
-    .order('name', { ascending: true })
+  if (line) q = q.eq('business_line', line)
+  const { data, error } = await q.order('name', { ascending: true })
   if (error) throw error
   return (data || []).map((p) => ({
     id: p.id, name: p.name, address: p.address || '', service: p.service || '',

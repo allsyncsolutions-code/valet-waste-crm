@@ -60,7 +60,7 @@ export default function RoutesView({ app }) {
   const [routeSel, setRouteSel] = useState(TODAY_KEY)
   const [weekOffset, setWeekOffset] = useState(0)
   const [routeDefs, setRouteDefs] = useState([]) // catalog of routes (A/B/C…)
-  const [routeCode, setRouteCode] = useState('B') // which route is being viewed
+  const [routeCode, setRouteCode] = useState(null) // which route is being viewed (null until this line's catalog loads)
 
   const [route, setRoute] = useState(null)
   const [depot, setDepot] = useState(FALLBACK_DEPOT)
@@ -82,7 +82,8 @@ export default function RoutesView({ app }) {
   const writingRef = useRef(false) // suppress realtime reload during our own writes
 
   async function refresh(date = routeSel) {
-    const slice = await loadRouteSlice(routeCode, date)
+    if (!routeCode) { setRoute(null); setStops([]); setUnrouted([]); return null }
+    const slice = await loadRouteSlice(routeCode, date, app.activeLine)
     setRoute(slice.route)
     setDepot(slice.depot)
     setStops(slice.stops)
@@ -99,6 +100,11 @@ export default function RoutesView({ app }) {
       setLoading(false)
       return
     }
+    if (!routeCode) {
+      // No route on this business line yet — clear any stale slice.
+      setRoute(null); setStops([]); setUnrouted([]); setLoading(false)
+      return
+    }
     setLoading(true)
     setSaved(null)
     setOptimized(false)
@@ -108,16 +114,17 @@ export default function RoutesView({ app }) {
     return () => { alive = false }
   }, [routeSel, routeCode])
 
-  // Active schedules drive the "service day" dots in the picker; load the
-  // driver list and the route catalog once.
+  // Active schedules drive the "service day" dots in the picker; the schedules
+  // and route catalog are scoped to the active business line (and reload when
+  // the line switches, so lawn dispatch never shows trash routes/stops).
   useEffect(() => {
-    loadActiveSchedules().then(setSchedules).catch(() => {})
+    loadActiveSchedules(app.activeLine).then(setSchedules).catch(() => {})
     loadDrivers().then(setDrivers).catch(() => {})
     loadRouteDefs(app.activeLine).then((defs) => {
       setRouteDefs(defs)
-      if (defs.length && !defs.some((d) => d.code === routeCode)) setRouteCode(defs[0].code)
+      setRouteCode((cur) => (defs.some((d) => d.code === cur) ? cur : (defs[0]?.code ?? null)))
     }).catch(() => {})
-  }, [])
+  }, [app.activeLine])
 
   // Track the carry-forward default driver of whichever route is selected.
   useEffect(() => {
@@ -351,7 +358,7 @@ export default function RoutesView({ app }) {
     setMassQuery('')
     setShowMass(true)
     setMassLoading(true)
-    try { setAllProps(await loadAllProperties()) } catch (e) { setErr(e.message || String(e)) }
+    try { setAllProps(await loadAllProperties(app.activeLine)) } catch (e) { setErr(e.message || String(e)) }
     setMassLoading(false)
   }
   function toggleMass(id) {
@@ -439,7 +446,7 @@ export default function RoutesView({ app }) {
       await deleteRouteDef(routeCode)
       const defs = await loadRouteDefs(app.activeLine)
       setRouteDefs(defs)
-      setRouteCode((defs[0] && defs[0].code) || 'A')
+      setRouteCode((defs[0] && defs[0].code) || null)
     } catch (e) {
       setErr(e.message || String(e))
     }
@@ -533,6 +540,17 @@ export default function RoutesView({ app }) {
         <div onClick={addRoute} title="Add a route" style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 13px', borderRadius: 10, cursor: 'pointer', border: '1px dashed #cdd6cf', color: '#5d6b63', fontSize: 13, fontWeight: 600 }}>+ Add route</div>
       </div>
 
+      {!routeCode ? (
+        <div style={{ background: '#fff', border: '1px dashed #d8ddd6', borderRadius: 13, padding: '46px 24px', textAlign: 'center' }}>
+          <div style={{ fontSize: 26, marginBottom: 10 }}>🗺</div>
+          <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6 }}>No routes on this business line yet</div>
+          <div style={{ fontSize: 12.5, color: '#7c8a82', maxWidth: 440, margin: '0 auto 16px', lineHeight: 1.55 }}>
+            Routes are separate per line, so trash routes never show here. Use <b>+ Add route</b> above to create this line's first route, then build it from schedules or add stops.
+          </div>
+          <button onClick={addRoute} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 10, padding: '11px 18px', fontSize: 13.5, fontWeight: 600, cursor: 'pointer' }}>+ Add route</button>
+        </div>
+      ) : (
+      <>
       {/* selected route: driver lives in the card; actions on the right */}
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 14, flexWrap: 'wrap' }}>
         <div style={{ padding: '10px 14px', borderRadius: 12, border: '1px solid #cfe0d5', background: '#f3faf5', minWidth: 240 }}>
@@ -705,6 +723,8 @@ export default function RoutesView({ app }) {
           )}
         </div>
       </div>
+      </>
+      )}
       {/* mass-add modal */}
       {showMass && (
         <div onClick={() => !massBusy && setShowMass(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(15,30,20,.42)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 500, padding: 16 }}>
