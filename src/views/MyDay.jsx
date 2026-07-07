@@ -51,7 +51,7 @@ export default function MyDay({ app }) {
   const [busyStop, setBusyStop] = useState(null)
   const [uploadingStop, setUploadingStop] = useState(null)
   const [openStop, setOpenStop] = useState(null) // expanded job card
-  const [viewTech, setViewTech] = useState('me') // admin: 'me' | profile id | 'all'
+  const [viewTech, setViewTech] = useState(isAdmin ? 'all' : 'me') // admin: 'me' | profile id | 'none' | 'all' — admins start on Everyone so unassigned jobs are visible
 
   async function refresh(d = date) {
     const [drv, rts] = await Promise.all([loadDrivers(), loadDayDispatch(d, 'lawn')])
@@ -78,13 +78,19 @@ export default function MyDay({ app }) {
   // My jobs (techs) or the picked tech's jobs (admins), flattened across routes.
   const jobs = useMemo(() => {
     const want = isAdmin ? viewTech : 'me'
-    const mine = (r) => (want === 'all' ? true : want === 'me' ? r.driverId === me.id : r.driverId === want)
+    const mine = (r) => (
+      want === 'all' ? true
+        : want === 'me' ? r.driverId === me.id
+          : want === 'none' ? r.driverId == null
+            : r.driverId === want
+    )
     return routes.filter(mine).flatMap((r) => r.stops.map((s) => ({ ...s, route: r.code, routeName: r.name, driverId: r.driverId })))
   }, [routes, isAdmin, viewTech, me.id])
   const doneCount = jobs.filter((s) => s.checkOut).length
 
-  // Techs with routes today (admin picker).
+  // Techs with routes today (admin picker) + whether any route lacks a tech.
   const techsToday = useMemo(() => [...new Set(routes.map((r) => r.driverId).filter(Boolean))], [routes])
+  const hasUnassigned = useMemo(() => routes.some((r) => r.driverId == null && r.stops.length), [routes])
 
   async function onMyWay(s) {
     setBusyStop(s.id)
@@ -121,7 +127,11 @@ export default function MyDay({ app }) {
   }
 
   async function markComplete(s) {
-    if ((photos[s.id] || []).length === 0 && !window.confirm('No photos on this job yet — pay needs at least one. Mark complete anyway?')) return
+    // A photo of the finished lawn is REQUIRED — no photo, no complete (and no pay).
+    if ((photos[s.id] || []).length === 0) {
+      setErr(`Add a photo of the finished lawn at ${s.address || s.name} before marking it complete.`)
+      return
+    }
     setBusyStop(s.id)
     setErr('')
     try {
@@ -188,11 +198,17 @@ export default function MyDay({ app }) {
       </div>
 
       {/* admin tech picker */}
-      {isAdmin && techsToday.length > 0 && (
+      {isAdmin && (techsToday.length > 0 || hasUnassigned) && (
         <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap', marginBottom: 12 }}>
+          <Chip on={viewTech === 'all'} onClick={() => setViewTech('all')}>Everyone</Chip>
           <Chip on={viewTech === 'me'} onClick={() => setViewTech('me')}>My jobs</Chip>
           {techsToday.map((id) => <Chip key={id} on={viewTech === id} onClick={() => setViewTech(id)}>{driverName(id)}</Chip>)}
-          <Chip on={viewTech === 'all'} onClick={() => setViewTech('all')}>Everyone</Chip>
+          {hasUnassigned && <Chip on={viewTech === 'none'} onClick={() => setViewTech('none')}>⚠ Unassigned</Chip>}
+        </div>
+      )}
+      {isAdmin && hasUnassigned && viewTech !== 'none' && (
+        <div style={{ background: '#faf3e2', color: '#8a6414', borderRadius: 10, padding: '9px 13px', fontSize: 12.5, marginBottom: 12 }}>
+          ⚠ Some of {date === TODAY ? "today's" : "this day's"} jobs are on a route with <b>no tech assigned</b> — assign one in Routes &amp; Dispatch so it shows on their My Day (and their pay).
         </div>
       )}
 
@@ -273,7 +289,11 @@ function JobCard({ s, open, onToggle, busy, photos, uploading, team, onOnMyWay, 
               <button onClick={onClockIn} disabled={busy} style={bigBtn(LAWN)}>{busy ? '…' : '⏱ Clock In'}</button>
             )}
             {phase === 'enroute' && (
-              <button onClick={onComplete} disabled={busy} style={bigBtn(GREEN)}>{busy ? '…' : '✓ Mark Complete'}</button>
+              <button
+                onClick={onComplete} disabled={busy || photos.length === 0}
+                title={photos.length === 0 ? 'Add a photo of the finished lawn first' : undefined}
+                style={{ ...bigBtn(GREEN), opacity: photos.length === 0 ? 0.55 : 1, cursor: photos.length === 0 ? 'not-allowed' : 'pointer' }}
+              >{busy ? '…' : photos.length === 0 ? '✓ Complete (photo required)' : '✓ Mark Complete'}</button>
             )}
             <a href={`https://www.google.com/maps/dir/?api=1&destination=${dest}`} target="_blank" rel="noreferrer" style={{ ...bigBtn('#fff'), color: '#3a4a41', border: '1px solid #dde2dd', textDecoration: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>➤ Directions</a>
             {phase === 'onmyway' && <div style={{ gridColumn: '1 / -1', fontSize: 11.5, color: '#8a6414' }}>On my way sent {hhmm(s.onMyWayAt)}{s.clientPhone ? ' — client texted' : ' — client has no phone on file'}</div>}

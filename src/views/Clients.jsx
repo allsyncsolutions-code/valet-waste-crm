@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { MONO } from '../data.js'
-import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, addProperty, updateProperty, loadPropertyVisits, loadPropertyAddressIndex, countDuplicateProperties, findDuplicateProperties, mergeProperties, deleteProperty, sendPortalInvite } from '../lib/customersData.js'
+import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, addProperty, updateProperty, loadPropertyVisits, loadPropertyAddressIndex, countDuplicateProperties, findDuplicateProperties, mergeProperties, deleteProperty, sendPortalInvite, loadClientFieldActivity } from '../lib/customersData.js'
 import { geocodeAll } from '../lib/importData.js'
 import { listTags, findOrCreateTag, subscribeTags } from '../lib/tagsData.js'
 import { stripeStatus, stripePaymentLink } from '../lib/stripeData.js'
@@ -84,6 +84,9 @@ export default function Clients({ app }) {
   const [addrIdx, setAddrIdx] = useState({}) // customer_id → its property addresses (for search)
   const [inviteBusy, setInviteBusy] = useState(false)
   const [inviteMsg, setInviteMsg] = useState('')
+  const [actEvents, setActEvents] = useState([])
+  const [actBusy, setActBusy] = useState(false)
+  const [actSearch, setActSearch] = useState('')
 
   // Load the selected client's service properties.
   useEffect(() => {
@@ -92,6 +95,26 @@ export default function Clients({ app }) {
     loadProperties(selId).then((r) => { if (alive) setProps(r) }).catch(() => { if (alive) setProps([]) })
     return () => { alive = false }
   }, [selId, customers])
+
+  // Field activity (on-my-way / clock-in / complete / photos) for this client.
+  useEffect(() => {
+    if (!selId) { setActEvents([]); return }
+    let alive = true
+    setActBusy(true)
+    setActSearch('')
+    loadClientFieldActivity(selId)
+      .then((r) => { if (alive) setActEvents(r) })
+      .catch(() => { if (alive) setActEvents([]) })
+      .finally(() => { if (alive) setActBusy(false) })
+    return () => { alive = false }
+  }, [selId])
+
+  const actFiltered = useMemo(() => {
+    const q = actSearch.trim().toLowerCase()
+    if (!q) return actEvents
+    return actEvents.filter((e) =>
+      `${e.type} ${e.address} ${e.route || ''} ${fmtDate(e.ts)} ${fmtTime(e.ts)}`.toLowerCase().includes(q))
+  }, [actEvents, actSearch])
 
   async function refresh() {
     const rows = await loadCustomers()
@@ -745,6 +768,35 @@ export default function Clients({ app }) {
                 </div>
               </div>
             )}
+
+            <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '18px 20px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
+                <div style={{ fontWeight: 700, fontSize: 14, flex: 'none' }}>Activity</div>
+                <div style={{ position: 'relative', flex: 1, minWidth: 160 }}>
+                  <input value={actSearch} onChange={(e) => setActSearch(e.target.value)} placeholder="Search activity — address, date, “completed”…" style={{ ...inp, fontSize: 13, padding: '7px 10px 7px 28px' }} />
+                  <div style={{ position: 'absolute', left: 9, top: '50%', transform: 'translateY(-50%)', color: '#9aa69e', fontSize: 13 }}>⌕</div>
+                </div>
+                {actSearch && <span style={{ flex: 'none', fontSize: 11.5, color: '#7c8a82' }}>{actFiltered.length} of {actEvents.length}</span>}
+              </div>
+              {actBusy ? (
+                <div style={{ fontSize: 12.5, color: '#9aa69e' }}>Loading…</div>
+              ) : actEvents.length === 0 ? (
+                <div style={{ fontSize: 12.5, color: '#9aa69e' }}>No field activity yet — on-my-way texts, clock-ins, completions, and job photos will show here.</div>
+              ) : actFiltered.length === 0 ? (
+                <div style={{ fontSize: 12.5, color: '#9aa69e' }}>Nothing matches “{actSearch.trim()}”.</div>
+              ) : (
+                <div style={{ maxHeight: 320, overflowY: 'auto', margin: '0 -6px' }}>
+                  {actFiltered.map((e) => (
+                    <div key={e.id} style={{ display: 'flex', alignItems: 'baseline', gap: 10, padding: '7px 6px', borderTop: '1px solid #f1f3f0', fontSize: 12.5 }}>
+                      <span style={{ flex: 'none', width: 20, textAlign: 'center' }}>{e.icon}</span>
+                      <span style={{ flex: 'none', fontWeight: 600, width: 92 }}>{e.type}</span>
+                      <span style={{ flex: 1, minWidth: 0, color: '#5d6b63', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={e.address}>{e.address || '—'}{e.route ? <span style={{ color: '#9aa69e' }}> · Rt {e.route}</span> : null}</span>
+                      <span style={{ flex: 'none', color: '#9aa69e', fontFamily: MONO, fontSize: 11 }}>{fmtDate(e.ts)} · {fmtTime(e.ts)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
 
             {stripeOk && cur.invoice && cur.invoice.amount != null && (
               <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '18px 20px' }}>

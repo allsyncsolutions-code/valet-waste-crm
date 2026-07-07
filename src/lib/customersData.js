@@ -156,6 +156,29 @@ export async function addProperty(customerId, fields) {
   return data.id
 }
 
+// Field activity for one client across ALL their properties: on-my-way,
+// clock-ins, completions, and job photos — each event carries the address.
+export async function loadClientFieldActivity(customerId, limit = 300) {
+  const { data, error } = await supabase
+    .from('route_stops')
+    .select('id, check_in, check_out, on_my_way_at, properties!inner(customer_id, address), routes(code, service_date), stop_photos(id, created_at)')
+    .eq('properties.customer_id', customerId)
+    .order('id', { ascending: false })
+    .limit(limit)
+  if (error) throw error
+  const events = []
+  for (const s of data || []) {
+    const address = s.properties?.address || ''
+    const route = s.routes?.code || null
+    if (s.on_my_way_at) events.push({ id: `${s.id}-omw`, ts: s.on_my_way_at, type: 'On my way', icon: '🚐', address, route })
+    if (s.check_in) events.push({ id: `${s.id}-in`, ts: s.check_in, type: 'Clocked in', icon: '⏱', address, route })
+    if (s.check_out) events.push({ id: `${s.id}-out`, ts: s.check_out, type: 'Completed', icon: '✓', address, route })
+    for (const p of s.stop_photos || []) events.push({ id: `${s.id}-ph-${p.id}`, ts: p.created_at, type: 'Photo added', icon: '📷', address, route })
+  }
+  events.sort((a, b) => new Date(b.ts) - new Date(a.ts))
+  return events
+}
+
 // Email the client a portal invite: one-time login link (7-day expiry) plus
 // the save-a-card pitch (autopay + 5th week free). Staff JWT required.
 export async function sendPortalInvite(customerId) {

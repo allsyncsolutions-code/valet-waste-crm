@@ -24,7 +24,7 @@ export async function getProfile() {
   if (!user) return null
   const { data, error } = await supabase
     .from('profiles')
-    .select('id, email, full_name, role')
+    .select('id, email, full_name, role, is_driver, business_lines')
     .eq('id', user.id)
     .maybeSingle()
   if (error) {

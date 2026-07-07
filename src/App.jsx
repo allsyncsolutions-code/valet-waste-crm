@@ -18,6 +18,8 @@ import Automations from './views/Automations.jsx'
 import JobCalendar from './views/JobCalendar.jsx'
 import EmployeePay from './views/EmployeePay.jsx'
 import MyDay from './views/MyDay.jsx'
+import TechSchedule from './views/TechSchedule.jsx'
+import TimeSheets from './views/TimeSheets.jsx'
 import Portal from './views/Portal.jsx'
 import AnnotationLayer from './components/AnnotationLayer.jsx'
 import AiDock from './AiDock.jsx'
@@ -128,9 +130,25 @@ export default function App({ user, onSignOut }) {
       ? [...NAV_MAIN, { id: 'employees', glyph: '✂', label: 'Employees' }]
       : NAV_MAIN
   // Lawn techs work per-JOB, not per-truck-route — swap Drivers & Field for My Day.
-  const navField = isLawn
+  const navFieldBase = isLawn
     ? NAV_FIELD.map((n) => (n.id === 'drivers' ? { id: 'myday', glyph: '☀', label: 'My Day' } : n))
     : NAV_FIELD
+  // Field-crew tabs: schedule calendar (all lines) + payroll (lawn's per-job pay).
+  const navField = (() => {
+    const extra = [{ id: 'myschedule', glyph: '▥', label: 'My Schedule' }]
+    if (isLawn) extra.push({ id: 'timesheets', glyph: '⏱', label: 'Time Sheets & Payroll' })
+    const base = navFieldBase.slice()
+    const idx = base.findIndex((n) => n.id === 'drivers' || n.id === 'myday')
+    base.splice(idx === -1 ? base.length : idx + 1, 0, ...extra)
+    return base
+  })()
+
+  // Techs (staff flagged as drivers) get a focused rail: Dashboard, Routes &
+  // Dispatch, My Day / Drivers & Field, My Schedule, and Time Sheets & Payroll.
+  const isTech = !isAdmin && !!(user && user.is_driver)
+  const TECH_IDS = ['dashboard', 'routes', 'myday', 'drivers', 'myschedule', 'timesheets']
+  const techMain = navMain.filter((n) => ['dashboard', 'routes'].includes(n.id))
+  const techField = navField.filter((n) => TECH_IDS.includes(n.id))
 
   // Persist line + screen so a refresh brings the user right back here.
   useEffect(() => {
@@ -144,10 +162,12 @@ export default function App({ user, onSignOut }) {
   useEffect(() => {
     if (isJunk && activeView === 'routes') setActiveView('dashboard')
     if (!isLawn && activeView === 'employees') setActiveView('dashboard')
+    if (!isLawn && activeView === 'timesheets') setActiveView('dashboard')
     if (isLawn && activeView === 'drivers') setActiveView('myday')
     if (!isLawn && activeView === 'myday') setActiveView('drivers')
+    if (isTech && !TECH_IDS.includes(activeView)) setActiveView('dashboard')
     if (!myLines.includes(activeLine)) setActiveLine(myLines[0] || 'waste')
-  }, [activeLine, activeView])
+  }, [activeLine, activeView, isTech])
 
   const VIEW_META = {
     dashboard: ['Dispatch Overview', activeLineObj.name],
@@ -159,6 +179,8 @@ export default function App({ user, onSignOut }) {
     activity: ['Activity Log', 'Everything you and Trashy Randy have done'],
     drivers: ['Drivers & Field', 'Check-in / check-out, photos and GPS'],
     myday: ['My Day', 'Your jobs — on my way, clock in, complete, photos'],
+    myschedule: ['My Schedule', 'Week or month view of upcoming jobs'],
+    timesheets: ['Time Sheets & Payroll', 'Your hours, jobs, and pay — weekly and monthly'],
     team: ['Team', 'Members and their business-line assignments'],
     portal: ['Client Portal', 'Search a client to preview their portal, copy their link, or send a quote'],
     settings: ['Settings', 'Manage tags and configuration'],
@@ -255,6 +277,8 @@ export default function App({ user, onSignOut }) {
     activity: <Activity app={app} />,
     drivers: <Drivers app={app} />,
     myday: <MyDay app={app} />,
+    myschedule: <TechSchedule app={app} />,
+    timesheets: <TimeSheets app={app} />,
     portal: <Portal app={app} />,
     team: <Team app={app} />,
     settings: <Settings app={app} />,
@@ -264,6 +288,17 @@ export default function App({ user, onSignOut }) {
   }
 
   const showInlineDock = aiOpen && !isMobile && !isTablet
+
+  // Techs on mobile get their focused tabs in the bottom bar too.
+  const bottomNav = isTech
+    ? [
+        { id: 'dashboard', glyph: '▦', label: 'Home' },
+        { id: 'routes', glyph: '◔', label: 'Routes' },
+        isLawn ? { id: 'myday', glyph: '☀', label: 'My Day' } : { id: 'drivers', glyph: '⛟', label: 'Field' },
+        { id: 'myschedule', glyph: '▥', label: 'Schedule' },
+        ...(isLawn ? [{ id: 'timesheets', glyph: '⏱', label: 'Pay' }] : []),
+      ]
+    : BOTTOM_NAV
 
   const navRail = (
     <nav
@@ -333,8 +368,8 @@ export default function App({ user, onSignOut }) {
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto', padding: '4px 12px' }}>
-        <NavGroup label="OPERATIONS" items={navMain} activeView={activeView} onGo={go} />
-        <NavGroup label="FIELD & CLIENTS" items={isAdmin ? [...navField, { id: 'annotations', glyph: '✎', label: 'Annotations' }] : navField} activeView={activeView} onGo={go} top={14} />
+        <NavGroup label="OPERATIONS" items={isTech ? techMain : navMain} activeView={activeView} onGo={go} />
+        <NavGroup label={isTech ? 'MY WORK' : 'FIELD & CLIENTS'} items={isTech ? techField : (isAdmin ? [...navField, { id: 'annotations', glyph: '✎', label: 'Annotations' }] : navField)} activeView={activeView} onGo={go} top={14} />
       </div>
 
       <div onClick={openAssistant} style={{ margin: '10px 12px', padding: '11px 12px', borderRadius: 10, background: 'linear-gradient(135deg,#1f7a4d,#155e3a)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -416,7 +451,7 @@ export default function App({ user, onSignOut }) {
         {/* mobile bottom nav */}
         {isMobile && (
           <div style={{ flex: 'none', background: '#15201b', borderTop: '1px solid #233329', display: 'flex', padding: '6px 4px calc(6px + env(safe-area-inset-bottom))', position: 'relative', zIndex: 120 }}>
-            {BOTTOM_NAV.map((n) => {
+            {bottomNav.map((n) => {
               const active = activeView === n.id
               return (
                 <div key={n.id} onClick={() => go(n.id)} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, padding: '6px 2px', cursor: 'pointer', color: active ? '#46c585' : '#7a9387' }}>

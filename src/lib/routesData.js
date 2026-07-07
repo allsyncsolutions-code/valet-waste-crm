@@ -466,6 +466,35 @@ export async function loadDayDispatch(date, line) {
   }))
 }
 
+// Routes (with their stops) across a DATE RANGE — powers the "My Schedule"
+// week/month calendar. Optionally filtered to one driver and/or business line.
+export async function loadScheduleRange(startDate, endDate, { driverId, line } = {}) {
+  let q = supabase
+    .from('routes')
+    .select('id, code, name, service_date, driver_id, business_line, route_stops(id, status, service, check_out, properties(address, name))')
+    .gte('service_date', startDate)
+    .lte('service_date', endDate)
+  if (driverId) q = q.eq('driver_id', driverId)
+  if (line) q = q.eq('business_line', line)
+  const { data, error } = await q.order('service_date', { ascending: true })
+  if (error) throw error
+  return (data || []).map((r) => ({
+    id: r.id,
+    code: r.code,
+    name: r.name || `Route ${r.code}`,
+    date: r.service_date,
+    driverId: r.driver_id,
+    line: r.business_line || 'waste',
+    stops: (r.route_stops || []).map((s) => ({
+      id: s.id,
+      status: s.status,
+      done: !!s.check_out,
+      service: s.service || '',
+      address: s.properties?.address || s.properties?.name || '',
+    })),
+  }))
+}
+
 // Admin override: pay the tech for a stop that's missing photos/check-out.
 // Recorded (who + when) so timesheets show the approval trail.
 export async function overrideStopPay(stopId, adminName) {
