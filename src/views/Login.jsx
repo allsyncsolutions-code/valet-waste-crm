@@ -56,8 +56,13 @@ export default function Login({ pending, onSignOut, email: initialEmail }) {
     <div style={{ minHeight: '100dvh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#15201b', padding: 20, fontSize: 14, color: '#1a2420' }}>
       <div style={{ width: '100%', maxWidth: 380 }}>
         <div style={{ textAlign: 'center', marginBottom: 22 }}>
-          <div style={{ width: 44, height: 44, borderRadius: 11, background: '#1f7a4d', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', marginBottom: 14 }}>
-            <div style={{ width: 18, height: 18, border: '3px solid #eafff2', borderRadius: '50%', borderRightColor: 'transparent' }} />
+          <div style={{ width: 64, height: 64, borderRadius: 14, background: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', marginBottom: 14, overflow: 'hidden' }}>
+            <img
+              src="https://ozoonpwuyusvksmydkuu.supabase.co/storage/v1/object/public/branding/logo-1783112222279.jpg"
+              alt="Valet Waste"
+              style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+              onError={(e) => { e.target.style.display = 'none' }}
+            />
           </div>
           <div style={{ color: '#f3f7f4', fontWeight: 700, fontSize: 20, letterSpacing: '-.01em' }}>Valet Waste</div>
           <div style={{ fontSize: 11, letterSpacing: '.16em', color: '#5f7568', marginTop: 4 }}>CLIENT PORTAL & DISPATCH CRM</div>
