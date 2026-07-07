@@ -65,8 +65,9 @@ const btnGhost = { background: '#fff', color: '#5d6b63', border: '1px solid #dde
 const chip = (bg, fg) => ({ fontSize: 11.5, fontWeight: 700, color: fg, background: bg, borderRadius: 7, padding: '3px 9px', letterSpacing: '.02em' })
 const inputStyle = { border: '1px solid #d8ddd6', borderRadius: 9, padding: '10px 12px', fontSize: 14, outline: 'none', width: '100%', boxSizing: 'border-box' }
 
-export default function PortalPage({ slug, code, previewCustomerId }) {
+export default function PortalPage({ slug, code, previewCustomerId, shareToken }) {
   const preview = !!previewCustomerId
+  const shared = !!shareToken // homeowner view-only link: no login, no billing
   const [phase, setPhase] = useState('loading') // loading | email | sent | ready
   const [email, setEmail] = useState('')
   const [busy, setBusy] = useState(false)
@@ -75,14 +76,27 @@ export default function PortalPage({ slug, code, previewCustomerId }) {
   const [tab, setTab] = useState('home')
   const [notice, setNotice] = useState('')
 
-  const token = !preview ? localStorage.getItem(tokenKey(slug)) : null
+  const token = !preview && !shared ? localStorage.getItem(tokenKey(slug)) : null
 
   async function loadData(tok) {
-    const d = preview
-      ? await portalApi({ action: 'admin_data', customer_id: previewCustomerId })
-      : await portalApi({ action: 'data', token: tok })
+    const d = shared
+      ? await portalApi({ action: 'shared_data', share: shareToken })
+      : preview
+        ? await portalApi({ action: 'admin_data', customer_id: previewCustomerId })
+        : await portalApi({ action: 'data', token: tok })
     setData(d)
     setPhase('ready')
+  }
+
+  // Copy this client's view-only homeowner link (mints it on first use).
+  async function copyShareLink() {
+    try {
+      const r = await portalApi({ action: 'share_link', token })
+      await navigator.clipboard.writeText(r.url)
+      setNotice('✓ View-only link copied — share it with your homeowner. They can see pickups and photos, never billing.')
+    } catch (e) {
+      setNotice(`Couldn't copy the link: ${e.message || e}`)
+    }
   }
 
   useEffect(() => {
@@ -92,7 +106,7 @@ export default function PortalPage({ slug, code, previewCustomerId }) {
       setPhase('loading')
       setTab('home')
       try {
-        if (preview) { await loadData(); return }
+        if (shared || preview) { await loadData(); return }
 
         const params = new URLSearchParams(window.location.search)
         const setupSession = params.get('setup_session')
@@ -175,7 +189,7 @@ export default function PortalPage({ slug, code, previewCustomerId }) {
           )}
           <div>
             <div style={{ fontWeight: 800, fontSize: 16 }}>{data?.company?.name || 'Customer Portal'}</div>
-            <div style={{ fontSize: 12, color: '#7c8a82' }}>Client hub{preview ? ' — ADMIN PREVIEW' : ''}</div>
+            <div style={{ fontSize: 12, color: '#7c8a82' }}>{shared ? 'Service updates — view only' : `Client hub${preview ? ' — ADMIN PREVIEW' : ''}`}</div>
           </div>
         </div>
         {inner}
@@ -217,15 +231,18 @@ export default function PortalPage({ slug, code, previewCustomerId }) {
   }
 
   // ---- signed-in portal --------------------------------------------------------
-  const TABS = [
-    ['home', 'Home'],
-    ['pickups', 'Pickups'],
-    ['photos', 'Photos'],
-    ['quotes', pendingQuotes.length ? `Quotes (${pendingQuotes.length})` : 'Quotes'],
-    ['invoices', 'Invoices'],
-    ['payments', 'Payments'],
-    ['request', 'Request service'],
-  ]
+  // Homeowner share links only see service info — no billing, quotes, requests.
+  const TABS = shared
+    ? [['home', 'Home'], ['pickups', 'Pickups'], ['photos', 'Photos']]
+    : [
+        ['home', 'Home'],
+        ['pickups', 'Pickups'],
+        ['photos', 'Photos'],
+        ['quotes', pendingQuotes.length ? `Quotes (${pendingQuotes.length})` : 'Quotes'],
+        ['invoices', 'Invoices'],
+        ['payments', 'Payments'],
+        ['request', 'Request service'],
+      ]
 
   return shell(
     <>
@@ -245,7 +262,7 @@ export default function PortalPage({ slug, code, previewCustomerId }) {
       {tab === 'home' && (
         <HomeTab
           data={data} nextPickup={nextPickup} pendingQuotes={pendingQuotes} excessCount={excessCount}
-          go={setTab}
+          go={setTab} shared={shared} onShare={!shared && !preview ? copyShareLink : null}
         />
       )}
       {tab === 'pickups' && <PickupsTab data={data} />}
@@ -255,7 +272,7 @@ export default function PortalPage({ slug, code, previewCustomerId }) {
       {tab === 'payments' && <PaymentsTab data={data} token={token} preview={preview} onChanged={() => loadData(token)} setNotice={setNotice} />}
       {tab === 'request' && <RequestTab data={data} token={token} preview={preview} onChanged={() => loadData(token)} />}
 
-      {!preview && (
+      {!preview && !shared && (
         <div style={{ textAlign: 'center', marginTop: 26 }}>
           <button
             onClick={() => { localStorage.removeItem(tokenKey(slug)); setData(null); setPhase('email') }}
@@ -268,7 +285,7 @@ export default function PortalPage({ slug, code, previewCustomerId }) {
 }
 
 // ---- Home ---------------------------------------------------------------------
-function HomeTab({ data, nextPickup, pendingQuotes, excessCount, go }) {
+function HomeTab({ data, nextPickup, pendingQuotes, excessCount, go, shared, onShare }) {
   const payment = data.payment || {}
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -291,7 +308,8 @@ function HomeTab({ data, nextPickup, pendingQuotes, excessCount, go }) {
         </div>
       </div>
 
-      {/* balance + card status */}
+      {/* balance + card status (never shown on homeowner share links) */}
+      {!shared && (
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
         <div style={{ ...card, cursor: 'pointer' }} onClick={() => go('invoices')}>
           <div style={{ fontSize: 11.5, color: '#7c8a82' }}>Balance due</div>
@@ -313,6 +331,7 @@ function HomeTab({ data, nextPickup, pendingQuotes, excessCount, go }) {
           )}
         </div>
       </div>
+      )}
 
       {pendingQuotes.length > 0 && (
         <div onClick={() => go('quotes')} style={{ ...card, background: '#faf3e2', border: '1px solid #ecd9a8', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -373,7 +392,18 @@ function HomeTab({ data, nextPickup, pendingQuotes, excessCount, go }) {
         ))}
       </div>
 
-      <button onClick={() => go('request')} style={{ ...btnPrimary, padding: '13px 0', fontSize: 14.5, borderRadius: 12 }}>+ Request service</button>
+      {!shared && <button onClick={() => go('request')} style={{ ...btnPrimary, padding: '13px 0', fontSize: 14.5, borderRadius: 12 }}>+ Request service</button>}
+
+      {/* property managers: view-only link for their homeowners */}
+      {onShare && (
+        <div style={{ ...card, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <div style={{ flex: 1, minWidth: 200 }}>
+            <div style={{ fontWeight: 700, fontSize: 13.5 }}>Managing this for a homeowner?</div>
+            <div style={{ fontSize: 12, color: '#7c8a82', marginTop: 2 }}>Share a view-only link — they see pickups and photos, never your billing.</div>
+          </div>
+          <button onClick={onShare} style={{ ...btnGhost, flex: 'none' }}>Copy view-only link</button>
+        </div>
+      )}
     </div>
   )
 }
