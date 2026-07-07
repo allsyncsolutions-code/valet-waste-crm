@@ -150,6 +150,23 @@ export default function App({ user, onSignOut }) {
   const techMain = navMain.filter((n) => ['dashboard', 'routes'].includes(n.id))
   const techField = navField.filter((n) => TECH_IDS.includes(n.id))
 
+  // Custom nav-tab order (drag to reorder in the rail; saved per browser).
+  const [navOrder, setNavOrder] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('vw_nav_order') || '{}') } catch (e) { return {} }
+  })
+  const saveNavOrder = (group, ids) => setNavOrder((o) => {
+    const next = { ...o, [group]: ids }
+    try { localStorage.setItem('vw_nav_order', JSON.stringify(next)) } catch (e) { /* private mode */ }
+    return next
+  })
+  // Sort items by the saved order; tabs not in the saved list (new features,
+  // line-specific swaps) keep their default position at the end of the group.
+  const applyNavOrder = (items, ids) => {
+    if (!ids || !ids.length) return items
+    const pos = new Map(ids.map((id, i) => [id, i]))
+    return items.slice().sort((a, b) => (pos.has(a.id) ? pos.get(a.id) : 999) - (pos.has(b.id) ? pos.get(b.id) : 999))
+  }
+
   // Persist line + screen so a refresh brings the user right back here.
   useEffect(() => {
     try {
@@ -368,8 +385,8 @@ export default function App({ user, onSignOut }) {
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto', padding: '4px 12px' }}>
-        <NavGroup label="OPERATIONS" items={isTech ? techMain : navMain} activeView={activeView} onGo={go} />
-        <NavGroup label={isTech ? 'MY WORK' : 'FIELD & CLIENTS'} items={isTech ? techField : (isAdmin ? [...navField, { id: 'annotations', glyph: '✎', label: 'Annotations' }] : navField)} activeView={activeView} onGo={go} top={14} />
+        <NavGroup label="OPERATIONS" items={applyNavOrder(isTech ? techMain : navMain, navOrder.main)} activeView={activeView} onGo={go} onReorder={(ids) => saveNavOrder('main', ids)} />
+        <NavGroup label={isTech ? 'MY WORK' : 'FIELD & CLIENTS'} items={applyNavOrder(isTech ? techField : (isAdmin ? [...navField, { id: 'annotations', glyph: '✎', label: 'Annotations' }] : navField), navOrder.field)} activeView={activeView} onGo={go} top={14} onReorder={(ids) => saveNavOrder('field', ids)} />
       </div>
 
       <div onClick={openAssistant} style={{ margin: '10px 12px', padding: '11px 12px', borderRadius: 10, background: 'linear-gradient(135deg,#1f7a4d,#155e3a)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -514,14 +531,44 @@ export default function App({ user, onSignOut }) {
   )
 }
 
-function NavGroup({ label, items, activeView, onGo, top = 0 }) {
+function NavGroup({ label, items, activeView, onGo, top = 0, onReorder }) {
+  // Drag-to-reorder within the group (desktop; order saved by the parent).
+  const [dragId, setDragId] = useState(null)
+  const [overId, setOverId] = useState(null)
+
+  function drop(targetId) {
+    if (!dragId || dragId === targetId) { setDragId(null); setOverId(null); return }
+    const ids = items.map((x) => x.id)
+    const from = ids.indexOf(dragId)
+    const to = ids.indexOf(targetId)
+    if (from === -1 || to === -1) { setDragId(null); setOverId(null); return }
+    ids.splice(from, 1)
+    ids.splice(to, 0, dragId)
+    onReorder && onReorder(ids)
+    setDragId(null)
+    setOverId(null)
+  }
+
   return (
     <>
       <div style={{ fontFamily: MONO, fontSize: 9, letterSpacing: '.16em', color: '#4f6357', padding: `${8 + top}px 8px 6px` }}>{label}</div>
       {items.map((n) => {
         const active = activeView === n.id
+        const dragging = dragId === n.id
+        const over = overId === n.id && dragId && dragId !== n.id
         return (
-          <div key={n.id} onClick={() => onGo(n.id)} style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: 11, padding: '9px 10px', borderRadius: 8, cursor: 'pointer', marginBottom: 2, fontWeight: active ? 600 : 500, color: active ? '#f3f7f4' : '#9fb3a8', background: active ? '#22332b' : 'transparent' }}>
+          <div
+            key={n.id}
+            onClick={() => onGo(n.id)}
+            draggable={!!onReorder}
+            title={onReorder ? 'Drag to reorder' : undefined}
+            onDragStart={(e) => { setDragId(n.id); try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', n.id) } catch (err) {} }}
+            onDragOver={(e) => { if (dragId && dragId !== n.id) { e.preventDefault(); setOverId(n.id) } }}
+            onDragLeave={() => { if (overId === n.id) setOverId(null) }}
+            onDrop={(e) => { e.preventDefault(); drop(n.id) }}
+            onDragEnd={() => { setDragId(null); setOverId(null) }}
+            style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: 11, padding: '9px 10px', borderRadius: 8, cursor: 'pointer', marginBottom: 2, fontWeight: active ? 600 : 500, color: active ? '#f3f7f4' : '#9fb3a8', background: active ? '#22332b' : 'transparent', opacity: dragging ? 0.45 : 1, boxShadow: over ? 'inset 0 2px 0 #46c585' : 'none' }}
+          >
             {active && <div style={{ position: 'absolute', left: -12, top: 8, bottom: 8, width: 3, borderRadius: '0 3px 3px 0', background: '#46c585' }} />}
             <span style={{ fontFamily: MONO, fontSize: 14, width: 16, textAlign: 'center' }}>{n.glyph}</span>
             <span style={{ flex: 1, fontSize: 13.5 }}>{n.label}</span>
