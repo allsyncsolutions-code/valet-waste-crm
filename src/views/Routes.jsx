@@ -13,7 +13,7 @@ import {
 } from '../lib/routeModel.js'
 import { optimizeOrder, routeMetrics } from '../lib/optimize.js'
 import { formatMiles, formatDuration, metersToMiles } from '../lib/geo.js'
-import { hasSupabase } from '../lib/supabaseClient.js'
+import { hasSupabase, supabase } from '../lib/supabaseClient.js'
 import {
   loadRouteSlice,
   persistOrder,
@@ -139,6 +139,15 @@ export default function RoutesView({ app }) {
     try {
       await assignDriver(routeCode, routeSel, driverId)
       await refresh(routeSel)
+      // Ping the tech's phone (mobile app) — best-effort, never blocks.
+      if (driverId) {
+        supabase.functions.invoke('push', { body: {
+          action: 'send',
+          profile_ids: [driverId],
+          title: 'Route assigned',
+          body: `You're on ${currentDef.name} for ${prettyDate(routeSel)} — open My Day for the job list.`,
+        } }).catch(() => {})
+      }
     } catch (e2) { setErr(e2.message || String(e2)) }
   }
 

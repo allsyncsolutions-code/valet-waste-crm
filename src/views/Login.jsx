@@ -5,6 +5,9 @@ import { supabase } from '../lib/supabaseClient.js'
 // Sign-in screen: CLIENT portal login (email → magic link, no slug needed) on
 // top, EMPLOYEE email+password (invite-only) below it.
 export default function Login({ pending, onSignOut, email: initialEmail }) {
+  // Inside the mobile app's customer view (?app=client) the employee form is
+  // hidden — the app has its own "Staff sign-in" entry in the native header.
+  const clientOnly = new URLSearchParams(window.location.search).get('app') === 'client'
   const [email, setEmail] = useState(initialEmail || '')
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
@@ -101,7 +104,8 @@ export default function Login({ pending, onSignOut, email: initialEmail }) {
               )}
             </form>
 
-            {/* EMPLOYEE sign-in */}
+            {/* EMPLOYEE sign-in (hidden in the mobile app's customer view) */}
+            {!clientOnly && (
             <form onSubmit={submit} style={{ background: '#fff', borderRadius: 14, padding: 24, marginTop: 14 }}>
               <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 3 }}>Employee sign in</div>
               <div style={{ fontSize: 12, color: '#7c8a82', marginBottom: 14 }}>Staff and drivers — invite-only accounts.</div>
@@ -122,10 +126,13 @@ export default function Login({ pending, onSignOut, email: initialEmail }) {
                 {busy ? 'Signing in…' : 'Sign in'}
               </button>
             </form>
+            )}
           </>
         )}
         <div style={{ textAlign: 'center', fontSize: 11, color: '#5f7568', marginTop: 16 }}>
-          Employee accounts are invite-only · clients can also use the portal link we texted or emailed them
+          {clientOnly
+            ? 'You can also use the portal link we texted or emailed you'
+            : 'Employee accounts are invite-only · clients can also use the portal link we texted or emailed them'}
         </div>
       </div>
     </div>

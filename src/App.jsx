@@ -140,6 +140,12 @@ export default function App({ user, onSignOut }) {
     const base = navFieldBase.slice()
     const idx = base.findIndex((n) => n.id === 'drivers' || n.id === 'myday')
     base.splice(idx === -1 ? base.length : idx + 1, 0, ...extra)
+    // On mobile, field work leads the group: My Day (or Drivers & Field),
+    // My Schedule, then Time Sheets & Payroll — office tabs after.
+    if (isMobile) {
+      const prio = (n) => { const i = ['myday', 'drivers', 'myschedule', 'timesheets'].indexOf(n.id); return i === -1 ? 99 : i }
+      base.sort((a, b) => prio(a) - prio(b)) // stable: everything else keeps its order
+    }
     return base
   })()
 
