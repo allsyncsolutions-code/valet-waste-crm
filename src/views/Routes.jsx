@@ -28,6 +28,7 @@ import {
   setRouteDefault,
   addOneOffStop,
   loadRouteDefs,
+  loadUsedRouteCodes,
   createRouteDef,
   deleteRouteDef,
   updateRouteDef,
@@ -455,10 +456,13 @@ export default function RoutesView({ app }) {
   async function addRoute() {
     const name = window.prompt('New route name (e.g. "Route C" or "North Side")')
     if (name == null || !name.trim()) return
-    const used = new Set(routeDefs.map((r) => r.code))
+    // Route codes are unique across ALL business lines, so suggest one that's
+    // free everywhere (not just on this line).
+    let used
+    try { used = new Set(await loadUsedRouteCodes()) } catch (e) { used = new Set(routeDefs.map((r) => r.code)) }
     let suggested = ''
     for (const ch of 'ABCDEFGHIJKLMNOPQRSTUVWXYZ') { if (!used.has(ch)) { suggested = ch; break } }
-    const code = window.prompt('Short route code (1–3 characters)', suggested || (name.trim()[0] || 'R').toUpperCase())
+    const code = window.prompt('Short route code (1–3 characters) — codes are shared across business lines', suggested || (name.trim()[0] || 'R').toUpperCase())
     if (code == null || !code.trim()) return
     setErr(null)
     try {

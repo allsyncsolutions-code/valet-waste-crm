@@ -313,6 +313,14 @@ export async function loadRouteDefs(line) {
   return (data || []).map((d) => ({ ...d, name: d.name || `Route ${d.code}` }))
 }
 
+// Every route code in the catalog, across ALL business lines — codes are
+// globally unique, so the add-route suggestion must avoid other lines' codes.
+export async function loadUsedRouteCodes() {
+  const { data, error } = await supabase.from('route_defaults').select('code')
+  if (error) throw error
+  return (data || []).map((r) => r.code)
+}
+
 export async function updateRouteDef(code, patch) {
   const fields = {}
   for (const k of ['name', 'color', 'active', 'sort']) if (patch[k] !== undefined) fields[k] = patch[k]
@@ -338,7 +346,7 @@ export async function createRouteDef({ code, name, color, line }) {
     .select('code, name, color, driver_id, active, sort')
     .single()
   if (error) {
-    if (error.code === '23505') throw new Error(`Route ${c} already exists.`)
+    if (error.code === '23505') throw new Error(`Route code ${c} is already taken — codes are shared across business lines (it may be a route on another line). Pick a different code.`)
     throw error
   }
   return data

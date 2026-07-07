@@ -70,8 +70,9 @@ export default function App({ user, onSignOut }) {
     .map((w) => w[0].toUpperCase())
     .join('') || 'U'
 
-  const [activeLine, setActiveLine] = useState('waste')
-  const [activeView, setActiveView] = useState('clients')
+  // Remember where the user was across page refreshes (line + screen).
+  const [activeLine, setActiveLine] = useState(() => { try { return localStorage.getItem('vw_line') || 'waste' } catch (e) { return 'waste' } })
+  const [activeView, setActiveView] = useState(() => { try { return localStorage.getItem('vw_view') || 'clients' } catch (e) { return 'clients' } })
   const [annotateMode, setAnnotateMode] = useState(false)
   const isAdmin = !!(user && user.role === 'admin')
   const [lineMenuOpen, setLineMenuOpen] = useState(false)
@@ -130,6 +131,14 @@ export default function App({ user, onSignOut }) {
   const navField = isLawn
     ? NAV_FIELD.map((n) => (n.id === 'drivers' ? { id: 'myday', glyph: '☀', label: 'My Day' } : n))
     : NAV_FIELD
+
+  // Persist line + screen so a refresh brings the user right back here.
+  useEffect(() => {
+    try {
+      localStorage.setItem('vw_line', activeLine)
+      localStorage.setItem('vw_view', activeView)
+    } catch (e) { /* private mode etc. */ }
+  }, [activeLine, activeView])
 
   // If the current view doesn't exist on this line, land on the dashboard.
   useEffect(() => {
