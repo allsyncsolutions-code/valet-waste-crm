@@ -46,6 +46,16 @@ export async function saveSmsTemplates(t) {
   if (error) throw error
 }
 
+// Master on/off for the "service complete" check-out text. Per-contact
+// notify_on_service still governs WHO gets it. Off by default.
+export async function saveNotifyOnComplete(on) {
+  const { error } = await supabase
+    .from('app_settings')
+    .update({ notify_on_complete: !!on, updated_at: new Date().toISOString() })
+    .eq('id', 1)
+  if (error) throw error
+}
+
 // Trashy Randy's chat personality (staff-facing only). One of:
 // professional | friendly | funny | spicy | hype | deadpan.
 export const RANDY_TONES = [

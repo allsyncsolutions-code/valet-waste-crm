@@ -40,9 +40,13 @@ const fmtTime = (ts) => { try { return new Date(ts).toLocaleTimeString(undefined
 
 const BLANK = {
   name: '', address: '', contactName: '', email: '', phone: '', status: 'active', notes: '',
+  notifyOnService: null, // null=auto (single-property only), true=always, false=never
   service: '', frequency: 'weekly', dayOfWeek: 'monday',
   cadence: 'monthly', amount: '',
 }
+// The Service-notification dropdown uses strings; map to the DB's true/false/null.
+const NOTIFY_TO_STR = (v) => (v === true ? 'always' : v === false ? 'never' : 'auto')
+const NOTIFY_FROM_STR = (s) => (s === 'always' ? true : s === 'never' ? false : null)
 const BLANK_PROP = { address: '', service: '', notes: '', price: '', techPay: '', days: [], frequency: 'weekly' }
 
 export default function Clients({ app }) {
@@ -382,6 +386,7 @@ export default function Clients({ app }) {
     setForm({
       name: cur.name || '', address: cur.address || '', contactName: cur.contactName || '',
       email: cur.email || '', phone: cur.phone || '', status: cur.status || 'active', notes: cur.notes || '',
+      notifyOnService: cur.notifyOnService ?? null,
       service: cur.pickup?.service || '', frequency: cur.pickup?.frequency || 'weekly',
       dayOfWeek: cur.pickup?.dayOfWeek || 'monday',
       cadence: cur.invoice?.cadence || 'monthly', amount: cur.invoice?.amount ?? '',
@@ -403,6 +408,7 @@ export default function Clients({ app }) {
       phone: form.phone.trim(),
       status: form.status,
       notes: form.notes.trim(),
+      notifyOnService: form.notifyOnService ?? null,
       pickup: { service: form.service.trim(), frequency: form.frequency, dayOfWeek: null },
       invoice: { cadence: form.cadence, amount: form.amount === '' ? null : Number(form.amount) },
     }
@@ -587,6 +593,7 @@ export default function Clients({ app }) {
               <Row label="Email" value={cur.email || '—'} />
               <Row label="Phone" value={cur.phone || '—'} />
               <Row label="Status" value={cap(cur.status)} />
+              <Row label="Text on service" value={cur.notifyOnService === true ? 'Always' : cur.notifyOnService === false ? 'Never' : 'Auto (single-property only)'} />
               {cur.notes && <Row label="Notes" value={cur.notes} />}
             </div>
 
@@ -868,6 +875,17 @@ export default function Clients({ app }) {
               <select value={form.status} onChange={(e) => set({ status: e.target.value })} style={inp}>
                 {STATUS.map((s) => <option key={s} value={s}>{cap(s)}</option>)}
               </select>
+            </Field>
+
+            <Field label="Text on service">
+              <select value={NOTIFY_TO_STR(form.notifyOnService)} onChange={(e) => set({ notifyOnService: NOTIFY_FROM_STR(e.target.value) })} style={inp}>
+                <option value="auto">Auto — notify only if this is their only property</option>
+                <option value="always">Always text when we arrive</option>
+                <option value="never">Never text</option>
+              </select>
+              <div style={{ fontSize: 11.5, color: '#7c8a82', marginTop: 4 }}>
+                On "Auto", contacts tied to more than one property (e.g. a property manager) are skipped so they aren't texted for every stop.
+              </div>
             </Field>
 
             <div style={{ display: 'flex', gap: 9, marginTop: 18 }}>

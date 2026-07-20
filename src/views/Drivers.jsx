@@ -82,6 +82,9 @@ export default function Drivers({ app }) {
       const gps = await getGps()
       await checkInStop(stop.id, gps)
       logActivity({ type: 'check_in', summary: `Checked in at ${stop.name}`, entityType: 'route_stop', entityId: stop.id })
+      // Tell the property contact we've arrived. Server decides who gets it
+      // (multi-location managers auto-suppressed). Fire-and-forget.
+      supabase.functions.invoke('notify-arrival', { body: { stopId: stop.id } }).catch(() => {})
       maybeNudge(stop) // fire-and-forget; never blocks the check-in
       await refresh()
     } catch (e) { setErr(e.message || String(e)) }
@@ -119,6 +122,8 @@ export default function Drivers({ app }) {
       const gps = await getGps()
       await checkOutStop(stop.id, gps)
       logActivity({ type: 'check_out', summary: `Checked out of ${stop.name}`, entityType: 'route_stop', entityId: stop.id })
+      // "Service complete" text — server-gated (only sends if completion texts are ON). Best-effort.
+      supabase.functions.invoke('notify-complete', { body: { stopId: stop.id } }).catch(() => {})
       await refresh()
     } catch (e) { setErr(e.message || String(e)) }
     setBusyStop(null)

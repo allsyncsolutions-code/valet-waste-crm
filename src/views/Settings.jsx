@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { MONO } from '../data.js'
 import { listTags, createTag, updateTag, deleteTag, tagUsageCounts, subscribeTags, TAG_COLORS } from '../lib/tagsData.js'
-import { loadSettings, saveDepot, geocodeAddress, subscribeSettings, saveSmsTemplates, saveRandyTone, RANDY_TONES } from '../lib/settingsData.js'
+import { loadSettings, saveDepot, geocodeAddress, subscribeSettings, saveSmsTemplates, saveRandyTone, saveNotifyOnComplete, RANDY_TONES } from '../lib/settingsData.js'
 import { stripeStatus, stripeOnboard } from '../lib/stripeData.js'
 import { platformBillingStatus, platformBillingCheckout, platformBillingPortal } from '../lib/platformBillingData.js'
 import { getSmsConfig, saveSmsConfig, sendTestSms, listSmsSubscriptions, ensureSmsSubscription } from '../lib/smsData.js'
@@ -45,6 +45,8 @@ export default function Settings({ app }) {
   const [tplMsg, setTplMsg] = useState(null)
   const [randyTone, setRandyTone] = useState('spicy')
   const [randyMsg, setRandyMsg] = useState(null)
+  const [notifyComplete, setNotifyComplete] = useState(false)
+  const [notifyCompleteBusy, setNotifyCompleteBusy] = useState(false)
 
   async function refresh() {
     const [t, c] = await Promise.all([listTags(), tagUsageCounts()])
@@ -69,6 +71,7 @@ export default function Settings({ app }) {
           sms_invoice_template: s.sms_invoice_template || '',
         })
         if (s.randy_tone) setRandyTone(s.randy_tone)
+        setNotifyComplete(!!s.notify_on_complete)
       }
     }).catch(() => {})
     load()
@@ -238,6 +241,21 @@ export default function Settings({ app }) {
       setTplMsg({ type: 'err', text: e.message || String(e) })
     } finally {
       setTplSaving(false)
+    }
+  }
+  async function toggleNotifyComplete() {
+    const next = !notifyComplete
+    setNotifyComplete(next) // optimistic
+    setNotifyCompleteBusy(true)
+    setTplMsg(null)
+    try {
+      await saveNotifyOnComplete(next)
+      setTplMsg({ type: 'ok', text: next ? 'Completion texts are ON — customers get a text when a job is marked complete.' : 'Completion texts are OFF.' })
+    } catch (e) {
+      setNotifyComplete(!next) // revert
+      setTplMsg({ type: 'err', text: e.message || String(e) })
+    } finally {
+      setNotifyCompleteBusy(false)
     }
   }
   async function pickTone(tone) {
@@ -508,6 +526,18 @@ export default function Settings({ app }) {
         <SField label="Company name (for {companyName})"><input value={tpl.company_name} onChange={(e) => setTpl((t) => ({ ...t, company_name: e.target.value }))} style={inp} placeholder="Valet Waste FL" /></SField>
         <TplField label="Invoice text" value={tpl.sms_invoice_template} onChange={(v) => setTpl((t) => ({ ...t, sms_invoice_template: v }))} />
         <TplField label="Check-in (tech arriving)" value={tpl.sms_checkin_template} onChange={(v) => setTpl((t) => ({ ...t, sms_checkin_template: v }))} />
+        <label style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '4px 0 12px', cursor: notifyCompleteBusy ? 'default' : 'pointer' }}>
+          <span
+            onClick={() => { if (!notifyCompleteBusy) toggleNotifyComplete() }}
+            style={{ width: 42, height: 24, borderRadius: 12, background: notifyComplete ? '#22b06b' : '#cfd6d0', position: 'relative', flex: 'none', transition: 'background .15s', opacity: notifyCompleteBusy ? 0.6 : 1 }}
+          >
+            <span style={{ position: 'absolute', top: 3, left: notifyComplete ? 21 : 3, width: 18, height: 18, borderRadius: '50%', background: '#fff', transition: 'left .15s' }} />
+          </span>
+          <span style={{ fontSize: 13.5 }}>
+            <span style={{ fontWeight: 600 }}>Text customers when a job is complete</span>
+            <span style={{ color: '#7c8a82' }}> — sends the check-out text below on completion. Off by default; multi-location managers are still auto-skipped.</span>
+          </span>
+        </label>
         <TplField label="Check-out (service complete)" value={tpl.sms_checkout_template} onChange={(v) => setTpl((t) => ({ ...t, sms_checkout_template: v }))} />
         <TplField label="Service reminder" value={tpl.sms_reminder_template} onChange={(v) => setTpl((t) => ({ ...t, sms_reminder_template: v }))} />
         <button type="button" onClick={saveTemplates} disabled={tplSaving} style={{ marginTop: 4, background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: tplSaving ? 0.6 : 1 }}>{tplSaving ? 'Saving…' : 'Save templates'}</button>

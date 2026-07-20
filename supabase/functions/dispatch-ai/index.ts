@@ -498,6 +498,18 @@ const tools = [
       required: ["to", "message"],
     },
   },
+  {
+    name: "set_completion_texts",
+    description:
+      "Turn the 'service complete' customer text ON or OFF (the master switch). When ON, a customer automatically gets a text the moment a tech marks their stop complete (check-out). Multi-location property managers are still auto-skipped, and per-client overrides still apply — this only flips the global switch. Use when staff say things like 'turn on completion texts', 'text customers when we finish the job', or 'stop the service-done texts'. Arrival (on-the-way) texts are separate and always on.",
+    input_schema: {
+      type: "object",
+      properties: {
+        on: { type: "boolean", description: "true to turn service-complete texts on, false to turn them off." },
+      },
+      required: ["on"],
+    },
+  },
 ]
 
 // ---- PostgREST helpers (service role) ----
@@ -1361,6 +1373,19 @@ async function suggestAutomation(a: any) {
   }
 }
 
+async function setCompletionTexts(a: any) {
+  const on = a.on === true || a.on === "true" || a.on === 1
+  await sbPatch(`app_settings?id=eq.1`, { notify_on_complete: on, updated_at: new Date().toISOString() })
+  await logActivity("settings", `${on ? "Turned ON" : "Turned OFF"} service-complete texts`, "app_settings", "1")
+  return {
+    ok: true,
+    notify_on_complete: on,
+    note: on
+      ? "Service-complete texts are ON — customers get a text when their stop is marked complete. Multi-location managers are still auto-skipped."
+      : "Service-complete texts are OFF.",
+  }
+}
+
 async function textInvoiceTool(a: any) {
   let inv: any = null
   if (a.invoice_number) {
@@ -1529,6 +1554,7 @@ async function runTool(name: string, input: any): Promise<unknown> {
     case "list_jobs": return await listJobs(input)
     case "text_invoice": return await textInvoiceTool(input)
     case "send_sms": return await sendSmsTool(input)
+    case "set_completion_texts": return await setCompletionTexts(input)
     default: throw new Error(`Unknown tool: ${name}`)
   }
 }

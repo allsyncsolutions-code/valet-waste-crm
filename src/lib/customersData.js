@@ -16,6 +16,8 @@ function mapCustomer(row) {
     address: row.address || '',
     status: row.status || 'active',
     notes: row.notes || '',
+    // Arrival-text setting: true=always, false=never, null=auto (single-property only)
+    notifyOnService: row.notify_on_service === undefined ? null : row.notify_on_service,
     portal_slug: row.portal_slug || null,
     business_line: row.business_line || 'waste',
     autopay: {
@@ -56,6 +58,7 @@ export async function createClient(payload) {
       status: payload.status || 'active',
       notes: payload.notes || null,
       business_line: payload.businessLine || 'waste',
+      notify_on_service: payload.notifyOnService ?? null,
     })
     .select('*')
     .single()
@@ -97,6 +100,7 @@ export async function updateCustomer(id, payload) {
       address: payload.address || null,
       status: payload.status || 'active',
       notes: payload.notes || null,
+      notify_on_service: payload.notifyOnService ?? null,
     })
     .eq('id', id)
   if (cErr) throw cErr

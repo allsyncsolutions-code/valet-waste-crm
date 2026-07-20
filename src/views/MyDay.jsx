@@ -120,6 +120,9 @@ export default function MyDay({ app }) {
       const gps = await getGps()
       await checkInStop(s.id, gps)
       logActivity({ type: 'check_in', summary: `Clocked in at ${s.address || s.name}`, entityType: 'route_stop', entityId: s.id })
+      // Tell the property contact we've arrived. The server decides whether to
+      // actually send (multi-location managers auto-suppressed). Best-effort.
+      supabase.functions.invoke('notify-arrival', { body: { stopId: s.id, sentBy: driverName(s.driverId) } }).catch(() => {})
       maybeNudge(s)
       await refresh()
     } catch (e) { setErr(e.message || String(e)) }
@@ -138,6 +141,8 @@ export default function MyDay({ app }) {
       const gps = await getGps()
       await checkOutStop(s.id, gps)
       logActivity({ type: 'check_out', summary: `Completed ${s.address || s.name}`, entityType: 'route_stop', entityId: s.id })
+      // "Service complete" text — server-gated (only sends if completion texts are ON). Best-effort.
+      supabase.functions.invoke('notify-complete', { body: { stopId: s.id, sentBy: driverName(s.driverId) } }).catch(() => {})
       await refresh()
     } catch (e) { setErr(e.message || String(e)) }
     setBusyStop(null)
