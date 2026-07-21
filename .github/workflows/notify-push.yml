@@ -1,0 +1,36 @@
+name: Notify admins on push to main
+
+# Texts the Valet Waste admins (via Trashy Randy) a summary of what shipped,
+# every time code lands on main. Calls the notify-push Supabase edge function,
+# which looks up admins with a phone on file and sends each a clean SMS.
+#
+# One-time setup: add a repo secret named NOTIFY_PUSH_TOKEN
+#   (Settings > Secrets and variables > Actions > New repository secret)
+#   with the token value Claude gave you. Without it, this step no-ops.
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Text admins the update
+        env:
+          NOTIFY_TOKEN: ${{ secrets.NOTIFY_PUSH_TOKEN }}
+          COMMITS_JSON: ${{ toJSON(github.event.commits) }}
+          REF: ${{ github.ref }}
+          PUSHER: ${{ github.actor }}
+          REPO: ${{ github.repository }}
+        run: |
+          PAYLOAD=$(jq -n \
+            --argjson commits "${COMMITS_JSON:-[]}" \
+            --arg ref "$REF" \
+            --arg pusher "$PUSHER" \
+            --arg repo "$REPO" \
+            '{ref: $ref, pusher: $pusher, repo: $repo, commits: $commits}')
+          curl -sS -X POST "https://ozoonpwuyusvksmydkuu.supabase.co/functions/v1/notify-push" \
+            -H "Content-Type: application/json" \
+            -H "x-notify-token: $NOTIFY_TOKEN" \
+            -d "$PAYLOAD"

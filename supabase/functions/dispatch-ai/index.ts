@@ -49,6 +49,8 @@ Guidelines:
 - Use add_property_photo to log a dated photo/missed-pickup entry onto an ADDRESS's file (e.g. "log that 123 Main wasn't picked up June 24, bin not out"). You can't take a picture yourself, so unless the user gives you an image_url this logs a dated note the owner attaches the real photo to in Clients › property › Photos. Always set the date to the day it applies to. Resolve the property by address (add client_name if ambiguous); if it returns needs_clarification, ask which match.
 - Use text_invoice to text a client their invoice with a Stripe payment link (by invoice number, or client name for their newest unpaid). Pass preview_to with a staff member's name to send them a preview first — the invoice isn't marked sent until you call it for real. You still cannot charge cards directly.
 - BUSINESS LINES: the company runs three lines — waste (Waste & Recycling: recurring routed pickups), junk (Junk Removal: ONE-TIME jobs on a calendar, no routes), and lawn (Lawn Care). You see across ALL lines. Junk jobs are created with create_job and live on the Junk calendar. create_job automatically checks how close the job address is to that day's route stops and returns route_proximity — always mention it when scheduling (e.g. "booked it — it's 0.4 mi from stop 8 on Route A, so slot it after that stop" or "heads up, nearest route stop that day is 11 mi away"). If the proximity is far, offer to check other days' routes with list_route_stops to find a better date. When staff ask when a junk job could fit BEFORE booking, look at that day's trash routes (list_route_stops) and the job addresses, and recommend a slot near where a route already passes.
+- YOU CAN ALSO LOOK THINGS UP across the whole business (read-only): a client's invoices & outstanding balance (get_client_invoices), a tech's pay & clocked hours for a period (get_tech_pay), proof-of-service visit history with check-in/out times, GPS and photo counts (get_service_history), the recent activity feed (list_activity), text-message history (list_messages), the team/staff roster with roles & phones (list_team), portal quotes (list_quotes), and portal service requests (list_service_requests). Reach for these whenever staff ask "what does X owe / how much did Y earn / did we service Z / what happened today / who's on the team / any new requests"; don't say you can't access it — use the tool.
+- SERVICE CLEANUP: the app's service list is just the distinct 'service' values across properties, so duplicates and typos pile up. list_services shows a count per service and flags likely duplicates. Use merge_service to fix them in bulk — rename/merge one service into another across all properties (or one client), or clear a bad one (clear:true). E.g. 'switch everything on "Weekly trash pick up & removal - 1 day" to "1 weekly"' → merge_service from_service:that, to_service:"1 weekly". Offer preview:true first for big changes. This is the bulk service edit you previously couldn't do — you CAN now, so don't refuse it.
 - After making a change, confirm what you did in one short sentence.`
 
 // Selectable personalities for Randy's STAFF chat replies. The customer-facing
@@ -417,8 +419,24 @@ const tools = [
   {
     name: "list_services",
     description:
-      "List the services the company offers (plain names, derived from the service recorded on each property). Use when asked 'what services do we offer?'. When answering, give just the list of names — no descriptions or commentary per item.",
+      "List the services the company offers — each with how many properties use it (usage) and a possible_duplicates list flagging near-identical names (case/spacing variants). Derived from the service recorded on each property. Use when asked 'what services do we offer?'. When answering, give just the list of names — no descriptions or commentary per item.",
     input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "merge_service",
+    description:
+      "Bulk-rename, merge, or clear a SERVICE across many properties at once — the fix for duplicate or messy service names. Sets the service field on every property currently using from_service (case-insensitive exact match) to a new value. Use to merge duplicates ('change everything using \"Combo Service\" to \"Combo\"'), swap one service for another ('switch all \"Weekly trash pick up & removal - 1 day\" properties to \"1 weekly\"'), or clear a bad name (set clear:true). The app's service list is derived from these property values, so this is how you clean it up. Optionally scope to one client, or pass preview:true first to see how many properties would change before applying.",
+    input_schema: {
+      type: "object",
+      properties: {
+        from_service: { type: "string", description: "Exact current service name to change (case-insensitive). Get exact names from list_services." },
+        to_service: { type: "string", description: "New service name to set on matching properties. Omit and set clear:true to unset instead." },
+        clear: { type: "boolean", description: "True to CLEAR the service (set to none) on matching properties instead of renaming." },
+        client_name: { type: "string", description: "Optional — only change this client's properties. Omit to apply across all clients." },
+        preview: { type: "boolean", description: "If true, only report how many properties WOULD change, without changing anything." },
+      },
+      required: ["from_service"],
+    },
   },
   {
     name: "create_job",
@@ -510,6 +528,107 @@ const tools = [
       required: ["on"],
     },
   },
+  {
+    name: "get_client_invoices",
+    description:
+      "Look up a specific client's invoices and what they still owe — their billing history. Returns each invoice (number, status, total, due date, paid date) plus the total outstanding. Use for 'what does <client> owe?', 'show me the Smith invoices', 'is Acme paid up?'. Give a client name or customer_id.",
+    input_schema: {
+      type: "object",
+      properties: {
+        client_name: { type: "string", description: "Client/business name to look up." },
+        customer_id: { type: "string", description: "Client id, if you already have it from find_clients." },
+        include_paid: { type: "boolean", description: "Include already-paid invoices too (default true)." },
+      },
+    },
+  },
+  {
+    name: "get_tech_pay",
+    description:
+      "Get an employee's pay and hours for a period — how much a tech/driver has earned and worked. Sums per-job pay for their completed stops (a stop counts once it has a check-in, a check-out AND a photo, or an approved override) and totals their clocked hours from timesheets. Use for 'how much does Jose get paid this week?', 'what has Marcus earned this month?', 'hours for the crew last week'. Omit the employee to get every tech's totals. Default period is this week (Sun–Sat).",
+    input_schema: {
+      type: "object",
+      properties: {
+        employee: { type: "string", description: "Employee/driver name or email. Omit for all techs." },
+        period: { type: "string", enum: ["this_week", "last_week", "this_month", "last_month"], description: "Shortcut period. Defaults to this_week." },
+        start_date: { type: "string", description: "Range start YYYY-MM-DD (use with end_date instead of period)." },
+        end_date: { type: "string", description: "Range end YYYY-MM-DD (inclusive)." },
+      },
+    },
+  },
+  {
+    name: "get_service_history",
+    description:
+      "Proof-of-service history for an address or client — recent visits with check-in and check-out times, how many photos were taken, whether the tech marked 'on my way', and GPS. Use for 'did we service 123 Main last week?', 'when were we last at the Palm Coast property?', 'show me proof we showed up for Acme'. Give an address (best) or a client name.",
+    input_schema: {
+      type: "object",
+      properties: {
+        address: { type: "string", description: "Service address (or part of it)." },
+        client_name: { type: "string", description: "Client name — pulls visits across all their properties." },
+        limit: { type: "number", description: "Max visits (default 20)." },
+      },
+    },
+  },
+  {
+    name: "list_activity",
+    description:
+      "List recent activity-log entries — the running feed of what happened in the CRM (check-ins/outs, photos, invoices created/paid, clients added, texts sent, etc.). Use for 'what's happened today?', 'recent activity'. Optionally filter by type.",
+    input_schema: {
+      type: "object",
+      properties: {
+        type: { type: "string", description: "Optional activity type filter (e.g. 'check_in', 'invoice_paid')." },
+        limit: { type: "number", description: "Max entries (default 30)." },
+      },
+    },
+  },
+  {
+    name: "list_messages",
+    description:
+      "List recent text messages (SMS) sent or received — the message history. Use for 'what texts went out today?', 'did we hear back from <client>?', 'show me the last messages to that number'. Give a client name or phone to filter to one conversation, or omit for the latest across everyone.",
+    input_schema: {
+      type: "object",
+      properties: {
+        client_name: { type: "string", description: "Filter to one client's texts." },
+        phone: { type: "string", description: "Filter to one phone number." },
+        limit: { type: "number", description: "Max messages (default 25)." },
+      },
+    },
+  },
+  {
+    name: "list_team",
+    description:
+      "List the team / staff roster — everyone with a login, their role (admin/staff), whether they're a driver, phone, email, and which business lines they work. Use for 'who's on the team?', 'which drivers do we have?', 'what's Jose's number?'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        drivers_only: { type: "boolean", description: "If true, only staff flagged as drivers." },
+      },
+    },
+  },
+  {
+    name: "list_quotes",
+    description:
+      "List quotes sent to clients through the portal — number, title, total, status, and who it's for. Use for 'what quotes are outstanding?', 'did <client> accept their quote?'. Optionally filter by client or status.",
+    input_schema: {
+      type: "object",
+      properties: {
+        client_name: { type: "string", description: "Filter to one client." },
+        status: { type: "string", description: "Filter by status, e.g. 'sent', 'accepted', 'declined'." },
+        limit: { type: "number", description: "Max quotes (default 25)." },
+      },
+    },
+  },
+  {
+    name: "list_service_requests",
+    description:
+      "List service requests customers submitted through the portal (extra pickups, questions, issues) — the kind, message, status, and which client. Use for 'any new service requests?', 'what did customers ask for in the portal?'. Optionally filter by status.",
+    input_schema: {
+      type: "object",
+      properties: {
+        status: { type: "string", description: "Filter by status, e.g. 'new', 'open', 'done'." },
+        limit: { type: "number", description: "Max requests (default 25)." },
+      },
+    },
+  },
 ]
 
 // ---- PostgREST helpers (service role) ----
@@ -581,6 +700,7 @@ function logForTool(name: string, out: any): Promise<void> | undefined {
     case "text_invoice": return out.ok ? logActivity(out.preview ? "invoice_previewed" : "invoice_texted", out.preview ? `Previewed invoice ${out.invoice} to ${out.sent_to}` : `Texted invoice ${out.invoice} to ${out.client}`, "invoice") : undefined
     case "suggest_automation": return out.ok ? logActivity("automation_suggested", `Suggested automation: ${out.name}`) : undefined
     case "create_job": return out.ok ? logActivity("job_created", `Scheduled a job${out.address ? ` at ${out.address}` : ""} for ${out.date}`, "job", out.id) : undefined
+    case "merge_service": return out.changed ? logActivity("service_merged", `Changed ${out.changed} propert${out.changed === 1 ? "y" : "ies"} from \"${out.from}\" to ${out.to == null ? "(none)" : `\"${out.to}\"`}`, "property") : undefined
     default: return undefined
   }
 }
@@ -1274,9 +1394,58 @@ async function listRouteStops(a: any) {
 }
 
 async function listServices() {
-  const rows = await sbGet(`properties?select=service&service=not.is.null&limit=2000`)
-  const services = [...new Set(rows.map((r: any) => String(r.service || "").trim()).filter(Boolean))].sort()
-  return services.length ? { services } : { services, note: "No services recorded on properties yet." }
+  const rows = await sbGet(`properties?select=service&limit=5000`)
+  const counts: Record<string, number> = {}
+  for (const r of rows) {
+    const v = String(r.service ?? "").trim()
+    if (!v) continue
+    counts[v] = (counts[v] || 0) + 1
+  }
+  const usage = Object.entries(counts)
+    .map(([service, properties]) => ({ service, properties }))
+    .sort((a, b) => b.properties - a.properties || a.service.localeCompare(b.service))
+  const services = usage.map((u) => u.service)
+  // Flag likely duplicates: same value ignoring case / extra spacing.
+  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim()
+  const byNorm: Record<string, string[]> = {}
+  for (const s of services) (byNorm[norm(s)] ||= []).push(s)
+  const possible_duplicates = Object.values(byNorm).filter((g) => g.length > 1)
+  if (!services.length) return { count: 0, services: [], note: "No services recorded on properties yet." }
+  return { count: services.length, services, usage, ...(possible_duplicates.length ? { possible_duplicates } : {}) }
+}
+
+// Bulk rename / merge / clear a service across many properties (the fix for
+// duplicate service names). Services are derived from properties.service.
+async function mergeService(a: any) {
+  const from = String(a.from_service ?? "").trim()
+  if (!from) return { error: "Tell me which service to change (from_service)." }
+  const clear = a.clear === true || a.to_service === null
+  const to = a.to_service == null ? "" : String(a.to_service).trim()
+  if (!clear && !to) return { error: "Give me the new service name (to_service), or set clear:true to unset it." }
+  let scope = ""
+  let scopeLabel = "all clients"
+  if (a.client_name) {
+    const custs = await sbGet(`customers?name=ilike.${enc(`*${String(a.client_name).trim()}*`)}&select=id,name&limit=25`)
+    if (!custs.length) return { error: `No client matches "${a.client_name}".` }
+    scope = `&customer_id=in.(${custs.map((c: any) => c.id).join(",")})`
+    scopeLabel = custs.length === 1 ? custs[0].name : `${custs.length} matching clients`
+  }
+  // Case-insensitive EXACT match on the whole value (escape ilike wildcards).
+  const esc = from.replace(/([%_])/g, "\\$1")
+  const matchFilter = `service=ilike.${enc(esc)}`
+  const matches = await sbGet(`properties?${matchFilter}${scope}&select=id&limit=5000`)
+  if (!matches.length) return { from, matched: 0, changed: 0, note: `No properties are using "${from}"${a.client_name ? ` for ${scopeLabel}` : ""}.` }
+  if (a.preview) {
+    return { preview: true, from, to: clear ? null : to, scope: scopeLabel, matched: matches.length, note: `${matches.length} propert${matches.length === 1 ? "y" : "ies"} would change. Call again without preview to apply.` }
+  }
+  const ids = matches.map((m: any) => m.id)
+  let changed = 0
+  for (let i = 0; i < ids.length; i += 100) {
+    const chunk = ids.slice(i, i + 100)
+    const patched = await sbPatch(`properties?id=in.(${chunk.join(",")})`, { service: clear ? null : to })
+    changed += patched.length
+  }
+  return { from, to: clear ? null : to, scope: scopeLabel, matched: matches.length, changed }
 }
 
 async function createJobTool(a: any) {
@@ -1522,6 +1691,193 @@ async function sendSmsTool(a: any) {
   return { ok: true, to: recipient, phone, provider: d.provider || null }
 }
 
+// ---- read-only lookup tools (billing, pay, proof-of-service, activity, etc.) ----
+async function resolveClient(a: any): Promise<any> {
+  if (a.customer_id) {
+    const c = await sbGet(`customers?id=eq.${enc(a.customer_id)}&select=id,name&limit=1`)
+    if (!c[0]) return { error: "No client with that id." }
+    return { id: c[0].id, name: c[0].name }
+  }
+  const q = String(a.client_name || "").trim()
+  if (!q) return { error: "Give me a client name or customer_id." }
+  const rows = await sbGet(`customers?name=ilike.${enc(`*${q}*`)}&select=id,name&limit=6`)
+  if (!rows.length) return { error: `No client matches "${q}".` }
+  if (rows.length > 1) return { needs_clarification: true, candidates: rows.map((r: any) => ({ id: r.id, name: r.name })) }
+  return { id: rows[0].id, name: rows[0].name }
+}
+
+function payPeriodRange(a: any): { start: string; end: string } {
+  const iso = (d: Date) => d.toISOString().slice(0, 10)
+  if (a.start_date && a.end_date) return { start: String(a.start_date).trim(), end: String(a.end_date).trim() }
+  const now = new Date()
+  const p = a.period || "this_week"
+  if (p === "this_month" || p === "last_month") {
+    const m = now.getMonth() + (p === "last_month" ? -1 : 0)
+    return { start: iso(new Date(now.getFullYear(), m, 1)), end: iso(new Date(now.getFullYear(), m + 1, 0)) }
+  }
+  const base = new Date(now)
+  base.setDate(base.getDate() - base.getDay() + (p === "last_week" ? -7 : 0))
+  const end = new Date(base)
+  end.setDate(end.getDate() + 6)
+  return { start: iso(base), end: iso(end) }
+}
+
+async function getClientInvoices(a: any) {
+  const c = await resolveClient(a)
+  if (c.error || c.needs_clarification) return c
+  const includePaid = a.include_paid !== false
+  let q = `invoices?customer_id=eq.${enc(c.id)}&select=number,status,total,due_date,paid_at,created_at&order=created_at.desc&limit=50`
+  if (!includePaid) q += `&status=neq.paid`
+  const rows = await sbGet(q)
+  const outstanding = round2(rows.filter((i: any) => i.status !== "paid" && i.status !== "draft").reduce((s: number, i: any) => s + Number(i.total || 0), 0))
+  return {
+    client: c.name,
+    outstanding_balance: outstanding,
+    count: rows.length,
+    invoices: rows.map((i: any) => ({ number: i.number, status: i.status, total: Number(i.total || 0), due: i.due_date, paid_at: i.paid_at, created: i.created_at })),
+  }
+}
+
+async function getTechPay(a: any) {
+  const { start, end } = payPeriodRange(a)
+  let onlyDriverId: string | null = null
+  if (a.employee) {
+    const like = enc(`*${String(a.employee).trim()}*`)
+    const profs = await sbGet(`profiles?or=(full_name.ilike.${like},email.ilike.${like})&select=id,full_name,email&limit=5`)
+    if (!profs.length) return { error: `No employee matches "${a.employee}".` }
+    if (profs.length > 1) return { needs_clarification: true, matches: profs.map((p: any) => p.full_name || p.email), note: "Which employee?" }
+    onlyDriverId = profs[0].id
+  }
+  let sq = `route_stops?select=tech_pay,check_in,check_out,pay_override,properties(tech_pay),routes!inner(driver_id,service_date),stop_photos(id)&routes.service_date=gte.${enc(start)}&routes.service_date=lte.${enc(end)}&limit=3000`
+  if (onlyDriverId) sq += `&routes.driver_id=eq.${enc(onlyDriverId)}`
+  const stops = await sbGet(sq)
+  const byDriver: Record<string, { payable: number; pending: number; jobs: number }> = {}
+  for (const s of stops) {
+    const drv = s.routes?.driver_id
+    if (!drv) continue
+    const pay = Number(s.tech_pay ?? s.properties?.tech_pay ?? 0)
+    const complete = !!(s.check_in && s.check_out && (s.stop_photos || []).length > 0)
+    const d = (byDriver[drv] ||= { payable: 0, pending: 0, jobs: 0 })
+    d.jobs++
+    if (complete || s.pay_override) d.payable += pay
+    else d.pending += pay
+  }
+  const ids = Object.keys(byDriver)
+  const names: Record<string, string> = {}
+  if (ids.length) for (const p of await sbGet(`profiles?id=in.(${ids.join(",")})&select=id,full_name,email`)) names[p.id] = p.full_name || p.email
+  const hoursById: Record<string, number> = {}
+  if (ids.length) {
+    const ts = await sbGet(`timesheets?profile_id=in.(${ids.join(",")})&work_date=gte.${enc(start)}&work_date=lte.${enc(end)}&select=profile_id,clock_in,clock_out`)
+    for (const t of ts) {
+      if (!t.clock_in || !t.clock_out) continue
+      const h = (new Date(t.clock_out).getTime() - new Date(t.clock_in).getTime()) / 3600000
+      if (h > 0) hoursById[t.profile_id] = (hoursById[t.profile_id] || 0) + h
+    }
+  }
+  const people = ids.map((id) => ({
+    employee: names[id] || "(unknown)",
+    payable: round2(byDriver[id].payable),
+    pending: round2(byDriver[id].pending),
+    jobs: byDriver[id].jobs,
+    hours: hoursById[id] ? Math.round(hoursById[id] * 10) / 10 : 0,
+  })).sort((x, y) => y.payable - x.payable)
+  return { period: { start, end }, count: people.length, pay: people, note: "Payable = jobs with check-in + check-out + photo (or an approved override). Pending = not complete yet." }
+}
+
+async function getServiceHistory(a: any) {
+  const limit = Number(a.limit) > 0 ? Math.min(Math.floor(Number(a.limit)), 100) : 20
+  let propFilter = ""
+  let label = ""
+  if (a.address) {
+    const like = enc(`*${String(a.address).trim()}*`)
+    const props = await sbGet(`properties?or=(address.ilike.${like},name.ilike.${like})&select=id&limit=50`)
+    if (!props.length) return { count: 0, visits: [], note: `No property matches "${a.address}".` }
+    propFilter = `&property_id=in.(${props.map((p: any) => p.id).join(",")})`
+    label = String(a.address)
+  } else if (a.client_name) {
+    const custs = await sbGet(`customers?name=ilike.${enc(`*${String(a.client_name).trim()}*`)}&select=id&limit=10`)
+    if (!custs.length) return { count: 0, visits: [], note: `No client matches "${a.client_name}".` }
+    const props = await sbGet(`properties?customer_id=in.(${custs.map((c: any) => c.id).join(",")})&select=id&limit=500`)
+    if (!props.length) return { count: 0, visits: [] }
+    propFilter = `&property_id=in.(${props.map((p: any) => p.id).join(",")})`
+    label = String(a.client_name)
+  } else {
+    return { error: "Give me an address or a client name." }
+  }
+  const stops = await sbGet(`route_stops?select=check_in,check_out,on_my_way_at,status,check_in_lat,check_in_lng,properties(address,name),routes(service_date,code),stop_photos(id)${propFilter}&order=check_in.desc.nullslast&limit=${limit}`)
+  return {
+    of: label,
+    count: stops.length,
+    visits: stops.map((s: any) => ({
+      date: s.routes?.service_date,
+      address: s.properties?.address || s.properties?.name,
+      on_my_way: s.on_my_way_at,
+      checked_in: s.check_in,
+      checked_out: s.check_out,
+      photos: (s.stop_photos || []).length,
+      gps: s.check_in_lat != null ? `${s.check_in_lat},${s.check_in_lng}` : null,
+      status: s.check_out ? "completed" : s.check_in ? "in progress" : "not serviced",
+    })),
+  }
+}
+
+async function listActivity(a: any) {
+  const limit = Number(a.limit) > 0 ? Math.min(Math.floor(Number(a.limit)), 100) : 30
+  let q = `activity_log?select=created_at,actor,type,summary&order=created_at.desc&limit=${limit}`
+  if (a.type) q += `&type=eq.${enc(String(a.type).trim())}`
+  const rows = await sbGet(q)
+  return { count: rows.length, activity: rows }
+}
+
+async function listMessages(a: any) {
+  const limit = Number(a.limit) > 0 ? Math.min(Math.floor(Number(a.limit)), 100) : 25
+  let filter = ""
+  if (a.client_name) {
+    const custs = await sbGet(`customers?name=ilike.${enc(`*${String(a.client_name).trim()}*`)}&select=id&limit=5`)
+    if (!custs.length) return { count: 0, messages: [], note: `No client matches "${a.client_name}".` }
+    filter = `&customer_id=in.(${custs.map((c: any) => c.id).join(",")})`
+  } else if (a.phone) {
+    const digits = String(a.phone).replace(/\D/g, "")
+    if (digits) filter = `&or=(to_number.ilike.*${digits}*,from_number.ilike.*${digits}*)`
+  }
+  const rows = await sbGet(`sms_messages?select=created_at,direction,to_number,from_number,body,status,purpose${filter}&order=created_at.desc&limit=${limit}`)
+  return { count: rows.length, messages: rows.map((m: any) => ({ at: m.created_at, dir: m.direction, to: m.to_number, from: m.from_number, body: m.body, status: m.status, purpose: m.purpose })) }
+}
+
+async function listTeam(a: any) {
+  let q = `profiles?select=full_name,email,role,is_driver,phone,business_lines&order=full_name.asc&limit=200`
+  if (a.drivers_only) q += `&is_driver=eq.true`
+  const rows = await sbGet(q)
+  return { count: rows.length, team: rows.map((p: any) => ({ name: p.full_name, email: p.email, role: p.role, driver: !!p.is_driver, phone: p.phone, lines: p.business_lines || [] })) }
+}
+
+async function listQuotes(a: any) {
+  const limit = Number(a.limit) > 0 ? Math.min(Math.floor(Number(a.limit)), 100) : 25
+  let filter = ""
+  if (a.client_name) {
+    const custs = await sbGet(`customers?name=ilike.${enc(`*${String(a.client_name).trim()}*`)}&select=id&limit=5`)
+    if (!custs.length) return { count: 0, quotes: [], note: `No client matches "${a.client_name}".` }
+    filter += `&customer_id=in.(${custs.map((c: any) => c.id).join(",")})`
+  }
+  if (a.status) filter += `&status=eq.${enc(String(a.status).trim())}`
+  const rows = await sbGet(`quotes?select=number,title,total,status,created_at,customer_id${filter}&order=created_at.desc&limit=${limit}`)
+  const ids = [...new Set(rows.map((r: any) => r.customer_id).filter(Boolean))]
+  const names: Record<string, string> = {}
+  if (ids.length) for (const c of await sbGet(`customers?id=in.(${ids.join(",")})&select=id,name`)) names[c.id] = c.name
+  return { count: rows.length, quotes: rows.map((r: any) => ({ number: r.number, title: r.title, total: Number(r.total || 0), status: r.status, created: r.created_at, client: r.customer_id ? (names[r.customer_id] || null) : null })) }
+}
+
+async function listServiceRequests(a: any) {
+  const limit = Number(a.limit) > 0 ? Math.min(Math.floor(Number(a.limit)), 100) : 25
+  let q = `portal_requests?select=kind,message,status,created_at,customer_id,property_ids&order=created_at.desc&limit=${limit}`
+  if (a.status) q += `&status=eq.${enc(String(a.status).trim())}`
+  const rows = await sbGet(q)
+  const ids = [...new Set(rows.map((r: any) => r.customer_id).filter(Boolean))]
+  const names: Record<string, string> = {}
+  if (ids.length) for (const c of await sbGet(`customers?id=in.(${ids.join(",")})&select=id,name`)) names[c.id] = c.name
+  return { count: rows.length, requests: rows.map((r: any) => ({ kind: r.kind, message: r.message, status: r.status, created: r.created_at, client: r.customer_id ? (names[r.customer_id] || null) : null, properties: (r.property_ids || []).length })) }
+}
+
 async function runTool(name: string, input: any): Promise<unknown> {
   switch (name) {
     case "find_clients": return await findClients(input)
@@ -1555,6 +1911,15 @@ async function runTool(name: string, input: any): Promise<unknown> {
     case "text_invoice": return await textInvoiceTool(input)
     case "send_sms": return await sendSmsTool(input)
     case "set_completion_texts": return await setCompletionTexts(input)
+    case "merge_service": return await mergeService(input)
+    case "get_client_invoices": return await getClientInvoices(input)
+    case "get_tech_pay": return await getTechPay(input)
+    case "get_service_history": return await getServiceHistory(input)
+    case "list_activity": return await listActivity(input)
+    case "list_messages": return await listMessages(input)
+    case "list_team": return await listTeam(input)
+    case "list_quotes": return await listQuotes(input)
+    case "list_service_requests": return await listServiceRequests(input)
     default: throw new Error(`Unknown tool: ${name}`)
   }
 }
@@ -1638,7 +2003,7 @@ Deno.serve(async (req) => {
         if (block.type !== "tool_use") continue
         try {
           const out = await runTool(block.name, block.input)
-          if (block.name !== "find_clients" && block.name !== "get_overview" && block.name !== "list_routes" && block.name !== "list_needs_review" && block.name !== "find_duplicates" && block.name !== "list_skipped_stops" && block.name !== "list_route_stops" && block.name !== "list_services" && block.name !== "list_automations" && block.name !== "list_jobs") {
+          if (block.name !== "find_clients" && block.name !== "get_overview" && block.name !== "list_routes" && block.name !== "list_needs_review" && block.name !== "find_duplicates" && block.name !== "list_skipped_stops" && block.name !== "list_route_stops" && block.name !== "list_services" && block.name !== "list_automations" && block.name !== "list_jobs" && block.name !== "get_client_invoices" && block.name !== "get_tech_pay" && block.name !== "get_service_history" && block.name !== "list_activity" && block.name !== "list_messages" && block.name !== "list_team" && block.name !== "list_quotes" && block.name !== "list_service_requests") {
             actions.push({ tool: block.name, result: out })
             await logForTool(block.name, out)
           }
