@@ -50,6 +50,7 @@ export async function loadActiveSchedules(line) {
   let q = supabase
     .from('properties')
     .select('id, customer_id, service, pickup_days, pickup_frequency, pickup_start_date, business_line')
+    .eq('paused', false) // paused addresses are off all routes
   if (line) q = q.eq('business_line', line)
   const { data, error } = await q
   if (error) throw error
@@ -120,6 +121,7 @@ export async function loadRouteSlice(code = 'B', date = null, line = null) {
   let pq = supabase
     .from('properties')
     .select('id, name, service, lat, lng, pickup_days, pickup_frequency, pickup_start_date, needs_review')
+    .eq('paused', false) // paused addresses never show up as unrouted/due
   if (line) pq = pq.eq('business_line', line) // only this line's properties can be "unrouted" here
   const { data: props, error: pErr } = await pq
   if (pErr) throw pErr
@@ -400,6 +402,7 @@ export async function loadAllProperties(line) {
   let q = supabase
     .from('properties')
     .select('id, name, address, service, lat, lng, needs_review, customer_id, customers(name)')
+    .eq('paused', false) // can't hand-add a paused address to a route
   if (line) q = q.eq('business_line', line)
   const { data, error } = await q.order('name', { ascending: true })
   if (error) throw error

@@ -61,7 +61,7 @@ export default function Dashboard({ app }) {
     // A property is due today if any of its pickup days lands on today's date
     // (respecting frequency / start date) and its client isn't paused.
     const todayPickups = schedules.filter(
-      (p) => p.customerStatus !== 'paused' && (p.days || []).some((d) => scheduleHitsDate({ day_of_week: d, frequency: p.frequency, start_date: p.startDate, active: true }, today))
+      (p) => p.customerStatus !== 'paused' && !p.paused && (p.days || []).some((d) => scheduleHitsDate({ day_of_week: d, frequency: p.frequency, start_date: p.startDate, active: true }, today))
     )
     const outstanding = round2(invoices.filter((i) => i.status === 'sent').reduce((a, i) => a + i.total, 0))
     const collected = round2(invoices.filter((i) => i.status === 'paid').reduce((a, i) => a + i.total, 0))

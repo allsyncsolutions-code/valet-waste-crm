@@ -101,7 +101,7 @@ export function subscribeSchedules(cb) {
 export async function loadPropertyPickups(line) {
   let q = supabase
     .from('properties')
-    .select('id, name, address, service, pickup_days, pickup_frequency, pickup_start_date, needs_review, business_line, customer_id, customers(name,status)')
+    .select('id, name, address, service, pickup_days, pickup_frequency, pickup_start_date, needs_review, paused, business_line, customer_id, customers(name,status)')
   if (line) q = q.eq('business_line', line)
   const { data, error } = await q.order('name', { ascending: true })
   if (error) throw error
@@ -117,6 +117,7 @@ export async function loadPropertyPickups(line) {
     customerId: p.customer_id,
     customerName: p.customers?.name || 'Unknown',
     customerStatus: p.customers?.status || 'active',
+    paused: !!p.paused,
   }))
 }
 

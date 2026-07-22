@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { MONO } from '../data.js'
-import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, addProperty, updateProperty, loadPropertyVisits, loadPropertyAddressIndex, countDuplicateProperties, findDuplicateProperties, mergeProperties, deleteProperty, sendPortalInvite, loadClientFieldActivity } from '../lib/customersData.js'
+import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, addProperty, updateProperty, loadPropertyVisits, loadPropertyAddressIndex, countDuplicateProperties, findDuplicateProperties, mergeProperties, deleteProperty, sendPortalInvite, loadClientFieldActivity, loadClientNotes, addClientNote, deleteClientNote } from '../lib/customersData.js'
 import { geocodeAll } from '../lib/importData.js'
 import { listTags, findOrCreateTag, subscribeTags } from '../lib/tagsData.js'
 import { stripeStatus, stripePaymentLink } from '../lib/stripeData.js'
@@ -91,6 +91,9 @@ export default function Clients({ app }) {
   const [actEvents, setActEvents] = useState([])
   const [actBusy, setActBusy] = useState(false)
   const [actSearch, setActSearch] = useState('')
+  const [notes, setNotes] = useState([])
+  const [noteInput, setNoteInput] = useState('')
+  const [noteBusy, setNoteBusy] = useState(false)
 
   // Load the selected client's service properties.
   useEffect(() => {
@@ -110,6 +113,14 @@ export default function Clients({ app }) {
       .then((r) => { if (alive) setActEvents(r) })
       .catch(() => { if (alive) setActEvents([]) })
       .finally(() => { if (alive) setActBusy(false) })
+    return () => { alive = false }
+  }, [selId])
+
+  // Per-client notes log (running history).
+  useEffect(() => {
+    if (!selId) { setNotes([]); return }
+    let alive = true
+    loadClientNotes(selId).then((r) => { if (alive) setNotes(r) }).catch(() => { if (alive) setNotes([]) })
     return () => { alive = false }
   }, [selId])
 
@@ -352,6 +363,67 @@ export default function Clients({ app }) {
     }
   }
 
+  // Pause / resume a single address. Paused addresses keep all their history
+  // but are skipped by every route builder + the dashboard due-count.
+  async function togglePause(p) {
+    if (pBusy) return
+    setPBusy(true)
+    setErr(null)
+    try {
+      await updateProperty(p.id, { paused: !p.paused })
+      setProps(await loadProperties(selId))
+    } catch (e) {
+      setErr(e.message || String(e))
+    } finally {
+      setPBusy(false)
+    }
+  }
+
+  // Permanently delete an address (removes it from all routes). Prefer Pause to
+  // keep history; this is the hard delete for addresses added in error / dropped.
+  async function delProp(p) {
+    if (pBusy) return
+    if (!window.confirm(`Delete this address?\n\n${p.address || p.name}\n\nThis removes it from all routes and can't be undone. To keep its history but stop servicing it, use Pause instead.`)) return
+    setPBusy(true)
+    setErr(null)
+    try {
+      await deleteProperty(p.id)
+      if (editPid === p.id) setEditPid(null)
+      setProps(await loadProperties(selId))
+      countDuplicateProperties().then(setDupCount).catch(() => {})
+    } catch (e) {
+      setErr(e.message || String(e))
+    } finally {
+      setPBusy(false)
+    }
+  }
+
+  // Per-client notes log: add / delete a dated note.
+  async function submitNote(e) {
+    if (e) e.preventDefault()
+    const body = noteInput.trim()
+    if (!body || noteBusy || !selId) return
+    setNoteBusy(true)
+    setErr(null)
+    try {
+      const n = await addClientNote(selId, body)
+      setNotes((cur) => [n, ...cur])
+      setNoteInput('')
+    } catch (err) { setErr(err.message || String(err)) }
+    finally { setNoteBusy(false) }
+  }
+  async function removeNote(n) {
+    if (noteBusy) return
+    if (!window.confirm('Delete this note?')) return
+    setNoteBusy(true)
+    setErr(null)
+    try {
+      await deleteClientNote(n.id)
+      setNotes((cur) => cur.filter((x) => x.id !== n.id))
+    } catch (err) { setErr(err.message || String(err)) }
+    finally { setNoteBusy(false) }
+  }
+
   // Email the client their portal invite (login link + save-a-card / 5th-week-free pitch).
   async function invitePortal() {
     if (!cur || inviteBusy) return
@@ -587,6 +659,29 @@ export default function Clients({ app }) {
             </div>
 
             <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '18px 20px' }}>
+              <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 12 }}>Notes</div>
+              <form onSubmit={submitNote} style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+                <textarea value={noteInput} onChange={(e) => setNoteInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submitNote(e) }} placeholder="Add a note about this client… (⌘/Ctrl+Enter to save)" rows={2} style={{ ...inp, flex: 1, fontSize: 13, resize: 'vertical', fontFamily: 'inherit' }} />
+                <button type="submit" disabled={noteBusy || !noteInput.trim()} style={{ flex: 'none', alignSelf: 'flex-start', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '9px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: noteBusy || !noteInput.trim() ? 0.6 : 1 }}>{noteBusy ? 'Saving…' : 'Add'}</button>
+              </form>
+              {!notes.length ? (
+                <div style={{ fontSize: 12.5, color: '#9aa69e' }}>No notes yet — add the first one above.</div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {notes.map((n) => (
+                    <div key={n.id} style={{ borderLeft: '2px solid #e7f1eb', paddingLeft: 12 }}>
+                      <div style={{ fontSize: 13.5, color: '#1a2420', whiteSpace: 'pre-wrap', marginBottom: 3 }}>{n.body}</div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span style={{ fontSize: 11.5, color: '#9aa69e' }}>{n.author_name || 'Staff'} · {fmtDate(n.created_at)} {fmtTime(n.created_at)}</span>
+                        <button onClick={() => removeNote(n)} disabled={noteBusy} title="Delete this note" style={{ background: 'none', border: 'none', color: '#c0492f', fontSize: 11.5, fontWeight: 600, cursor: 'pointer', padding: 0, opacity: noteBusy ? 0.6 : 1 }}>Delete</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '18px 20px' }}>
               <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 12 }}>Details</div>
               <Row label="Service" value={cur.pickup?.service || '—'} />
               <Row label="Contact Name" value={cur.contactName || '—'} />
@@ -701,6 +796,9 @@ export default function Clients({ app }) {
                               {p.needs_review && (
                                 <span style={{ fontSize: 11, fontWeight: 700, fontFamily: MONO, color: '#c0492f', background: '#fbeae6', padding: '2px 8px', borderRadius: 6, letterSpacing: '.03em' }}>⚠ Needs review</span>
                               )}
+                              {p.paused && (
+                                <span style={{ fontSize: 11, fontWeight: 700, fontFamily: MONO, color: '#8a6d1e', background: '#f6efdd', padding: '2px 8px', borderRadius: 6, letterSpacing: '.03em' }}>⏸ Paused · off routes</span>
+                              )}
                             </div>
                           </div>
                           {p.price != null && <div style={{ fontSize: 12.5, color: '#5d6b63', flex: 'none' }}>${Number(p.price).toFixed(2)}</div>}
@@ -708,6 +806,8 @@ export default function Clients({ app }) {
                           <button onClick={() => toggleHistory(p)} disabled={histBusy && histPid === p.id} style={{ flex: 'none', background: 'none', border: 'none', color: '#5d6b63', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>{histPid === p.id ? 'Hide' : 'History'}</button>
                           <button onClick={() => togglePhotos(p)} disabled={photoBusy && photoPid === p.id} style={{ flex: 'none', background: 'none', border: 'none', color: '#5d6b63', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>{photoPid === p.id ? 'Hide' : 'Photos'}</button>
                           <button onClick={() => startEditProp(p)} style={{ flex: 'none', background: 'none', border: 'none', color: '#1f7a4d', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>Edit</button>
+                          <button onClick={() => togglePause(p)} disabled={pBusy} title={p.paused ? 'Resume — put this address back on routes' : 'Pause — keep the address but skip it on all routes'} style={{ flex: 'none', background: 'none', border: 'none', color: p.paused ? '#1f7a4d' : '#8a6d1e', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px', opacity: pBusy ? 0.6 : 1 }}>{p.paused ? 'Resume' : 'Pause'}</button>
+                          <button onClick={() => delProp(p)} disabled={pBusy} title="Delete this address permanently" style={{ flex: 'none', background: 'none', border: 'none', color: '#c0492f', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px', opacity: pBusy ? 0.6 : 1 }}>Delete</button>
                         </div>
                         {histPid === p.id && (
                           <div style={{ margin: '6px 0 2px 18px', borderLeft: '2px solid #eef0ed', paddingLeft: 12 }}>

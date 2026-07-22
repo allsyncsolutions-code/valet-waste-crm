@@ -129,7 +129,7 @@ export async function updateCustomer(id, payload) {
 export async function loadProperties(customerId) {
   const { data, error } = await supabase
     .from('properties')
-    .select('id, code, name, address, service, notes, price, tech_pay, lat, lng, pickup_days, pickup_frequency, pickup_start_date, needs_review')
+    .select('id, code, name, address, service, notes, price, tech_pay, lat, lng, pickup_days, pickup_frequency, pickup_start_date, needs_review, paused')
     .eq('customer_id', customerId)
     .order('created_at', { ascending: true })
   if (error) throw error
@@ -181,6 +181,41 @@ export async function loadClientFieldActivity(customerId, limit = 300) {
   }
   events.sort((a, b) => new Date(b.ts) - new Date(a.ts))
   return events
+}
+
+// --- Per-client notes log (running history, newest first). Separate from the
+// single customers.notes summary field. ---
+export async function loadClientNotes(customerId) {
+  const { data, error } = await supabase
+    .from('client_notes')
+    .select('id, body, author_name, created_at')
+    .eq('customer_id', customerId)
+    .order('created_at', { ascending: false })
+  if (error) throw error
+  return data || []
+}
+
+export async function addClientNote(customerId, body) {
+  const { data: u } = await supabase.auth.getUser()
+  const author = u?.user
+  const { data, error } = await supabase
+    .from('client_notes')
+    .insert({
+      customer_id: customerId,
+      author_id: author?.id ?? null,
+      author_name: author?.user_metadata?.full_name || author?.email || 'Staff',
+      body,
+    })
+    .select('id, body, author_name, created_at')
+    .single()
+  if (error) throw error
+  logActivity({ type: 'client_note_added', summary: 'Added a client note', entityType: 'customer', entityId: customerId })
+  return data
+}
+
+export async function deleteClientNote(id) {
+  const { error } = await supabase.from('client_notes').delete().eq('id', id)
+  if (error) throw error
 }
 
 // Email the client a portal invite: one-time login link (7-day expiry) plus
@@ -254,7 +289,7 @@ export async function loadPropertyVisits(propertyId, limit = 20) {
 // geocode-attempt counter so it gets re-geocoded on the next pass.
 export async function updateProperty(id, patch) {
   const fields = {}
-  for (const k of ['code', 'name', 'address', 'service', 'notes', 'price', 'tech_pay', 'pickup_days', 'pickup_frequency', 'needs_review']) {
+  for (const k of ['code', 'name', 'address', 'service', 'notes', 'price', 'tech_pay', 'pickup_days', 'pickup_frequency', 'needs_review', 'paused']) {
     if (patch[k] !== undefined) fields[k] = patch[k]
   }
   if (patch.pickup_start_date !== undefined) fields.pickup_start_date = patch.pickup_start_date || null
