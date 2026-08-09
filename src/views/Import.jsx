@@ -28,6 +28,7 @@ export default function Import({ app }) {
   const [pickupDays, setPickupDays] = useState(['monday'])
   const [pickupFreq, setPickupFreq] = useState('weekly')
   const [markReview, setMarkReview] = useState(false)
+  const [billingType, setBillingType] = useState('subscription') // subscription | one_time
   const [text, setText] = useState('')
 
   const [busy, setBusy] = useState(false)
@@ -66,6 +67,7 @@ export default function Import({ app }) {
       const days = DAYS.filter((d) => pickupDays.includes(d)) // ordered Mon→Sun
       const res = await bulkImport({
         customer_name: clientName.trim(),
+        billing_type: billingType,
         default_service: service || null,
         price: price === '' ? null : Number(price),
         create_schedule: createSchedule,
@@ -157,6 +159,14 @@ export default function Import({ app }) {
           <div>
             <label style={lbl}>Default service</label>
             <input value={service} onChange={(e) => setService(e.target.value)} style={inp} placeholder="Trash / Recycle" />
+          </div>
+          <div>
+            <label style={lbl}>Billing type</label>
+            <select value={billingType} onChange={(e) => setBillingType(e.target.value)} style={inp}>
+              <option value="subscription">Subscription — recurring service</option>
+              <option value="one_time">Single payment — one-time / on-demand</option>
+            </select>
+            <div style={hint}>Use "Single payment" for the Thrive one-time clients — they'll be filterable in Clients.</div>
           </div>
           <div>
             <label style={lbl}>Price per property</label>

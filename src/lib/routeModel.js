@@ -48,6 +48,7 @@ export const STATUS_META = {
   done: { label: 'DONE', color: '#1f7a4d', bg: '#1f7a4d', fg: '#fff' },
   enroute: { label: 'ON SITE', color: '#c08a2e', bg: '#173d2a', fg: '#fff' },
   pending: { label: 'PENDING', color: '#5d6b63', bg: '#eef0ed', fg: '#5d6b63' },
+  skipped: { label: 'SKIPPED', color: '#8a6d1e', bg: '#f6efdd', fg: '#8a6d1e' },
 }
 
 // Stops whose order is locked (already visited / currently being serviced).

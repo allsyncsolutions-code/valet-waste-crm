@@ -4,7 +4,7 @@ import { hasSupabase } from '../lib/supabaseClient.js'
 import { loadCustomers, subscribeCustomers } from '../lib/customersData.js'
 import { loadInvoices, subscribeInvoices, round2 } from '../lib/invoicesData.js'
 import { loadPropertyPickups, subscribeSchedules, freqLabel } from '../lib/schedulesData.js'
-import { scheduleHitsDate } from '../lib/routesData.js'
+import { scheduleHitsDate, loadDayOverrides } from '../lib/routesData.js'
 
 // Local YYYY-MM-DD for "today" (matches how routes key their service_date).
 const todayKey = () => {
@@ -30,14 +30,19 @@ export default function Dashboard({ app }) {
   const [customers, setCustomers] = useState([])
   const [invoices, setInvoices] = useState([])
   const [schedules, setSchedules] = useState([])
+  const [overrides, setOverrides] = useState(null) // one-time day changes for today
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState(null)
 
   async function refresh() {
-    const [c, i, s] = await Promise.all([loadCustomers(), loadInvoices(app.activeLine), loadPropertyPickups(app.activeLine)])
+    const [c, i, s, ov] = await Promise.all([
+      loadCustomers(), loadInvoices(app.activeLine), loadPropertyPickups(app.activeLine),
+      loadDayOverrides(todayKey()).catch(() => null),
+    ])
     setCustomers(c.filter((x) => (x.business_line || 'waste') === (app.activeLine || 'waste')))
     setInvoices(i)
     setSchedules(s)
+    setOverrides(ov)
   }
 
   useEffect(() => {
@@ -60,14 +65,17 @@ export default function Dashboard({ app }) {
     const today = todayKey()
     // A property is due today if any of its pickup days lands on today's date
     // (respecting frequency / start date) and its client isn't paused.
-    const todayPickups = schedules.filter(
-      (p) => p.customerStatus !== 'paused' && !p.paused && (p.days || []).some((d) => scheduleHitsDate({ day_of_week: d, frequency: p.frequency, start_date: p.startDate, active: true }, today))
-    )
+    const todayPickups = schedules.filter((p) => {
+      if (p.customerStatus === 'paused' || p.paused) return false
+      if (overrides?.skips?.has(p.id)) return false // one-time moved off today
+      if (overrides?.extras?.has(p.id)) return true // one-time moved onto today
+      return (p.days || []).some((d) => scheduleHitsDate({ day_of_week: d, frequency: p.frequency, start_date: p.startDate, active: true }, today))
+    })
     const outstanding = round2(invoices.filter((i) => i.status === 'sent').reduce((a, i) => a + i.total, 0))
     const collected = round2(invoices.filter((i) => i.status === 'paid').reduce((a, i) => a + i.total, 0))
     const drafts = invoices.filter((i) => i.status === 'draft').length
     return { activeClients, todayPickups, outstanding, collected, drafts }
-  }, [customers, invoices, schedules])
+  }, [customers, invoices, schedules, overrides])
 
   const recentInvoices = invoices.slice(0, 6)
   const hasAnything = customers.length || invoices.length || schedules.length

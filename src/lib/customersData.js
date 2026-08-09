@@ -20,6 +20,7 @@ function mapCustomer(row) {
     notifyOnService: row.notify_on_service === undefined ? null : row.notify_on_service,
     portal_slug: row.portal_slug || null,
     business_line: row.business_line || 'waste',
+    billingType: row.billing_type || 'subscription', // subscription | one_time
     autopay: {
       saved: !!row.autopay_pm_id,
       brand: row.autopay_card_brand || null,
@@ -58,6 +59,7 @@ export async function createClient(payload) {
       status: payload.status || 'active',
       notes: payload.notes || null,
       business_line: payload.businessLine || 'waste',
+      billing_type: payload.billingType || 'subscription',
       notify_on_service: payload.notifyOnService ?? null,
     })
     .select('*')
@@ -100,6 +102,7 @@ export async function updateCustomer(id, payload) {
       address: payload.address || null,
       status: payload.status || 'active',
       notes: payload.notes || null,
+      billing_type: payload.billingType || 'subscription',
       notify_on_service: payload.notifyOnService ?? null,
     })
     .eq('id', id)
@@ -129,7 +132,7 @@ export async function updateCustomer(id, payload) {
 export async function loadProperties(customerId) {
   const { data, error } = await supabase
     .from('properties')
-    .select('id, code, name, address, service, notes, price, tech_pay, lat, lng, pickup_days, pickup_frequency, pickup_start_date, needs_review, paused')
+    .select('id, code, name, address, service, notes, price, tech_pay, lat, lng, pickup_days, pickup_frequency, pickup_start_date, needs_review, paused, created_by, created_at')
     .eq('customer_id', customerId)
     .order('created_at', { ascending: true })
   if (error) throw error
@@ -271,6 +274,20 @@ export async function deleteProperty(id) {
   return data
 }
 
+// Per-address audit trail: every activity_log entry tied to this property —
+// who added it (Laura / Matt / Trashy Randy / ...), edits, skips, photos.
+export async function loadPropertyLog(propertyId, limit = 100) {
+  const { data, error } = await supabase
+    .from('activity_log')
+    .select('id, type, actor, summary, created_at')
+    .eq('entity_type', 'property')
+    .eq('entity_id', propertyId)
+    .order('created_at', { ascending: false })
+    .limit(limit)
+  if (error) throw error
+  return data || []
+}
+
 // Recent service visits (check-ins/outs) for one property, newest first.
 // Pulled from route_stops where a driver actually checked in.
 export async function loadPropertyVisits(propertyId, limit = 20) {
@@ -296,6 +313,11 @@ export async function updateProperty(id, patch) {
   if (patch.address !== undefined) { fields.lat = null; fields.lng = null; fields.geocode_attempts = 0 }
   const { error } = await supabase.from('properties').update(fields).eq('id', id)
   if (error) throw error
+  // Per-address audit trail (best-effort): what changed, by whom.
+  const changed = Object.keys(fields).filter((k) => !['lat', 'lng', 'geocode_attempts'].includes(k))
+  if (changed.length) {
+    logActivity({ type: 'property_updated', summary: `Updated address (${changed.join(', ')})`, entityType: 'property', entityId: id })
+  }
 }
 
 // Link / unlink a managed tag to a customer.

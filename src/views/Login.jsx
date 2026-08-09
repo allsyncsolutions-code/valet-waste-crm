@@ -3,7 +3,8 @@ import { signIn } from '../lib/authData.js'
 import { supabase } from '../lib/supabaseClient.js'
 
 // Sign-in screen: CLIENT portal login (email → magic link, no slug needed) on
-// top, EMPLOYEE email+password (invite-only) below it.
+// top, EMPLOYEE email+password (invite-only) below it, with a code-based
+// "Forgot password?" flow (staff-reset edge function) for employees.
 export default function Login({ pending, onSignOut, email: initialEmail }) {
   // Inside the mobile app's customer view (?app=client) the employee form is
   // hidden — the app has its own "Staff sign-in" entry in the native header.
@@ -18,6 +19,15 @@ export default function Login({ pending, onSignOut, email: initialEmail }) {
   const [clientBusy, setClientBusy] = useState(false)
   const [clientSent, setClientSent] = useState(false)
   const [clientErr, setClientErr] = useState('')
+
+  // forgot-password state (employee)
+  const [forgot, setForgot] = useState(false)
+  const [fpStep, setFpStep] = useState('email') // 'email' | 'code' | 'done'
+  const [fpCode, setFpCode] = useState('')
+  const [fpPw, setFpPw] = useState('')
+  const [fpPw2, setFpPw2] = useState('')
+  const [fpBusy, setFpBusy] = useState(false)
+  const [fpErr, setFpErr] = useState('')
 
   async function submit(e) {
     e.preventDefault()
@@ -50,6 +60,54 @@ export default function Login({ pending, onSignOut, email: initialEmail }) {
       setClientErr((e2 && e2.message) || String(e2))
     }
     setClientBusy(false)
+  }
+
+  function openForgot() {
+    setForgot(true)
+    setFpStep('email')
+    setFpCode('')
+    setFpPw('')
+    setFpPw2('')
+    setFpErr('')
+  }
+
+  async function fpSendCode(e) {
+    e.preventDefault()
+    if (fpBusy) return
+    setFpErr('')
+    setFpBusy(true)
+    try {
+      const { data, error } = await supabase.functions.invoke('staff-reset', {
+        body: { action: 'request_code', email },
+      })
+      if (error) throw error
+      if (data?.error) throw new Error(data.error)
+      setFpStep('code')
+    } catch (e2) {
+      setFpErr((e2 && e2.message) || String(e2))
+    }
+    setFpBusy(false)
+  }
+
+  async function fpReset(e) {
+    e.preventDefault()
+    if (fpBusy) return
+    setFpErr('')
+    if (fpPw.length < 8) { setFpErr('Pick a password with at least 8 characters.'); return }
+    if (fpPw !== fpPw2) { setFpErr("Those passwords don't match."); return }
+    setFpBusy(true)
+    try {
+      const { data, error } = await supabase.functions.invoke('staff-reset', {
+        body: { action: 'reset', email, code: fpCode, new_password: fpPw },
+      })
+      if (error) throw error
+      if (data?.error) throw new Error(data.error)
+      setFpStep('done')
+      setPassword('')
+    } catch (e2) {
+      setFpErr((e2 && e2.message) || String(e2))
+    }
+    setFpBusy(false)
   }
 
   return (
@@ -110,7 +168,7 @@ export default function Login({ pending, onSignOut, email: initialEmail }) {
             </form>
 
             {/* EMPLOYEE sign-in (hidden in the mobile app's customer view) */}
-            {!clientOnly && (
+            {!clientOnly && !forgot && (
             <form onSubmit={submit} style={{ background: '#fff', borderRadius: 14, padding: 24, marginTop: 14 }}>
               <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 3 }}>Employee sign in</div>
               <div style={{ fontSize: 12, color: '#7c8a82', marginBottom: 14 }}>Staff and drivers — invite-only accounts.</div>
@@ -126,11 +184,78 @@ export default function Login({ pending, onSignOut, email: initialEmail }) {
                 onChange={(e) => setPassword(e.target.value)} required
                 style={inp} placeholder="••••••••"
               />
+              <div style={{ textAlign: 'right', marginTop: 8 }}>
+                <button type="button" onClick={openForgot} style={linkBtn}>Forgot password?</button>
+              </div>
               {err && <div style={{ color: '#c0492f', fontSize: 12.5, marginTop: 12 }}>{err}</div>}
-              <button type="submit" disabled={busy} style={{ ...btnPrimary, opacity: busy ? 0.7 : 1, marginTop: 18 }}>
+              <button type="submit" disabled={busy} style={{ ...btnPrimary, opacity: busy ? 0.7 : 1, marginTop: 14 }}>
                 {busy ? 'Signing in…' : 'Sign in'}
               </button>
             </form>
+            )}
+
+            {/* EMPLOYEE forgot password */}
+            {!clientOnly && forgot && (
+            <div style={{ background: '#fff', borderRadius: 14, padding: 24, marginTop: 14 }}>
+              <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 3 }}>Reset your password</div>
+              {fpStep === 'email' && (
+                <form onSubmit={fpSendCode}>
+                  <div style={{ fontSize: 12, color: '#7c8a82', marginBottom: 14 }}>
+                    We'll email a 6-digit code to your staff email address.
+                  </div>
+                  <label style={lbl}>Work email</label>
+                  <input
+                    type="email" autoComplete="username" value={email} required
+                    onChange={(e) => setEmail(e.target.value)}
+                    style={inp} placeholder="you@allsynccrm.com"
+                  />
+                  {fpErr && <div style={{ color: '#c0492f', fontSize: 12.5, marginTop: 10 }}>{fpErr}</div>}
+                  <button type="submit" disabled={fpBusy} style={{ ...btnPrimary, opacity: fpBusy ? 0.7 : 1, marginTop: 14 }}>
+                    {fpBusy ? 'Sending…' : 'Email me a reset code'}
+                  </button>
+                </form>
+              )}
+              {fpStep === 'code' && (
+                <form onSubmit={fpReset}>
+                  <div style={{ fontSize: 12, color: '#7c8a82', marginBottom: 14 }}>
+                    If <b>{email}</b> is a staff account, a 6-digit code is on its way (expires in 10 minutes). Enter it below with your new password.
+                  </div>
+                  <label style={lbl}>6-digit code</label>
+                  <input
+                    inputMode="numeric" pattern="[0-9]*" maxLength={6} value={fpCode} required
+                    onChange={(e) => setFpCode(e.target.value.replace(/\D/g, ''))}
+                    style={{ ...inp, letterSpacing: '.3em', fontWeight: 700 }} placeholder="••••••"
+                  />
+                  <label style={{ ...lbl, marginTop: 14 }}>New password</label>
+                  <input
+                    type="password" autoComplete="new-password" value={fpPw} required
+                    onChange={(e) => setFpPw(e.target.value)}
+                    style={inp} placeholder="At least 8 characters"
+                  />
+                  <label style={{ ...lbl, marginTop: 14 }}>New password again</label>
+                  <input
+                    type="password" autoComplete="new-password" value={fpPw2} required
+                    onChange={(e) => setFpPw2(e.target.value)}
+                    style={inp} placeholder="••••••••"
+                  />
+                  {fpErr && <div style={{ color: '#c0492f', fontSize: 12.5, marginTop: 10 }}>{fpErr}</div>}
+                  <button type="submit" disabled={fpBusy} style={{ ...btnPrimary, opacity: fpBusy ? 0.7 : 1, marginTop: 14 }}>
+                    {fpBusy ? 'Updating…' : 'Set new password'}
+                  </button>
+                  <div style={{ textAlign: 'center', marginTop: 10 }}>
+                    <button type="button" disabled={fpBusy} onClick={fpSendCode} style={linkBtn}>Resend the code</button>
+                  </div>
+                </form>
+              )}
+              {fpStep === 'done' && (
+                <div style={{ background: '#e7f1eb', color: '#1f7a4d', borderRadius: 10, padding: '11px 13px', fontSize: 13, lineHeight: 1.5, marginTop: 10 }}>
+                  ✓ Password updated — sign in with your new password.
+                </div>
+              )}
+              <div style={{ textAlign: 'center', marginTop: 14 }}>
+                <button type="button" onClick={() => setForgot(false)} style={linkBtn}>‹ Back to sign in</button>
+              </div>
+            </div>
             )}
           </>
         )}
@@ -148,3 +273,4 @@ const lbl = { display: 'block', fontSize: 12, fontWeight: 600, color: '#5d6b63',
 const inp = { width: '100%', boxSizing: 'border-box', border: '1px solid #dde2dd', background: '#f7f9f7', borderRadius: 10, padding: '11px 13px', fontSize: 16, color: '#1a2420', outline: 'none' }
 const btnPrimary = { width: '100%', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 10, padding: '12px', fontSize: 15, fontWeight: 600, cursor: 'pointer' }
 const btnGhost = { background: '#f0f3f0', color: '#1a2420', border: '1px solid #dde2dd', borderRadius: 10, padding: '10px 18px', fontSize: 14, fontWeight: 600, cursor: 'pointer' }
+const linkBtn = { background: 'none', border: 'none', color: '#1f7a4d', fontSize: 12.5, fontWeight: 700, cursor: 'pointer', padding: 0, textDecoration: 'underline' }

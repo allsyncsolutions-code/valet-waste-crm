@@ -31,15 +31,23 @@ import {
   loadUsedRouteCodes,
   createRouteDef,
   deleteRouteDef,
+  restoreRouteSnapshot,
   updateRouteDef,
   copyPreviousWeekday,
   moveStopToRoute,
+  moveStopToDate,
+  createDayOverride,
+  skipStop,
+  unskipStop,
+  weekdayName,
   ensureRoute,
   loadAllProperties,
   addPropertiesToRoute,
 } from '../lib/routesData.js'
 import { loadDrivers } from '../lib/teamData.js'
 import { loadCustomers, updateProperty } from '../lib/customersData.js'
+import { logActivity, currentActorName } from '../lib/activityData.js'
+import Drivers from './Drivers.jsx'
 import { geocodeAll } from '../lib/importData.js'
 import { createInvoice } from '../lib/invoicesData.js'
 
@@ -74,6 +82,16 @@ export default function RoutesView({ app }) {
   const [editStopId, setEditStopId] = useState(null) // stop whose address is being edited
   const [editStopAddr, setEditStopAddr] = useState('')
   const [stopBusy, setStopBusy] = useState(false)
+  const [stopQuery, setStopQuery] = useState('') // search within the stop list
+  const [mode, setModeState] = useState(app.routesMode || 'plan') // 'plan' | 'field'
+  const [undoDel, setUndoDel] = useState(null) // { snapshotId, name, code } — undo toast
+  const [dayModal, setDayModal] = useState(null) // stop whose day is being changed
+  const [dayTarget, setDayTarget] = useState('')
+  const [dayScope, setDayScope] = useState('once') // 'once' | 'permanent'
+  const [dayBusy, setDayBusy] = useState(false)
+  const setMode = (m) => { setModeState(m); app.setRoutesMode && app.setRoutesMode(m) }
+  // Follow external switches (e.g. a tech tapping the old Drivers & Field tab).
+  useEffect(() => { if (app.routesMode && app.routesMode !== mode) setModeState(app.routesMode) }, [app.routesMode])
 
   const [schedules, setSchedules] = useState([]) // active schedules, for the day dots
   const [drivers, setDrivers] = useState([]) // staff flagged is_driver
@@ -449,16 +467,108 @@ export default function RoutesView({ app }) {
     if (routeDefs.length <= 1) { setErr('You need at least one route — add another before deleting this one.'); return }
     const stopCount = stops.length
     const msg = `Delete ${currentDef.name} (${currentDef.code})?\n\n`
-      + `This removes the route and every dated copy of it${stopCount ? `, including the ${stopCount} stop${stopCount === 1 ? '' : 's'} on this day` : ''}. The service properties themselves are NOT deleted — they stay on their clients and can be added to another route.\n\nThis can't be undone.`
+      + `This removes the route and every dated copy of it${stopCount ? `, including the ${stopCount} stop${stopCount === 1 ? '' : 's'} on this day` : ''}. The service properties themselves are NOT deleted — they stay on their clients and can be added to another route.\n\nYou'll get an Undo option right after, in case this was an accident.`
     if (!window.confirm(msg)) return
     setErr(null)
     try {
-      await deleteRouteDef(routeCode)
+      const who = await currentActorName().catch(() => null)
+      const res = await deleteRouteDef(routeCode, who)
       const defs = await loadRouteDefs(app.activeLine)
       setRouteDefs(defs)
       setRouteCode((defs[0] && defs[0].code) || null)
+      if (res && res.snapshot_id) setUndoDel({ snapshotId: res.snapshot_id, name: res.name || currentDef.name, code: res.code || routeCode })
     } catch (e) {
       setErr(e.message || String(e))
+    }
+  }
+
+  // Undo an accidental deletion — restores the route, its dated copies and stops.
+  async function undoDeleteRoute() {
+    if (!undoDel) return
+    setErr(null)
+    try {
+      await restoreRouteSnapshot(undoDel.snapshotId)
+      const defs = await loadRouteDefs(app.activeLine)
+      setRouteDefs(defs)
+      setRouteCode(undoDel.code)
+      setUndoDel(null)
+    } catch (e) {
+      setErr(e.message || String(e))
+    }
+  }
+  // The undo toast hangs around for 25s, then quietly goes away (the snapshot
+  // stays in the database, so it's still restorable later if ever needed).
+  useEffect(() => {
+    if (!undoDel) return
+    const t = setTimeout(() => setUndoDel(null), 25000)
+    return () => clearTimeout(t)
+  }, [undoDel])
+
+  // ---- skip / un-skip a stop (flag + note instead of delete) ----
+  async function handleSkip(st) {
+    const reason = window.prompt(`Skip ${st.name}?\n\nQuick reason (e.g. "gate locked", "client asked to skip this week"):`)
+    if (reason === null) return
+    setErr(null)
+    withWrite(async () => {
+      const who = await currentActorName().catch(() => null)
+      await skipStop(st.id, reason, who)
+      logActivity({ type: 'stop_skipped', summary: `Skipped ${st.address || st.name}${reason.trim() ? ` — ${reason.trim()}` : ''}`, entityType: 'property', entityId: st.propertyId })
+      await refresh()
+    })
+  }
+  async function handleUnskip(st) {
+    setErr(null)
+    withWrite(async () => {
+      await unskipStop(st.id)
+      logActivity({ type: 'stop_unskipped', summary: `Un-skipped ${st.address || st.name}`, entityType: 'property', entityId: st.propertyId })
+      await refresh()
+    })
+  }
+
+  // ---- change a stop's day: one-time vs permanent ----
+  function openDayModal(st) {
+    setDayModal(st)
+    setDayScope('once')
+    const d = new Date(routeSel + 'T12:00:00')
+    d.setDate(d.getDate() + 1)
+    setDayTarget(iso(d))
+  }
+  async function submitDayChange(e) {
+    if (e) e.preventDefault()
+    if (!dayModal || dayBusy) return
+    if (!dayTarget) { setErr('Pick the new date.'); return }
+    if (dayTarget === routeSel) { setErr('That is already this stop\'s date — pick a different day.'); return }
+    setDayBusy(true)
+    setErr(null)
+    try {
+      const st = dayModal
+      const who = await currentActorName().catch(() => null)
+      if (dayScope === 'once') {
+        // One-time: record the override (so rebuilds respect it) + move the stop.
+        if (st.propertyId && (st.pickupDays || []).length) {
+          await createDayOverride({ propertyId: st.propertyId, skipDate: routeSel, serviceDate: dayTarget, note: 'One-time day change from Routes', createdBy: who })
+        }
+        await moveStopToDate(st.id, routeCode, dayTarget)
+        logActivity({ type: 'day_changed_once', summary: `One-time move: ${st.address || st.name} → ${prettyDate(dayTarget)} (was ${prettyDate(routeSel)})`, entityType: 'property', entityId: st.propertyId })
+      } else {
+        // Permanent: rewrite the property's pickup day, then move the stop.
+        const oldDay = weekdayName(routeSel)
+        const newDay = weekdayName(dayTarget)
+        const cur = st.pickupDays || []
+        let next = cur.includes(oldDay) ? cur.map((d) => (d === oldDay ? newDay : d)) : [...cur, newDay]
+        next = [...new Set(next)]
+        const ORDER = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+        next.sort((a, b) => ORDER.indexOf(a) - ORDER.indexOf(b))
+        if (st.propertyId) await updateProperty(st.propertyId, { pickup_days: next })
+        await moveStopToDate(st.id, routeCode, dayTarget)
+        logActivity({ type: 'day_changed_permanent', summary: `Pickup day changed: ${st.address || st.name} now runs ${next.join(', ') || newDay}`, entityType: 'property', entityId: st.propertyId })
+      }
+      setDayModal(null)
+      await refresh(routeSel)
+    } catch (e2) {
+      setErr(e2.message || String(e2))
+    } finally {
+      setDayBusy(false)
     }
   }
 
@@ -516,6 +626,14 @@ export default function RoutesView({ app }) {
 
   const doneCount = stops.filter((s) => s.status === 'done').length
 
+  // Stop-list search: filter what's displayed (reordering still works on the
+  // full list, so seq numbers stay true to the real route order).
+  const visibleStops = useMemo(() => {
+    const q = stopQuery.trim().toLowerCase()
+    if (!q) return stops
+    return stops.filter((st) => `${st.name} ${st.address} ${st.clientName || ''} ${st.service}`.toLowerCase().includes(q))
+  }, [stops, stopQuery])
+
   return (
     <div style={{ maxWidth: 1280, margin: '0 auto' }}>
       {/* day picker */}
@@ -535,6 +653,20 @@ export default function RoutesView({ app }) {
         {!isMobile && <div onClick={() => { setWeekOffset(0); setRouteSel(TODAY_KEY) }} style={{ flex: 'none', fontSize: 12, fontWeight: 600, color: '#1f7a4d', border: '1px solid #cfe0d5', borderRadius: 8, padding: '7px 12px', cursor: 'pointer' }}>Today</div>}
       </div>
 
+      {/* Plan | Field mode switch (Drivers & Field now lives inside this view) */}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12 }}>
+        {[['plan', '◔ Plan routes'], ['field', '⛟ Field board']].map(([m, label]) => (
+          <div key={m} onClick={() => setMode(m)} style={{ flex: 'none', padding: '8px 16px', borderRadius: 10, cursor: 'pointer', fontSize: 13, fontWeight: 600, border: `1px solid ${mode === m ? '#1f7a4d' : '#e6eae6'}`, background: mode === m ? '#1f7a4d' : '#fff', color: mode === m ? '#fff' : '#5d6b63' }}>{label}</div>
+        ))}
+        <div style={{ fontSize: 11.5, color: '#9aa69e' }}>
+          {mode === 'field' ? `Check-ins, photos and skips for ${prettyDate(routeSel)}` : 'Build and sequence routes'}
+        </div>
+      </div>
+
+      {mode === 'field' ? (
+        <Drivers app={app} date={routeSel} onDateChange={(d) => setRouteSel(d)} embedded />
+      ) : (
+      <>
       {/* route selector (one tab per route; shows its driver) */}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'stretch', marginBottom: 12 }}>
         {routeDefs.map((rd) => {
@@ -647,7 +779,13 @@ export default function RoutesView({ app }) {
         <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '6px 4px 10px' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 14px 8px' }}>
             <div style={{ fontWeight: 700, fontSize: 14 }}>Stop sequence</div>
-            <div style={{ fontFamily: MONO, fontSize: 11, color: '#7c8a82' }}>{stops.length} stops</div>
+            <div style={{ fontFamily: MONO, fontSize: 11, color: '#7c8a82' }}>{stopQuery.trim() ? `${visibleStops.length} of ${stops.length}` : `${stops.length} stops`}</div>
+          </div>
+          {/* search within this route — no more scrolling to find a stop */}
+          <div style={{ position: 'relative', padding: '0 14px 8px' }}>
+            <input value={stopQuery} onChange={(e) => setStopQuery(e.target.value)} placeholder="Search stops — name, address, client…" style={{ width: '100%', boxSizing: 'border-box', border: '1px solid #dde2dd', background: '#f7f9f7', borderRadius: 9, padding: '8px 11px 8px 30px', fontSize: 13, color: '#1a2420', outline: 'none' }} />
+            <div style={{ position: 'absolute', left: 24, top: 8, color: '#9aa69e', fontSize: 13 }}>⌕</div>
+            {stopQuery && <div onClick={() => setStopQuery('')} style={{ position: 'absolute', right: 24, top: 8, color: '#9aa69e', fontSize: 13, cursor: 'pointer' }}>✕</div>}
           </div>
           <div style={{ maxHeight: isMobile ? 'none' : 560, overflowY: 'auto', padding: '0 6px' }}>
             {!loading && !stops.length && (
@@ -655,7 +793,10 @@ export default function RoutesView({ app }) {
                 {route ? 'No stops on this route yet.' : 'No route scheduled — add properties and a route to get started.'}
               </div>
             )}
-            {stops.map((st) => {
+            {!loading && stops.length > 0 && visibleStops.length === 0 && (
+              <div style={{ padding: '20px 16px', textAlign: 'center', color: '#9aa69e', fontSize: 12.5 }}>No stops match “{stopQuery.trim()}”.</div>
+            )}
+            {visibleStops.map((st) => {
               const meta = STATUS_META[st.status] || STATUS_META.pending
               const locked = isFixed(st)
               return (
@@ -679,11 +820,18 @@ export default function RoutesView({ app }) {
                     <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          <span style={{ fontWeight: 600, fontSize: 13.5 }}>{st.name}</span>
+                          <span
+                            onClick={st.customerId && app.openClient ? () => app.openClient(st.customerId) : undefined}
+                            title={st.customerId ? `Open ${st.clientName || 'client'}'s record` : undefined}
+                            style={{ fontWeight: 600, fontSize: 13.5, cursor: st.customerId ? 'pointer' : 'default', color: st.customerId ? '#1f7a4d' : '#1a2420', textDecoration: st.customerId ? 'underline dotted 1px' : 'none', textUnderlineOffset: 3 }}
+                          >{st.name}</span>
                           {st.needsReview && <span title="Flagged for review" style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#c0492f', background: '#fbeae6', padding: '1px 5px', borderRadius: 4, letterSpacing: '.03em' }}>⚠ REVIEW</span>}
                           {st.lat == null && <span title="No map pin — address likely needs a city/ZIP" style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#c08a2e', background: '#fbf3e2', padding: '1px 5px', borderRadius: 4 }}>NO PIN</span>}
                         </div>
-                        <div style={{ fontSize: 11.5, color: '#7c8a82' }}>{st.address && st.address !== st.name ? st.address : st.service}</div>
+                        <div style={{ fontSize: 11.5, color: '#7c8a82' }}>{st.address && st.address !== st.name ? st.address : st.service}{st.clientName && st.clientName !== st.name ? ` · ${st.clientName}` : ''}</div>
+                        {st.status === 'skipped' && (
+                          <div style={{ fontSize: 11, color: '#8a6d1e', marginTop: 2 }}>⤼ Skipped{st.skippedBy ? ` by ${st.skippedBy}` : ''}{st.skipReason ? ` — ${st.skipReason}` : ''}</div>
+                        )}
                       </div>
                       <div style={{ textAlign: 'right', flex: 'none' }}>
                         <div style={{ fontFamily: MONO, fontSize: 10.5, fontWeight: 600, color: meta.color }}>{meta.label}</div>
@@ -695,6 +843,12 @@ export default function RoutesView({ app }) {
                         <button onClick={() => handleMove(st.id, -1)} style={miniBtn} title="Move up">↑</button>
                         <button onClick={() => handleMove(st.id, 1)} style={miniBtn} title="Move down">↓</button>
                         <button onClick={() => startEditAddress(st)} style={miniBtn} title="Edit this address">✎ Address</button>
+                        <button onClick={() => openDayModal(st)} style={miniBtn} title="Move this stop to a different day — one-time or permanently">⇄ Day</button>
+                        {st.status === 'skipped' ? (
+                          <button onClick={() => handleUnskip(st)} style={{ ...miniBtn, color: '#1f7a4d' }} title="Put this stop back to pending">Un-skip</button>
+                        ) : (
+                          <button onClick={() => handleSkip(st)} style={{ ...miniBtn, color: '#8a6d1e' }} title="Skip with a reason (kept on the route, flagged as skipped)">⤼ Skip</button>
+                        )}
                         <a href={`https://www.google.com/maps/dir/?api=1&destination=${st.lat},${st.lng}`} target="_blank" rel="noreferrer" style={{ ...miniBtn, textDecoration: 'none', color: '#1f7a4d' }} title="Navigate">➤ Nav</a>
                         {routeDefs.length > 1 && (
                           <select value="" onChange={(e) => handleMoveToRoute(st.id, e.target.value)} title="Move to another route (hands it to that route's driver)" style={{ ...miniBtn, paddingRight: 4, cursor: 'pointer' }}>
@@ -736,6 +890,8 @@ export default function RoutesView({ app }) {
           )}
         </div>
       </div>
+      </>
+      )}
       </>
       )}
       {/* mass-add modal */}
@@ -789,6 +945,55 @@ export default function RoutesView({ app }) {
               <button type="button" onClick={submitMass} disabled={massBusy || massSel.size === 0} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 10, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: massSel.size ? 'pointer' : 'default', opacity: massBusy || !massSel.size ? 0.6 : 1 }}>{massBusy ? 'Adding…' : `Add ${massSel.size || ''} to ${currentDef.code}`}</button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* day-change modal: one-time vs permanent */}
+      {dayModal && (
+        <div onClick={() => !dayBusy && setDayModal(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(15,30,20,.42)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 500, padding: 16 }}>
+          <form onClick={(e) => e.stopPropagation()} onSubmit={submitDayChange} style={{ background: '#fff', borderRadius: 14, padding: 22, width: 430, maxWidth: '100%', boxShadow: '0 24px 60px rgba(15,30,20,.28)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+              <div style={{ fontWeight: 700, fontSize: 16, flex: 1 }}>Change this stop's day</div>
+              <div onClick={() => !dayBusy && setDayModal(null)} style={{ cursor: 'pointer', color: '#7c8a82', fontSize: 18 }}>✕</div>
+            </div>
+            <div style={{ fontSize: 12.5, color: '#7c8a82', marginBottom: 14 }}>
+              <b>{dayModal.name}</b> is on {currentDef.name} for <b>{prettyDate(routeSel)}</b>.
+            </div>
+
+            <label style={mLbl}>Move to</label>
+            <input type="date" value={dayTarget} onChange={(e) => setDayTarget(e.target.value)} style={{ ...mInp, marginBottom: 14 }} />
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+              <label style={{ display: 'flex', gap: 9, alignItems: 'flex-start', border: `1px solid ${dayScope === 'once' ? '#1f7a4d' : '#e6eae6'}`, background: dayScope === 'once' ? '#f3faf5' : '#fff', borderRadius: 10, padding: '10px 12px', cursor: 'pointer' }}>
+                <input type="radio" name="dayScope" checked={dayScope === 'once'} onChange={() => setDayScope('once')} style={{ marginTop: 2, accentColor: '#1f7a4d' }} />
+                <span>
+                  <span style={{ display: 'block', fontSize: 13.5, fontWeight: 600 }}>Just this once</span>
+                  <span style={{ display: 'block', fontSize: 11.5, color: '#7c8a82', marginTop: 2 }}>Only {prettyDate(routeSel)} moves{dayTarget ? ` to ${prettyDate(dayTarget)}` : ''}. The regular schedule doesn't change{(dayModal.pickupDays || []).length ? ` (stays ${dayModal.pickupDays.join(', ')})` : ''}.</span>
+                </span>
+              </label>
+              <label style={{ display: 'flex', gap: 9, alignItems: 'flex-start', border: `1px solid ${dayScope === 'permanent' ? '#1f7a4d' : '#e6eae6'}`, background: dayScope === 'permanent' ? '#f3faf5' : '#fff', borderRadius: 10, padding: '10px 12px', cursor: 'pointer' }}>
+                <input type="radio" name="dayScope" checked={dayScope === 'permanent'} onChange={() => setDayScope('permanent')} style={{ marginTop: 2, accentColor: '#1f7a4d' }} />
+                <span>
+                  <span style={{ display: 'block', fontSize: 13.5, fontWeight: 600 }}>Permanently</span>
+                  <span style={{ display: 'block', fontSize: 11.5, color: '#7c8a82', marginTop: 2 }}>From now on this address runs on {dayTarget ? weekdayName(dayTarget) : 'the new day'}{(dayModal.pickupDays || []).includes(weekdayName(routeSel)) ? ` instead of ${weekdayName(routeSel)}` : ''}. Updates the property's pickup days.</span>
+                </span>
+              </label>
+            </div>
+
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <button type="button" onClick={() => setDayModal(null)} disabled={dayBusy} style={ghostBtn}>Cancel</button>
+              <button type="submit" disabled={dayBusy || !dayTarget} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 10, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: dayBusy || !dayTarget ? 0.6 : 1 }}>{dayBusy ? 'Moving…' : dayScope === 'once' ? 'Move just this pickup' : 'Change day permanently'}</button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* undo-delete toast */}
+      {undoDel && (
+        <div style={{ position: 'fixed', left: '50%', bottom: 26, transform: 'translateX(-50%)', zIndex: 600, background: '#15281d', color: '#dff0e6', borderRadius: 12, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 14, boxShadow: '0 14px 40px rgba(15,30,20,.4)', maxWidth: 'calc(100vw - 32px)' }}>
+          <span style={{ fontSize: 13 }}>Deleted <b>{undoDel.name}</b> and its dated copies.</span>
+          <button onClick={undoDeleteRoute} style={{ flex: 'none', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 8, padding: '7px 14px', fontSize: 12.5, fontWeight: 700, cursor: 'pointer' }}>Undo</button>
+          <span onClick={() => setUndoDel(null)} style={{ cursor: 'pointer', color: '#7fb89a', fontWeight: 700 }}>✕</span>
         </div>
       )}
 

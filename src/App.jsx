@@ -82,6 +82,20 @@ export default function App({ user, onSignOut }) {
   const [commandText, setCommandText] = useState('')
   const [logoSrc, setLogoSrc] = useState(null)
   const [newPickupTick, setNewPickupTick] = useState(0) // bumps to open the one-off pickup modal in Routes
+  // Routes & Dispatch mode: 'plan' (build/sequence) or 'field' (live driver board).
+  // Techs land on the field board by default; the choice sticks per browser.
+  const isTechDefault = !!(user && user.is_driver && user.role !== 'admin')
+  const [routesMode, setRoutesMode] = useState(() => {
+    try { return localStorage.getItem('vw_routes_mode') || (isTechDefault ? 'field' : 'plan') } catch (e) { return 'plan' }
+  })
+  useEffect(() => { try { localStorage.setItem('vw_routes_mode', routesMode) } catch (e) {} }, [routesMode])
+  // Cross-view: clicking an address on a route opens that client's record.
+  const [clientFocus, setClientFocus] = useState(null) // { id, tick }
+  function openClient(customerId) {
+    if (!customerId) return
+    setClientFocus({ id: customerId, tick: Date.now() })
+    go('clients')
+  }
 
   // AI dock
   const [aiOpen, setAiOpen] = useState(!isMobile)
@@ -130,9 +144,11 @@ export default function App({ user, onSignOut }) {
       ? [...NAV_MAIN, { id: 'employees', glyph: '✂', label: 'Employees' }]
       : NAV_MAIN
   // Lawn techs work per-JOB, not per-truck-route — swap Drivers & Field for My Day.
+  // On waste/junk the old separate "Drivers & Field" tab is MERGED into
+  // Routes & Dispatch (Plan | Field board), so it's dropped from the rail.
   const navFieldBase = isLawn
     ? NAV_FIELD.map((n) => (n.id === 'drivers' ? { id: 'myday', glyph: '☀', label: 'My Day' } : n))
-    : NAV_FIELD
+    : NAV_FIELD.filter((n) => n.id !== 'drivers')
   // Field-crew tabs: schedule calendar (all lines) + payroll (lawn's per-job pay).
   const navField = (() => {
     const extra = [{ id: 'myschedule', glyph: '▥', label: 'My Schedule' }]
@@ -187,14 +203,15 @@ export default function App({ user, onSignOut }) {
     if (!isLawn && activeView === 'employees') setActiveView('dashboard')
     if (!isLawn && activeView === 'timesheets') setActiveView('dashboard')
     if (isLawn && activeView === 'drivers') setActiveView('myday')
-    if (!isLawn && activeView === 'myday') setActiveView('drivers')
+    if (!isLawn && activeView === 'myday') { setRoutesMode('field'); setActiveView('routes') }
+    if (!isLawn && activeView === 'drivers') { setRoutesMode('field'); setActiveView('routes') } // merged into Routes & Dispatch
     if (isTech && !TECH_IDS.includes(activeView)) setActiveView('dashboard')
     if (!myLines.includes(activeLine)) setActiveLine(myLines[0] || 'waste')
   }, [activeLine, activeView, isTech])
 
   const VIEW_META = {
     dashboard: ['Dispatch Overview', activeLineObj.name],
-    routes: ['Routes & Dispatch', 'Live sequencing, GPS tracking and AI optimization'],
+    routes: ['Routes & Dispatch', 'Plan routes + live field board — check-ins, photos, skips'],
     schedule: isJunk ? ['Job Calendar', 'One-time junk jobs — click a day to schedule'] : ['Recurring Schedules', 'Set pickup cadence — nth weekday, alternating weeks'],
     invoices: ['Invoicing', 'Per-stop line items · monthly batch billing'],
     clients: ['Clients', 'Add and manage your customers'],
@@ -288,7 +305,7 @@ export default function App({ user, onSignOut }) {
   }
 
   // bag passed to views
-  const app = { activeLine, activeLineObj, go, openAssistant, askAi, runAi, isMobile, isTablet, user, newPickupTick }
+  const app = { activeLine, activeLineObj, go, openAssistant, askAi, runAi, isMobile, isTablet, user, newPickupTick, openClient, clientFocus, routesMode, setRoutesMode }
 
   const views = {
     dashboard: <Dashboard app={app} />,
@@ -317,7 +334,8 @@ export default function App({ user, onSignOut }) {
     ? [
         { id: 'dashboard', glyph: '▦', label: 'Home' },
         { id: 'routes', glyph: '◔', label: 'Routes' },
-        isLawn ? { id: 'myday', glyph: '☀', label: 'My Day' } : { id: 'drivers', glyph: '⛟', label: 'Field' },
+        // Non-lawn: the field board lives inside Routes now (Plan | Field).
+        ...(isLawn ? [{ id: 'myday', glyph: '☀', label: 'My Day' }] : []),
         { id: 'myschedule', glyph: '▥', label: 'Schedule' },
         ...(isLawn ? [{ id: 'timesheets', glyph: '⏱', label: 'Pay' }] : []),
       ]

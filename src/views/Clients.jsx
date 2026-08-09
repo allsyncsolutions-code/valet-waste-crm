@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { MONO } from '../data.js'
-import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, addProperty, updateProperty, loadPropertyVisits, loadPropertyAddressIndex, countDuplicateProperties, findDuplicateProperties, mergeProperties, deleteProperty, sendPortalInvite, loadClientFieldActivity, loadClientNotes, addClientNote, deleteClientNote } from '../lib/customersData.js'
+import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, addProperty, updateProperty, loadPropertyVisits, loadPropertyAddressIndex, countDuplicateProperties, findDuplicateProperties, mergeProperties, deleteProperty, sendPortalInvite, loadClientFieldActivity, loadClientNotes, addClientNote, deleteClientNote, loadPropertyLog } from '../lib/customersData.js'
 import { geocodeAll } from '../lib/importData.js'
 import { listTags, findOrCreateTag, subscribeTags } from '../lib/tagsData.js'
 import { stripeStatus, stripePaymentLink } from '../lib/stripeData.js'
@@ -39,7 +39,7 @@ const fmtDate = (ts) => { try { return new Date(ts).toLocaleDateString(undefined
 const fmtTime = (ts) => { try { return new Date(ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) } catch { return ts } }
 
 const BLANK = {
-  name: '', address: '', contactName: '', email: '', phone: '', status: 'active', notes: '',
+  name: '', address: '', contactName: '', email: '', phone: '', status: 'active', notes: '', billingType: 'subscription',
   notifyOnService: null, // null=auto (single-property only), true=always, false=never
   service: '', frequency: 'weekly', dayOfWeek: 'monday',
   cadence: 'monthly', amount: '',
@@ -94,6 +94,20 @@ export default function Clients({ app }) {
   const [notes, setNotes] = useState([])
   const [noteInput, setNoteInput] = useState('')
   const [noteBusy, setNoteBusy] = useState(false)
+  const [billingFilter, setBillingFilter] = useState('all') // all | subscription | one_time
+  const [logPid, setLogPid] = useState(null) // property whose activity log is open
+  const [logRows, setLogRows] = useState([])
+  const [logBusy, setLogBusy] = useState(false)
+
+  // A route stop was clicked elsewhere (Routes / Field board) — jump to that client.
+  useEffect(() => {
+    const f = app.clientFocus
+    if (f && f.id) {
+      setSelId(f.id)
+      setSearch('')
+      setBillingFilter('all')
+    }
+  }, [app.clientFocus])
 
   // Load the selected client's service properties.
   useEffect(() => {
@@ -192,10 +206,12 @@ export default function Clients({ app }) {
     [customers, app.activeLine],
   )
   const q = search.toLowerCase().trim()
-  const list = useMemo(
-    () => (q ? lineCustomers.filter((c) => (c.name + ' ' + c.address).toLowerCase().includes(q) || (addrIdx[c.id] || '').includes(q)) : lineCustomers),
-    [lineCustomers, q, addrIdx]
-  )
+  const list = useMemo(() => {
+    let l = lineCustomers
+    if (billingFilter !== 'all') l = l.filter((c) => (c.billingType || 'subscription') === billingFilter)
+    if (q) l = l.filter((c) => (c.name + ' ' + c.address).toLowerCase().includes(q) || (addrIdx[c.id] || '').includes(q))
+    return l
+  }, [lineCustomers, q, addrIdx, billingFilter])
   const cur = lineCustomers.find((c) => c.id === selId) || null
 
   // Switching business line: drop any selection from the previous line.
@@ -253,6 +269,15 @@ export default function Clients({ app }) {
     try { setHist(await loadPropertyVisits(p.id)) }
     catch (e) { setErr(e.message || String(e)) }
     finally { setHistBusy(false) }
+  }
+  // Per-address audit trail: who added it (Laura / Matt / Trashy Randy / ...),
+  // edits, skips, one-time day changes.
+  async function toggleLog(p) {
+    if (logPid === p.id) { setLogPid(null); setLogRows([]); return }
+    setLogPid(p.id); setLogRows([]); setLogBusy(true)
+    try { setLogRows(await loadPropertyLog(p.id)) }
+    catch (e) { setErr(e.message || String(e)) }
+    finally { setLogBusy(false) }
   }
   async function togglePhotos(p) {
     if (photoPid === p.id) { setPhotoPid(null); setPhotos([]); return }
@@ -458,6 +483,7 @@ export default function Clients({ app }) {
     setForm({
       name: cur.name || '', address: cur.address || '', contactName: cur.contactName || '',
       email: cur.email || '', phone: cur.phone || '', status: cur.status || 'active', notes: cur.notes || '',
+      billingType: cur.billingType || 'subscription',
       notifyOnService: cur.notifyOnService ?? null,
       service: cur.pickup?.service || '', frequency: cur.pickup?.frequency || 'weekly',
       dayOfWeek: cur.pickup?.dayOfWeek || 'monday',
@@ -480,6 +506,7 @@ export default function Clients({ app }) {
       phone: form.phone.trim(),
       status: form.status,
       notes: form.notes.trim(),
+      billingType: form.billingType || 'subscription',
       notifyOnService: form.notifyOnService ?? null,
       pickup: { service: form.service.trim(), frequency: form.frequency, dayOfWeek: null },
       invoice: { cadence: form.cadence, amount: form.amount === '' ? null : Number(form.amount) },
@@ -561,6 +588,16 @@ export default function Clients({ app }) {
           </div>
           <button onClick={() => { setForm(BLANK); setEditingId(null); setShowForm(true) }} style={{ flex: 'none', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '0 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' }}>+ Add client</button>
         </div>
+        {/* billing-type filter: subscription vs single-payment clients */}
+        <div style={{ display: 'flex', gap: 6, margin: '0 6px 8px', alignItems: 'center' }}>
+          {[['all', 'All'], ['subscription', 'Subscription'], ['one_time', 'Single payment']].map(([v, l]) => {
+            const on = billingFilter === v
+            const n = v === 'all' ? lineCustomers.length : lineCustomers.filter((c) => (c.billingType || 'subscription') === v).length
+            return (
+              <button key={v} onClick={() => setBillingFilter(v)} style={{ flex: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 600, padding: '5px 11px', borderRadius: 20, border: `1px solid ${on ? '#1f7a4d' : '#dde2dd'}`, background: on ? '#e7f1eb' : '#fff', color: on ? '#1f7a4d' : '#7c8a82' }}>{l} ({n})</button>
+            )
+          })}
+        </div>
 
         {loading && <div style={empty}>Loading…</div>}
         {!loading && !customers.length && <div style={empty}>No clients yet. Add one with the button above, or ask Trashy Randy.</div>}
@@ -574,6 +611,7 @@ export default function Clients({ app }) {
                 <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.name}</div>
                 <div style={{ fontSize: 11, color: '#7c8a82' }}>{c.pickup ? freqLabel(c.pickup.frequency) : 'No schedule'}</div>
               </div>
+              {(c.billingType || 'subscription') === 'one_time' && <span title="Single-payment / on-demand client (not a subscription)" style={{ flex: 'none', fontFamily: MONO, fontSize: 9, fontWeight: 700, color: '#155e9c', background: '#e8f0fa', padding: '1px 6px', borderRadius: 5 }}>1×</span>}
               {c.autopay?.saved && <span title={`Autopay on — ${(c.autopay.brand || 'card').toUpperCase()} ••${c.autopay.last4 || ''} · 5th week free`} style={{ flex: 'none', fontFamily: MONO, fontSize: 9, fontWeight: 700, color: '#1f7a4d', background: '#e7f1eb', padding: '1px 6px', borderRadius: 5 }}>💳 CARD</span>}
               {c.status !== 'active' && <span style={{ flex: 'none', fontFamily: MONO, fontSize: 9, color: '#b07a1e', background: '#fdf2e0', padding: '1px 6px', borderRadius: 5 }}>{c.status}</span>}
             </div>
@@ -605,6 +643,9 @@ export default function Clients({ app }) {
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontWeight: 700, fontSize: 18, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                     {cur.name}
+                    {(cur.billingType || 'subscription') === 'one_time' && (
+                      <span title="Single-payment / on-demand client" style={{ fontFamily: MONO, fontSize: 10.5, fontWeight: 700, color: '#155e9c', background: '#e8f0fa', padding: '3px 9px', borderRadius: 7, letterSpacing: '.03em' }}>1× SINGLE PAYMENT</span>
+                    )}
                     {cur.autopay?.saved && (
                       <span title="This client has a saved payment method — invoices are charged automatically and 5th-week-free applies" style={{ fontFamily: MONO, fontSize: 10.5, fontWeight: 700, color: '#1f7a4d', background: '#e7f1eb', padding: '3px 9px', borderRadius: 7, letterSpacing: '.03em' }}>
                         💳 AUTOPAY · {(cur.autopay.brand || 'CARD').toUpperCase()} ••{cur.autopay.last4 || ''}
@@ -800,10 +841,14 @@ export default function Clients({ app }) {
                                 <span style={{ fontSize: 11, fontWeight: 700, fontFamily: MONO, color: '#8a6d1e', background: '#f6efdd', padding: '2px 8px', borderRadius: 6, letterSpacing: '.03em' }}>⏸ Paused · off routes</span>
                               )}
                             </div>
+                            <div style={{ fontSize: 10.5, color: '#9aa69e', marginTop: 3 }}>
+                              Added {p.created_at ? fmtDate(p.created_at) : '—'}{p.created_by ? ` by ${p.created_by}` : ''}
+                            </div>
                           </div>
                           {p.price != null && <div style={{ fontSize: 12.5, color: '#5d6b63', flex: 'none' }}>${Number(p.price).toFixed(2)}</div>}
                           <button onClick={() => toggleReview(p)} disabled={pBusy} title={p.needs_review ? 'Clear the review flag' : 'Flag this property for the owner to review'} style={{ flex: 'none', background: 'none', border: 'none', color: p.needs_review ? '#1f7a4d' : '#c0492f', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px', opacity: pBusy ? 0.6 : 1 }}>{p.needs_review ? 'Mark reviewed' : 'Needs review'}</button>
                           <button onClick={() => toggleHistory(p)} disabled={histBusy && histPid === p.id} style={{ flex: 'none', background: 'none', border: 'none', color: '#5d6b63', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>{histPid === p.id ? 'Hide' : 'History'}</button>
+                          <button onClick={() => toggleLog(p)} disabled={logBusy && logPid === p.id} title="Who added and changed this address" style={{ flex: 'none', background: 'none', border: 'none', color: '#5d6b63', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>{logPid === p.id ? 'Hide log' : 'Log'}</button>
                           <button onClick={() => togglePhotos(p)} disabled={photoBusy && photoPid === p.id} style={{ flex: 'none', background: 'none', border: 'none', color: '#5d6b63', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>{photoPid === p.id ? 'Hide' : 'Photos'}</button>
                           <button onClick={() => startEditProp(p)} style={{ flex: 'none', background: 'none', border: 'none', color: '#1f7a4d', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>Edit</button>
                           <button onClick={() => togglePause(p)} disabled={pBusy} title={p.paused ? 'Resume — put this address back on routes' : 'Pause — keep the address but skip it on all routes'} style={{ flex: 'none', background: 'none', border: 'none', color: p.paused ? '#1f7a4d' : '#8a6d1e', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px', opacity: pBusy ? 0.6 : 1 }}>{p.paused ? 'Resume' : 'Pause'}</button>
@@ -825,6 +870,28 @@ export default function Clients({ app }) {
                                   </span>
                                 </div>
                               ))
+                            )}
+                          </div>
+                        )}
+                        {logPid === p.id && (
+                          <div style={{ margin: '6px 0 2px 18px', borderLeft: '2px solid #eef0ed', paddingLeft: 12 }}>
+                            <div style={{ fontSize: 10.5, color: '#7c8a82', fontFamily: MONO, letterSpacing: '.06em', marginBottom: 6 }}>ADDRESS LOG — WHO DID WHAT</div>
+                            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 12, padding: '3px 0' }}>
+                              <span style={{ fontWeight: 600, color: '#1a2420', minWidth: 96 }}>{p.created_at ? fmtDate(p.created_at) : '—'}</span>
+                              <span style={{ color: '#5d6b63' }}>Added{p.created_by ? ` by ${p.created_by}` : ''}</span>
+                            </div>
+                            {logBusy ? (
+                              <div style={{ fontSize: 12, color: '#9aa69e' }}>Loading…</div>
+                            ) : (
+                              logRows.map((r) => (
+                                <div key={r.id} style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 12, padding: '3px 0' }}>
+                                  <span style={{ fontWeight: 600, color: '#1a2420', minWidth: 96 }}>{fmtDate(r.created_at)}</span>
+                                  <span style={{ color: '#5d6b63', flex: 1, minWidth: 0 }}>{r.summary} <span style={{ color: '#9aa69e' }}>— {r.actor}</span></span>
+                                </div>
+                              ))
+                            )}
+                            {!logBusy && logRows.length === 0 && (
+                              <div style={{ fontSize: 12, color: '#9aa69e' }}>No changes recorded yet (edits, skips and day changes will show here).</div>
                             )}
                           </div>
                         )}
@@ -963,6 +1030,12 @@ export default function Clients({ app }) {
             </div>
 
             <Divider>Invoice schedule</Divider>
+            <Field label="Billing type">
+              <select value={form.billingType} onChange={(e) => set({ billingType: e.target.value })} style={inp}>
+                <option value="subscription">Subscription — recurring service</option>
+                <option value="one_time">Single payment — one-time / on-demand</option>
+              </select>
+            </Field>
             <div style={twoCol}>
               <Field label="Cadence">
                 <select value={form.cadence} onChange={(e) => set({ cadence: e.target.value })} style={inp}>

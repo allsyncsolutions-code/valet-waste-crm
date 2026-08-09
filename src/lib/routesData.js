@@ -88,6 +88,11 @@ function mapStop(row) {
     name: row.properties?.name || 'Unknown',
     address: row.properties?.address || '',
     needsReview: !!row.properties?.needs_review,
+    customerId: row.properties?.customer_id || null,
+    clientName: row.properties?.customers?.name || null,
+    pickupDays: row.properties?.pickup_days || [],
+    skipReason: row.skip_reason || '',
+    skippedBy: row.skipped_by || null,
   }
 }
 
@@ -112,7 +117,7 @@ export async function loadRouteSlice(code = 'B', date = null, line = null) {
 
   const { data: stopRows, error: sErr } = await supabase
     .from('route_stops')
-    .select('id, property_id, seq, status, service, time_window, lat, lng, properties(name, address, service, lat, lng, needs_review)')
+    .select('id, property_id, seq, status, service, time_window, lat, lng, skip_reason, skipped_by, properties(name, address, service, lat, lng, needs_review, customer_id, pickup_days, customers(name))')
     .eq('route_id', route.id)
     .order('seq', { ascending: true })
   if (sErr) throw sErr
@@ -130,8 +135,15 @@ export async function loadRouteSlice(code = 'B', date = null, line = null) {
   // "Unrouted" means due on THIS date but not yet placed on the route — not the
   // whole customer base. Properties scheduled for other days are added on demand
   // via "+ Add stops". After a clean build this list is empty.
-  const isDue = (p) => (p.pickup_days || []).some((d) =>
-    scheduleHitsDate({ day_of_week: d, frequency: p.pickup_frequency || 'weekly', start_date: p.pickup_start_date || null, active: true }, date))
+  // One-time day changes (property_day_overrides) adjust what's due: a skip
+  // override removes the property from this date, a service override adds it.
+  const ov = date ? await loadDayOverrides(date).catch(() => null) : null
+  const isDue = (p) => {
+    if (ov?.skips?.has(p.id)) return false
+    if (ov?.extras?.has(p.id)) return true
+    return (p.pickup_days || []).some((d) =>
+      scheduleHitsDate({ day_of_week: d, frequency: p.pickup_frequency || 'weekly', start_date: p.pickup_start_date || null, active: true }, date))
+  }
   const unrouted = props
     .filter((p) => date && !onRoute.has(p.id) && isDue(p))
     .map((p) => ({
@@ -198,6 +210,23 @@ export async function buildRouteFromSchedules(code = 'B', date = null) {
   const scheds = await loadActiveSchedules(def?.business_line || null)
   const due = scheds.filter((s) => scheduleHitsDate(s, date))
   const dueIds = new Set(due.map((s) => s.property_id).filter(Boolean))
+
+  // Apply one-time day changes: skip overrides pull a property off this date,
+  // service overrides add it (same business line only).
+  const ov = await loadDayOverrides(date).catch(() => null)
+  if (ov) {
+    for (const id of ov.skips) dueIds.delete(id)
+    const extraIds = [...ov.extras].filter((id) => !dueIds.has(id))
+    if (extraIds.length) {
+      const { data: extraProps } = await supabase
+        .from('properties').select('id, business_line, paused').in('id', extraIds)
+      for (const p of extraProps || []) {
+        if (p.paused) continue
+        if (def?.business_line && (p.business_line || 'waste') !== def.business_line) continue
+        dueIds.add(p.id)
+      }
+    }
+  }
 
   // Find the route for this date; only create one if there's something to do.
   let { data: route, error: rErr } = await supabase
@@ -332,11 +361,60 @@ export async function updateRouteDef(code, patch) {
 }
 
 // Delete a whole route: its dated instances and their stops, plus the catalog
-// row. Properties are untouched. Returns counts of what was removed.
-export async function deleteRouteDef(code) {
-  const { data, error } = await supabase.rpc('delete_route', { p_code: code })
+// row. Properties are untouched. Everything removed is snapshotted server-side,
+// so the returned snapshot_id can undo the deletion via restoreRouteSnapshot.
+export async function deleteRouteDef(code, deletedBy = null) {
+  const { data, error } = await supabase.rpc('delete_route', { p_code: code, p_deleted_by: deletedBy })
+  if (error) throw error
+  return data // { code, name, routes_deleted, stops_deleted, snapshot_id }
+}
+
+// Undo an accidental route deletion (restores catalog row, dated routes, and
+// stops with their original ids).
+export async function restoreRouteSnapshot(snapshotId) {
+  const { data, error } = await supabase.rpc('restore_route', { p_snapshot_id: snapshotId })
   if (error) throw error
   return data
+}
+
+// --- one-time day changes ---------------------------------------------------
+// property_day_overrides: on skip_date the property does NOT run its usual
+// pickup; on service_date it runs instead. Used by the "just this once" option
+// when editing a stop's day.
+export async function loadDayOverrides(date) {
+  const { data, error } = await supabase
+    .from('property_day_overrides')
+    .select('id, property_id, skip_date, service_date, note, created_by')
+    .or(`skip_date.eq.${date},service_date.eq.${date}`)
+  if (error) throw error
+  const skips = new Set()
+  const extras = new Set()
+  for (const r of data || []) {
+    if (r.skip_date === date) skips.add(r.property_id)
+    if (r.service_date === date) extras.add(r.property_id)
+  }
+  return { skips, extras, rows: data || [] }
+}
+
+export async function createDayOverride({ propertyId, skipDate = null, serviceDate = null, note = null, createdBy = null }) {
+  const { data, error } = await supabase
+    .from('property_day_overrides')
+    .insert({ property_id: propertyId, skip_date: skipDate, service_date: serviceDate, note, created_by: createdBy })
+    .select('id')
+    .single()
+  if (error) throw error
+  return data
+}
+
+// Move a stop to ANOTHER DATE's route of the same (or another) code — used by
+// the one-time day change. Creates the target date's route if needed.
+export async function moveStopToDate(stopId, code, targetDate) {
+  const target = await ensureRoute(code, targetDate)
+  const { data: existing } = await supabase.from('route_stops').select('seq').eq('route_id', target.id)
+  const seq = (existing || []).reduce((m, e) => Math.max(m, e.seq || 0), 0) + 1
+  const { error } = await supabase.from('route_stops').update({ route_id: target.id, seq }).eq('id', stopId)
+  if (error) throw error
+  return { route: target }
 }
 
 export async function createRouteDef({ code, name, color, line }) {
@@ -438,7 +516,7 @@ export async function loadDayDispatch(date, line) {
   if (!date) throw new Error('A date is required.')
   let q = supabase
     .from('routes')
-    .select('id, code, name, driver_id, business_line, route_stops(id, seq, status, service, time_window, lat, lng, check_in, check_out, on_my_way_at, excess_flagged, excess_note, tech_pay, nudge_sent, properties(name, address, notes, lat, lng, price, tech_pay, customers(name, phone)), stop_photos(id))')
+    .select('id, code, name, driver_id, business_line, route_stops(id, seq, status, service, time_window, lat, lng, check_in, check_out, on_my_way_at, excess_flagged, excess_note, tech_pay, nudge_sent, skip_reason, skipped_by, property_id, properties(name, address, notes, lat, lng, price, tech_pay, customer_id, customers(name, phone)), stop_photos(id))')
     .eq('service_date', date)
   if (line) q = q.eq('business_line', line)
   const { data, error } = await q.order('code', { ascending: true })
@@ -459,6 +537,10 @@ export async function loadDayDispatch(date, line) {
         notes: s.properties?.notes || '',
         clientName: s.properties?.customers?.name || null,
         clientPhone: s.properties?.customers?.phone || null,
+        customerId: s.properties?.customer_id || null,
+        propertyId: s.property_id || null,
+        skipReason: s.skip_reason || '',
+        skippedBy: s.skipped_by || null,
         onMyWayAt: s.on_my_way_at || null,
         excessFlagged: !!s.excess_flagged, excessNote: s.excess_note || '',
         nudgeSent: !!s.nudge_sent,
@@ -559,6 +641,25 @@ export async function resetStopStatus(stopId) {
   const { error } = await supabase.from('route_stops').update({
     status: 'pending', check_in: null, check_out: null, on_my_way_at: null,
     check_in_lat: null, check_in_lng: null, check_out_lat: null, check_out_lng: null,
+  }).eq('id', stopId)
+  if (error) throw error
+}
+
+// Skip a stop WITHOUT deleting it: flagged with a reason so dispatch can see it
+// was intentionally passed over. Un-skip puts it back to pending.
+export async function skipStop(stopId, reason, byName) {
+  const { error } = await supabase.from('route_stops').update({
+    status: 'skipped',
+    skip_reason: (reason || '').trim() || null,
+    skipped_by: byName || null,
+    skipped_at: new Date().toISOString(),
+  }).eq('id', stopId)
+  if (error) throw error
+}
+
+export async function unskipStop(stopId) {
+  const { error } = await supabase.from('route_stops').update({
+    status: 'pending', skip_reason: null, skipped_by: null, skipped_at: null,
   }).eq('id', stopId)
   if (error) throw error
 }

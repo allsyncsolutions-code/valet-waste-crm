@@ -51,6 +51,10 @@ Guidelines:
 - BUSINESS LINES: the company runs three lines — waste (Waste & Recycling: recurring routed pickups), junk (Junk Removal: ONE-TIME jobs on a calendar, no routes), and lawn (Lawn Care). You see across ALL lines. Junk jobs are created with create_job and live on the Junk calendar. create_job automatically checks how close the job address is to that day's route stops and returns route_proximity — always mention it when scheduling (e.g. "booked it — it's 0.4 mi from stop 8 on Route A, so slot it after that stop" or "heads up, nearest route stop that day is 11 mi away"). If the proximity is far, offer to check other days' routes with list_route_stops to find a better date. When staff ask when a junk job could fit BEFORE booking, look at that day's trash routes (list_route_stops) and the job addresses, and recommend a slot near where a route already passes.
 - YOU CAN ALSO LOOK THINGS UP across the whole business (read-only): a client's invoices & outstanding balance (get_client_invoices), a tech's pay & clocked hours for a period (get_tech_pay), proof-of-service visit history with check-in/out times, GPS and photo counts (get_service_history), the recent activity feed (list_activity), text-message history (list_messages), the team/staff roster with roles & phones (list_team), portal quotes (list_quotes), and portal service requests (list_service_requests). Reach for these whenever staff ask "what does X owe / how much did Y earn / did we service Z / what happened today / who's on the team / any new requests"; don't say you can't access it — use the tool.
 - SERVICE CLEANUP: the app's service list is just the distinct 'service' values across properties, so duplicates and typos pile up. list_services shows a count per service and flags likely duplicates. Use merge_service to fix them in bulk — rename/merge one service into another across all properties (or one client), or clear a bad one (clear:true). E.g. 'switch everything on "Weekly trash pick up & removal - 1 day" to "1 weekly"' → merge_service from_service:that, to_service:"1 weekly". Offer preview:true first for big changes. This is the bulk service edit you previously couldn't do — you CAN now, so don't refuse it.
+- PICKUP DAYS LIVE ON EACH ADDRESS (properties.pickup_days) — NOT on the client, and NEVER as a tag. When the user assigns or changes a pickup day ("put 12 Main St on Mondays", "they're a Thursday client now"), use edit_property with pickup_days:['monday'] (or per-property "days" in bulk_add_properties). Do NOT create a tag like "monday" for scheduling — tags don't drive routes; only pickup_days does.
+- ONE-TIME vs PERMANENT day changes: "skip just this week" / "move this Thursday's pickup to Friday" = ONE-TIME → use move_pickup_once (records an override; the regular schedule is untouched and rebuilds respect it). "Change their day to Friday going forward" = PERMANENT → edit_property pickup_days. If it's ambiguous which they mean, ask before acting.
+- MULTIPLE ADDRESSES: many clients have several service addresses. For any address-specific action (day change, skip, one-off pickup, photo, price edit) where the user named only the CLIENT, call list_properties first — if the client has more than one address, ASK which address they mean instead of guessing. Tools that resolve by address return needs_clarification with candidates; present those choices to the user.
+- SKIPPING A STOP: use skip_stop to mark a stop skipped WITH a reason (it stays on the route, flagged SKIPPED, visible to dispatch) — never delete/remove a stop just because it won't be serviced that day. skip_stop with undo:true puts it back to pending.
 - After making a change, confirm what you did in one short sentence.`
 
 // Selectable personalities for Randy's STAFF chat replies. The customer-facing
@@ -118,6 +122,7 @@ const tools = [
         pickup_day: { type: "string", enum: DAYS },
         invoice_cadence: { type: "string", enum: CADENCES },
         invoice_amount: { type: "number", description: "Recurring rate in dollars (optional)" },
+        billing_type: { type: "string", enum: ["subscription", "one_time"], description: "'subscription' (recurring, default) or 'one_time' (single-payment / on-demand client)." },
         status: { type: "string", enum: ["active", "paused", "prospect"] },
       },
       required: ["name"],
@@ -137,6 +142,7 @@ const tools = [
         phone: { type: "string" },
         notes: { type: "string" },
         status: { type: "string", enum: ["active", "paused", "prospect"] },
+        billing_type: { type: "string", enum: ["subscription", "one_time"], description: "Switch the client between subscription and single-payment." },
       },
       required: ["customer_id"],
     },
@@ -209,7 +215,7 @@ const tools = [
   },
   {
     name: "add_stop_to_route",
-    description: "Add ONE new address as a stop on a route for a date. Finds or creates the property, geocodes the address, and appends the stop. Defaults to today and the first route.",
+    description: "Add ONE new address as a stop on a route for a date. Finds the property (or creates it, tied to the client if given), geocodes the address, and appends the stop. If the address matches several existing properties it returns needs_clarification — ask the user which one. Defaults to today and the first route.",
     input_schema: {
       type: "object",
       properties: {
@@ -218,6 +224,8 @@ const tools = [
         property_name: { type: "string", description: "Name/label for the stop" },
         address: { type: "string" },
         service: { type: "string" },
+        client_name: { type: "string", description: "The owning client — disambiguates a shared address and ties a NEW property to the right client." },
+        customer_id: { type: "string", description: "Exact client id (from find_clients), preferred over client_name." },
       },
       required: ["address"],
     },
@@ -297,8 +305,10 @@ const tools = [
         default_service: { type: "string", description: "Service for properties that don't specify their own, e.g. 'Trash / Recycle'." },
         price: { type: "number", description: "Price per property (e.g. 11 for $11/week). Applied to every property." },
         create_schedule: { type: "boolean", description: "If true, create one pickup schedule for the client." },
-        pickup_day: { type: "string", description: "Pickup day if create_schedule, e.g. 'monday'. Defaults to monday." },
+        pickup_day: { type: "string", description: "Legacy single pickup day. Prefer pickup_days (array)." },
+        pickup_days: { type: "array", items: { type: "string" }, description: "Pickup day(s) applied to every property in this batch, e.g. ['tuesday','friday']. Full lowercase day names." },
         pickup_freq: { type: "string", description: "weekly | biweekly | monthly | on_call. Defaults to weekly." },
+        billing_type: { type: "string", enum: ["subscription", "one_time"], description: "Set the CLIENT's billing type: 'subscription' for recurring service, 'one_time' for single-payment / on-demand clients." },
         needs_review: { type: "boolean", description: "If true, flag every imported property as 'Needs review' (for messy data the owner should go over)." },
         properties: {
           type: "array",
@@ -311,6 +321,7 @@ const tools = [
               address: { type: "string", description: "Full street address incl. city/zip for geocoding." },
               service: { type: "string", description: "Per-property service; falls back to default_service." },
               notes: { type: "string", description: "Bin placement / access note, optional." },
+              days: { type: "array", items: { type: "string" }, description: "Pickup day(s) for THIS property (overrides the batch pickup_days) — lets one import mix Monday and Thursday addresses." },
             },
             required: ["address"],
           },
@@ -386,6 +397,39 @@ const tools = [
         date: { type: "string", description: "Service date YYYY-MM-DD. Defaults to today." },
         route_code: { type: "string", description: "Optional — limit to one route code/letter." },
       },
+    },
+  },
+  {
+    name: "skip_stop",
+    description:
+      "Mark a route stop SKIPPED for a date, with a reason (e.g. 'gate locked', 'client asked to skip this week'). The stop STAYS on the route flagged as skipped — nothing is deleted — so dispatch can see it was intentionally passed over. Use undo:true to un-skip (back to pending). Finds the stop by property address; date defaults to today.",
+    input_schema: {
+      type: "object",
+      properties: {
+        address: { type: "string", description: "Address (or part of it) of the stop's property." },
+        client_name: { type: "string", description: "Optional — the owning client, to disambiguate a shared address." },
+        date: { type: "string", description: "Service date YYYY-MM-DD. Defaults to today." },
+        route_code: { type: "string", description: "Optional — limit to one route code/letter." },
+        reason: { type: "string", description: "Why it's being skipped. Strongly encouraged." },
+        undo: { type: "boolean", description: "true to un-skip the stop (back to pending)." },
+      },
+      required: ["address"],
+    },
+  },
+  {
+    name: "move_pickup_once",
+    description:
+      "ONE-TIME day change: move one address's pickup off its regular date to another date WITHOUT changing the recurring schedule (e.g. 'skip Thursday and run them Friday, just this week'). Records a day override (route rebuilds respect it) and moves the already-built stop if there is one. Omit service_date for a pure one-time skip. For a PERMANENT day change use edit_property with pickup_days instead.",
+    input_schema: {
+      type: "object",
+      properties: {
+        address: { type: "string", description: "Address (or part of it) of the property." },
+        client_name: { type: "string", description: "Optional — the owning client, to disambiguate a shared address." },
+        skip_date: { type: "string", description: "The regular date being moved/skipped, YYYY-MM-DD." },
+        service_date: { type: "string", description: "The one-time date to run instead, YYYY-MM-DD. Omit to just skip." },
+        note: { type: "string", description: "Short note, e.g. 'client asked — holiday'." },
+      },
+      required: ["address", "skip_date"],
     },
   },
   {
@@ -696,6 +740,8 @@ function logForTool(name: string, out: any): Promise<void> | undefined {
     case "edit_property": return out.needs_clarification ? undefined : logActivity("property_updated", `Updated property ${out.address}${out.needs_review === false ? " (reviewed)" : ""}`, "property", out.id)
     case "flag_properties": return out.changed ? logActivity("properties_flagged", `${out.needs_review ? "Flagged" : "Cleared review on"} ${out.changed} propert${out.changed === 1 ? "y" : "ies"}`, "customer") : undefined
     case "add_property_photo": return out.needs_clarification ? undefined : logActivity("property_photo_added", `Logged a ${out.date} photo on ${out.address}`, "property", out.id)
+    case "skip_stop": return out.ok ? logActivity(out.undone ? "stop_unskipped" : "stop_skipped", `${out.undone ? "Un-skipped" : "Skipped"} ${out.address} (${out.date})${out.reason ? ` — ${out.reason}` : ""}`, "property", out.property_id) : undefined
+    case "move_pickup_once": return out.ok ? logActivity("day_changed_once", `One-time move: ${out.address} off ${out.skip_date}${out.service_date ? ` → ${out.service_date}` : " (skipped)"}`, "property", out.property_id) : undefined
     case "send_sms": return out.ok ? logActivity("sms_sent", `Texted ${out.to}`) : undefined
     case "text_invoice": return out.ok ? logActivity(out.preview ? "invoice_previewed" : "invoice_texted", out.preview ? `Previewed invoice ${out.invoice} to ${out.sent_to}` : `Texted invoice ${out.invoice} to ${out.client}`, "invoice") : undefined
     case "suggest_automation": return out.ok ? logActivity("automation_suggested", `Suggested automation: ${out.name}`) : undefined
@@ -916,6 +962,7 @@ async function createClient(a: any) {
     email: a.email ?? null,
     phone: a.phone ?? null,
     status: a.status ?? "active",
+    billing_type: a.billing_type ?? "subscription",
   })
   await sbPost("pickup_schedules", {
     customer_id: customer.id,
@@ -933,7 +980,7 @@ async function createClient(a: any) {
 
 async function updateClient(a: any) {
   const patch: Record<string, unknown> = {}
-  for (const k of ["name", "address", "contact_name", "email", "phone", "notes", "status"]) {
+  for (const k of ["name", "address", "contact_name", "email", "phone", "notes", "status", "billing_type"]) {
     if (a[k] !== undefined) patch[k] = a[k]
   }
   if (Object.keys(patch).length === 0) throw new Error("No fields to update.")
@@ -1008,10 +1055,25 @@ async function markInvoicePaid(a: any) {
 async function addStopToRoute(a: any) {
   const code = String(a.route_code ?? "").trim().toUpperCase() || await defaultRouteCode()
   const date = a.date ? String(a.date).trim() : today()
-  const route = await ensureRoute(code, date)
-  // property by address (create if missing) — geocode best-effort
   const address = String(a.address ?? "").trim()
-  let props = await sbGet(`properties?address=ilike.${enc(`*${address}*`)}&select=id,name,address,service,lat,lng&limit=1`)
+
+  // Resolve the client, when given (ties a NEW property to the right customer
+  // and disambiguates addresses shared across clients).
+  let customerId: string | null = a.customer_id ?? null
+  if (!customerId && a.client_name) {
+    const custs = await sbGet(`customers?name=ilike.${enc(`*${a.client_name}*`)}&select=id,name&limit=5`)
+    if (custs.length === 1) customerId = custs[0].id
+    else if (custs.length > 1) {
+      return { needs_clarification: true, which: "client", matches: custs.map((c: any) => ({ id: c.id, name: c.name })) }
+    }
+  }
+
+  // property by address (create if missing) — geocode best-effort
+  let props = await sbGet(`properties?address=ilike.${enc(`*${address}*`)}&select=id,name,address,service,lat,lng,customer_id&limit=10`)
+  if (customerId && props.length > 1) props = props.filter((p: any) => p.customer_id === customerId)
+  if (props.length > 1) {
+    return { needs_clarification: true, which: "property", matches: props.map((p: any) => ({ id: p.id, address: p.address || p.name })) }
+  }
   let property = props[0]
   if (!property) {
     const loc = await geocode(address)
@@ -1019,11 +1081,14 @@ async function addStopToRoute(a: any) {
       name: a.property_name ?? address,
       address,
       service: a.service ?? null,
+      customer_id: customerId,
+      created_by: "Trashy Randy",
       lat: loc?.lat ?? null,
       lng: loc?.lng ?? null,
     })
     property = p
   }
+  const route = await ensureRoute(code, date)
   // next seq on the route
   const stops = await sbGet(`route_stops?route_id=eq.${enc(route.id)}&select=seq&order=seq.desc&limit=1`)
   const nextSeq = (stops[0]?.seq ?? 0) + 1
@@ -1161,8 +1226,11 @@ async function bulkAddProperties(a: any) {
         price: a.price ?? null,
         create_schedule: a.create_schedule ?? false,
         pickup_day: a.pickup_day ?? "monday",
+        pickup_days: Array.isArray(a.pickup_days) ? a.pickup_days : undefined,
         pickup_freq: a.pickup_freq ?? "weekly",
+        billing_type: a.billing_type ?? null,
         needs_review: a.needs_review ?? false,
+        created_by: "Trashy Randy",
         properties: list,
       },
     }),
@@ -1297,6 +1365,78 @@ async function resolveOneProperty(a: any): Promise<any> {
     return { needs_clarification: true, matches: rows.map((r: any) => ({ id: r.id, address: r.address || r.name })) }
   }
   return { id: rows[0].id, address: rows[0].address || rows[0].name }
+}
+
+// Find the route_stops row for a property on a date (optionally one route code).
+async function findStopFor(propertyId: string, date: string, routeCode?: string) {
+  let rq = `routes?service_date=eq.${enc(date)}&select=id,code`
+  if (routeCode) rq += `&code=eq.${enc(String(routeCode).trim().toUpperCase())}`
+  const routes = await sbGet(rq)
+  if (!routes.length) return null
+  const ids = routes.map((r: any) => r.id)
+  const stops = await sbGet(`route_stops?route_id=in.(${ids.join(",")})&property_id=eq.${enc(propertyId)}&select=id,route_id,status,seq&limit=2`)
+  if (!stops.length) return null
+  const stop = stops[0]
+  const route = routes.find((r: any) => r.id === stop.route_id)
+  return { ...stop, route_code: route?.code ?? null }
+}
+
+// Skip (or un-skip) a stop with a reason — flagged, never deleted.
+async function skipStopTool(a: any) {
+  const date = a.date ? String(a.date).trim() : today()
+  const prop = await resolveOneProperty(a)
+  if (prop.needs_clarification) return prop
+  const stop = await findStopFor(prop.id, date, a.route_code)
+  if (!stop) return { ok: false, note: `No stop for ${prop.address} on ${date} — the route may not be built yet.` }
+  if (a.undo) {
+    await sbPatch(`route_stops?id=eq.${enc(stop.id)}`, { status: "pending", skip_reason: null, skipped_by: null, skipped_at: null })
+    return { ok: true, undone: true, address: prop.address, property_id: prop.id, date, route: stop.route_code }
+  }
+  if (stop.status === "done") return { ok: false, note: `${prop.address} is already checked out (done) on ${date} — nothing to skip.` }
+  await sbPatch(`route_stops?id=eq.${enc(stop.id)}`, {
+    status: "skipped",
+    skip_reason: (a.reason ?? "").trim() || null,
+    skipped_by: "Trashy Randy",
+    skipped_at: new Date().toISOString(),
+  })
+  return { ok: true, address: prop.address, property_id: prop.id, date, route: stop.route_code, reason: (a.reason ?? "").trim() || null }
+}
+
+// One-time day change: record the override, then move/skip the built stop.
+async function movePickupOnce(a: any) {
+  const skipDate = String(a.skip_date ?? "").trim()
+  if (!skipDate) throw new Error("skip_date (the regular date being moved) is required.")
+  const serviceDate = a.service_date ? String(a.service_date).trim() : null
+  const prop = await resolveOneProperty(a)
+  if (prop.needs_clarification) return prop
+  await sbPost("property_day_overrides", {
+    property_id: prop.id,
+    skip_date: skipDate,
+    service_date: serviceDate,
+    note: (a.note ?? "").trim() || null,
+    created_by: "Trashy Randy",
+  })
+  // If the skip_date route is already built, move (or skip) the live stop too.
+  let stopAction = "no built stop on that date yet — the override will apply when the route is built"
+  const stop = await findStopFor(prop.id, skipDate)
+  if (stop && stop.status !== "done") {
+    if (serviceDate) {
+      const target = await ensureRoute(stop.route_code || await defaultRouteCode(), serviceDate)
+      const existing = await sbGet(`route_stops?route_id=eq.${enc(target.id)}&select=seq`)
+      const seq = nextSeqFrom(existing) + 1
+      await sbPatch(`route_stops?id=eq.${enc(stop.id)}`, { route_id: target.id, seq })
+      stopAction = `moved the built stop to ${serviceDate}`
+    } else {
+      await sbPatch(`route_stops?id=eq.${enc(stop.id)}`, {
+        status: "skipped",
+        skip_reason: (a.note ?? "").trim() || "One-time skip",
+        skipped_by: "Trashy Randy",
+        skipped_at: new Date().toISOString(),
+      })
+      stopAction = "marked the built stop skipped"
+    }
+  }
+  return { ok: true, address: prop.address, property_id: prop.id, skip_date: skipDate, service_date: serviceDate, stop_action: stopAction, note: "Recurring schedule unchanged — this applies to that one date only." }
 }
 
 async function addPropertyPhoto(a: any) {
@@ -1901,6 +2041,8 @@ async function runTool(name: string, input: any): Promise<unknown> {
     case "move_stops": return await moveStops(input)
     case "bulk_add_properties": return await bulkAddProperties(input)
     case "add_property_photo": return await addPropertyPhoto(input)
+    case "skip_stop": return await skipStopTool(input)
+    case "move_pickup_once": return await movePickupOnce(input)
     case "list_skipped_stops": return await listSkippedStops(input)
     case "list_route_stops": return await listRouteStops(input)
     case "list_services": return await listServices()

@@ -3,12 +3,30 @@
 // swallows its own errors.
 import { supabase } from './supabaseClient.js'
 
+// Who's doing this? Resolve the signed-in staff member's display name once and
+// cache it, so the activity feed says "Laura" / "Matt" instead of "You".
+let _actorName = null
+export async function currentActorName() {
+  if (_actorName) return _actorName
+  try {
+    const { data } = await supabase.auth.getUser()
+    const u = data?.user
+    _actorName = u?.user_metadata?.full_name || u?.email || null
+    if (_actorName) {
+      // Prefer the profiles full_name if it's set (email is the fallback).
+      const { data: prof } = await supabase.from('profiles').select('full_name').eq('id', u.id).maybeSingle()
+      if (prof?.full_name) _actorName = prof.full_name
+    }
+  } catch (e) { /* leave null */ }
+  return _actorName
+}
+
 // Fire-and-forget. Pass { type, summary, actor?, entityType?, entityId?, meta? }.
 export async function logActivity(event) {
   try {
     await supabase.from('activity_log').insert({
       type: event.type,
-      actor: event.actor || 'You',
+      actor: event.actor || (await currentActorName()) || 'Staff',
       summary: event.summary,
       entity_type: event.entityType || null,
       entity_id: event.entityId || null,

@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { MONO } from '../data.js'
 import { STATUS_META } from '../lib/routeModel.js'
-import { loadDayDispatch, checkInStop, checkOutStop, resetStopStatus, flagStopExcess, unflagStopExcess, markStopNudged } from '../lib/routesData.js'
+import { loadDayDispatch, checkInStop, checkOutStop, resetStopStatus, flagStopExcess, unflagStopExcess, markStopNudged, skipStop, unskipStop } from '../lib/routesData.js'
 import { loadStopPhotos, uploadStopPhoto, deleteStopPhoto } from '../lib/photosData.js'
 import { loadDrivers } from '../lib/teamData.js'
-import { logActivity } from '../lib/activityData.js'
+import { logActivity, currentActorName } from '../lib/activityData.js'
 import { supabase } from '../lib/supabaseClient.js'
 
 // Best-effort browser geolocation — resolves null if unavailable/denied.
@@ -38,11 +38,20 @@ function initialsOf(name) {
   return String(name || 'U').replace(/@.*$/, '').split(/[\s._-]+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('') || 'U'
 }
 
-export default function Drivers({ app }) {
+// Also renders EMBEDDED inside Routes & Dispatch ("Field" mode): pass `date`
+// + `onDateChange` to control the day from outside and `embedded` to hide the
+// built-in date nav (the Routes day picker drives it instead).
+export default function Drivers({ app, date: dateProp, onDateChange, embedded }) {
   const isMobile = app.isMobile
   const go = app.go
 
-  const [date, setDate] = useState(TODAY)
+  const [dateState, setDateState] = useState(TODAY)
+  const date = dateProp || dateState
+  const setDate = (next) => {
+    const v = typeof next === 'function' ? next(date) : next
+    if (onDateChange) onDateChange(v)
+    else setDateState(v)
+  }
   const [drivers, setDrivers] = useState([])
   const [routes, setRoutes] = useState([])
   const [loading, setLoading] = useState(true)
@@ -135,6 +144,32 @@ export default function Drivers({ app }) {
     catch (e) { setErr(e.message || String(e)) }
     setBusyStop(null)
   }
+  // Skip a stop (with a reason) instead of deleting it — it stays on the route
+  // flagged SKIPPED so everyone can see it was intentionally passed over.
+  async function doSkip(stop) {
+    const reason = window.prompt(`Skip ${stop.name}?\n\nQuick reason (e.g. "gate locked", "client asked to skip this week"):`)
+    if (reason === null) return
+    setBusyStop(stop.id)
+    setErr(null)
+    try {
+      const who = await currentActorName().catch(() => null)
+      await skipStop(stop.id, reason, who)
+      logActivity({ type: 'stop_skipped', summary: `Skipped ${stop.address || stop.name}${reason.trim() ? ` — ${reason.trim()}` : ''}`, entityType: 'property', entityId: stop.propertyId })
+      await refresh()
+    } catch (e) { setErr(e.message || String(e)) }
+    setBusyStop(null)
+  }
+  async function doUnskip(stop) {
+    setBusyStop(stop.id)
+    setErr(null)
+    try {
+      await unskipStop(stop.id)
+      logActivity({ type: 'stop_unskipped', summary: `Un-skipped ${stop.address || stop.name}`, entityType: 'property', entityId: stop.propertyId })
+      await refresh()
+    } catch (e) { setErr(e.message || String(e)) }
+    setBusyStop(null)
+  }
+
   async function doFlagExcess(stop) {
     if (stop.excessFlagged) {
       if (!window.confirm('Remove the excess flag from this stop?')) return
@@ -201,7 +236,8 @@ export default function Drivers({ app }) {
 
   return (
     <div style={{ maxWidth: 1100, margin: '0 auto' }}>
-      {/* date nav */}
+      {/* date nav (hidden when embedded — the Routes day picker drives the date) */}
+      {!embedded && (
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '9px 12px' }}>
         <div onClick={() => setDate((d) => addDays(d, -1))} style={navBtn}>‹</div>
         <div style={{ flex: 1, textAlign: 'center', fontWeight: 700, fontSize: 14 }}>
@@ -210,6 +246,7 @@ export default function Drivers({ app }) {
         <div onClick={() => setDate((d) => addDays(d, 1))} style={navBtn}>›</div>
         {date !== TODAY && <div onClick={() => setDate(TODAY)} style={{ fontSize: 12, fontWeight: 600, color: '#1f7a4d', border: '1px solid #cfe0d5', borderRadius: 8, padding: '7px 12px', cursor: 'pointer' }}>Today</div>}
       </div>
+      )}
 
       {err && <div style={banner('#c0492f', '#fbeae6')}>{err}</div>}
 
@@ -222,7 +259,7 @@ export default function Drivers({ app }) {
             <div style={{ background: '#fff', border: '1px dashed #d8ddd6', borderRadius: 14, padding: '34px 22px', textAlign: 'center' }}>
               <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6 }}>No routes for {pretty(date)} yet</div>
               <div style={{ fontSize: 13, color: '#7c8a82', marginBottom: 14 }}>Build a route and assign a driver to see the day's dispatch here.</div>
-              <button onClick={() => go && go('routes')} style={primaryBtn}>Go to Routes &amp; Dispatch</button>
+              <button onClick={() => { app.setRoutesMode && app.setRoutesMode('plan'); go && go('routes') }} style={primaryBtn}>Go to route planning</button>
             </div>
           )}
 
@@ -252,7 +289,7 @@ export default function Drivers({ app }) {
                     {rts.length > 1 && <div style={{ fontFamily: MONO, fontSize: 11, color: '#7c8a82', margin: '6px 2px' }}>{r.code} · {r.name}</div>}
                     {r.stops.length === 0 ? (
                       <div style={{ fontSize: 12, color: '#9aa69e', padding: '6px 2px' }}>No stops on this route.</div>
-                    ) : r.stops.map((s) => <StopRow key={s.id} s={s} busy={busyStop === s.id} photos={photos[s.id] || []} uploading={uploadingStop === s.id} onCheckIn={() => doCheckIn(s)} onCheckOut={() => doCheckOut(s)} onUndo={() => doUndo(s)} onFlagExcess={() => doFlagExcess(s)} onAddPhoto={(f) => addPhoto(s, f)} onDeletePhoto={removePhoto} />)}
+                    ) : r.stops.map((s) => <StopRow key={s.id} s={s} busy={busyStop === s.id} photos={photos[s.id] || []} uploading={uploadingStop === s.id} onCheckIn={() => doCheckIn(s)} onCheckOut={() => doCheckOut(s)} onUndo={() => doUndo(s)} onSkip={() => doSkip(s)} onUnskip={() => doUnskip(s)} onOpenClient={s.customerId && app.openClient ? () => app.openClient(s.customerId) : null} onFlagExcess={() => doFlagExcess(s)} onAddPhoto={(f) => addPhoto(s, f)} onDeletePhoto={removePhoto} />)}
                   </div>
                 ))}
               </div>
@@ -267,7 +304,7 @@ export default function Drivers({ app }) {
                   <div style={{ fontWeight: 700, fontSize: 14, color: '#9a7b1e' }}>Unassigned routes</div>
                   <div style={{ fontSize: 12, color: '#9a7b3e' }}>{unassigned.map((r) => `${r.code} · ${r.name} (${r.stops.length})`).join('  ·  ')}</div>
                 </div>
-                <button onClick={() => go && go('routes')} style={{ ...primaryBtn, background: '#c08a2e' }}>Assign a driver</button>
+                <button onClick={() => { app.setRoutesMode && app.setRoutesMode('plan'); go && go('routes') }} style={{ ...primaryBtn, background: '#c08a2e' }}>Assign a driver</button>
               </div>
             </div>
           )}
@@ -302,16 +339,19 @@ export default function Drivers({ app }) {
   )
 }
 
-function StopRow({ s, busy, photos = [], uploading, onCheckIn, onCheckOut, onUndo, onFlagExcess, onAddPhoto, onDeletePhoto }) {
+function StopRow({ s, busy, photos = [], uploading, onCheckIn, onCheckOut, onUndo, onSkip, onUnskip, onOpenClient, onFlagExcess, onAddPhoto, onDeletePhoto }) {
   const meta = STATUS_META[s.status] || STATUS_META.pending
   const fileRef = useRef(null)
   return (
-    <div style={{ padding: '8px 4px', borderTop: '1px solid #f1f3f0' }}>
+    <div style={{ padding: '8px 4px', borderTop: '1px solid #f1f3f0', opacity: s.status === 'skipped' ? 0.75 : 1 }}>
       <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
         <div style={{ width: 22, height: 22, flex: 'none', borderRadius: '50%', background: meta.bg, color: meta.fg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontSize: 10.5, fontWeight: 600 }}>{s.seq}</div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontWeight: 600, fontSize: 13 }}>{s.name}</div>
-          <div style={{ fontSize: 11.5, color: '#7c8a82', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.address || s.service}</div>
+          <div onClick={onOpenClient || undefined} title={onOpenClient ? `Open ${s.clientName || 'client'}'s record` : undefined} style={{ fontWeight: 600, fontSize: 13, cursor: onOpenClient ? 'pointer' : 'default', color: onOpenClient ? '#1f7a4d' : '#1a2420' }}>{s.name}</div>
+          <div onClick={onOpenClient || undefined} style={{ fontSize: 11.5, color: '#7c8a82', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', cursor: onOpenClient ? 'pointer' : 'default' }}>{s.address || s.service}</div>
+          {s.status === 'skipped' && (
+            <div style={{ fontSize: 11, color: '#8a6d1e', marginTop: 2 }}>⤼ Skipped{s.skippedBy ? ` by ${s.skippedBy}` : ''}{s.skipReason ? ` — ${s.skipReason}` : ''}</div>
+          )}
         </div>
         <div style={{ fontFamily: MONO, fontSize: 10, fontWeight: 600, color: meta.color, flex: 'none' }}>{meta.label}</div>
         {s.lat != null && s.lng != null && (
@@ -321,7 +361,13 @@ function StopRow({ s, busy, photos = [], uploading, onCheckIn, onCheckOut, onUnd
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 7, marginLeft: 32, flexWrap: 'wrap' }}>
         {s.status === 'pending' && (
-          <button onClick={onCheckIn} disabled={busy} style={fieldBtn('#1f7a4d')}>{busy ? '…' : 'Check in'}</button>
+          <>
+            <button onClick={onCheckIn} disabled={busy} style={fieldBtn('#1f7a4d')}>{busy ? '…' : 'Check in'}</button>
+            <button onClick={onSkip} disabled={busy} title="Skip this stop with a reason — it stays on the route, flagged as skipped" style={{ background: '#fff', color: '#8a6d1e', border: '1px solid #e0cf9e', borderRadius: 8, padding: '6px 11px', fontSize: 11.5, fontWeight: 700, cursor: 'pointer' }}>⤼ Skip</button>
+          </>
+        )}
+        {s.status === 'skipped' && (
+          <button onClick={onUnskip} disabled={busy} style={fieldBtnGhost} title="Put this stop back to pending">Un-skip</button>
         )}
         {s.status === 'enroute' && (
           <>
@@ -336,7 +382,7 @@ function StopRow({ s, busy, photos = [], uploading, onCheckIn, onCheckOut, onUnd
             <button onClick={onUndo} disabled={busy} style={fieldBtnGhost} title="Reopen stop">undo</button>
           </>
         )}
-        {s.status !== 'pending' && (
+        {s.status !== 'pending' && s.status !== 'skipped' && (
           <button
             onClick={onFlagExcess}
             disabled={busy}
