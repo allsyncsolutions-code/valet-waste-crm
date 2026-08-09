@@ -5,6 +5,8 @@ import { loadSettings, saveDepot, geocodeAddress, subscribeSettings, saveSmsTemp
 import { stripeStatus, stripeOnboard } from '../lib/stripeData.js'
 import { platformBillingStatus, platformBillingCheckout, platformBillingPortal } from '../lib/platformBillingData.js'
 import { getSmsConfig, saveSmsConfig, sendTestSms, listSmsSubscriptions, ensureSmsSubscription } from '../lib/smsData.js'
+import Import from './Import.jsx'
+import Activity from './Activity.jsx'
 
 const EMPTY_SMS = {
   sms_enabled: false,
@@ -47,6 +49,8 @@ export default function Settings({ app }) {
   const [randyMsg, setRandyMsg] = useState(null)
   const [notifyComplete, setNotifyComplete] = useState(false)
   const [notifyCompleteBusy, setNotifyCompleteBusy] = useState(false)
+  // In-place sub-sections: 'settings' (default cards) | 'import' | 'activity'.
+  const [section, setSection] = useState('settings')
 
   async function refresh() {
     const [t, c] = await Promise.all([listTags(), tagUsageCounts()])
@@ -316,6 +320,17 @@ export default function Settings({ app }) {
 
   return (
     <div style={{ maxWidth: 720, margin: '0 auto' }}>
+      {section !== 'settings' && (
+        <>
+          <div onClick={() => setSection('settings')} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, marginBottom: 14, cursor: 'pointer', color: '#1f7a4d', fontWeight: 600, fontSize: 13.5 }}>
+            <span style={{ fontSize: 15, lineHeight: 1 }}>←</span> Back to Settings
+          </div>
+          {section === 'import' ? <Import app={app} /> : <Activity app={app} />}
+        </>
+      )}
+
+      {section === 'settings' && (
+      <>
       {/* starting location */}
       <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '20px 22px', marginBottom: 16 }}>
         <div style={{ fontWeight: 700, fontSize: 16 }}>Starting location</div>
@@ -361,6 +376,30 @@ export default function Settings({ app }) {
               </div>
             )
           })}
+        </div>
+      </div>
+
+      {/* import properties */}
+      <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '20px 22px', marginBottom: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div style={{ width: 34, height: 34, flex: 'none', borderRadius: 9, background: '#e7f1eb', color: '#1f7a4d', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontSize: 16 }}>⇪</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 700, fontSize: 16 }}>Import properties</div>
+            <div style={{ fontSize: 12.5, color: '#7c8a82', marginTop: 3 }}>Bulk-add service locations to a client — paste rows from a spreadsheet.</div>
+          </div>
+          <button onClick={() => setSection('import')} style={{ flex: 'none', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Open Import</button>
+        </div>
+      </div>
+
+      {/* activity log */}
+      <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '20px 22px', marginBottom: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div style={{ width: 34, height: 34, flex: 'none', borderRadius: 9, background: '#e7f0f9', color: '#155e9c', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontSize: 16 }}>◷</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 700, fontSize: 16 }}>Activity log</div>
+            <div style={{ fontSize: 12.5, color: '#7c8a82', marginTop: 3 }}>Everything you and Trashy Randy have done — clients, schedules, invoices.</div>
+          </div>
+          <button onClick={() => setSection('activity')} style={{ flex: 'none', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Open Activity Log</button>
         </div>
       </div>
 
@@ -587,6 +626,8 @@ export default function Settings({ app }) {
           </div>
         ))}
       </div>
+      </>
+      )}
     </div>
   )
 }

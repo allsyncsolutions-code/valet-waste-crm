@@ -9,16 +9,13 @@ import Settings from './views/Settings.jsx'
 import Schedule from './views/Schedule.jsx'
 import Invoices from './views/Invoices.jsx'
 import Dashboard from './views/Dashboard.jsx'
-import Activity from './views/Activity.jsx'
 import Drivers from './views/Drivers.jsx'
 import Team from './views/Team.jsx'
-import Import from './views/Import.jsx'
 import Annotations from './views/Annotations.jsx'
 import Automations from './views/Automations.jsx'
 import JobCalendar from './views/JobCalendar.jsx'
 import EmployeePay from './views/EmployeePay.jsx'
 import MyDay from './views/MyDay.jsx'
-import TechSchedule from './views/TechSchedule.jsx'
 import TimeSheets from './views/TimeSheets.jsx'
 import Portal from './views/Portal.jsx'
 import AnnotationLayer from './components/AnnotationLayer.jsx'
@@ -43,8 +40,6 @@ const NAV_MAIN = [
 ]
 const NAV_FIELD = [
   { id: 'clients', glyph: '◎', label: 'Clients' },
-  { id: 'import', glyph: '⇪', label: 'Import' },
-  { id: 'activity', glyph: '◷', label: 'Activity Log' },
   { id: 'automations', glyph: '⟳', label: 'Automations' },
   { id: 'drivers', glyph: '⛟', label: 'Drivers & Field' },
   { id: 'team', glyph: '⚇', label: 'Team' },
@@ -149,26 +144,27 @@ export default function App({ user, onSignOut }) {
   const navFieldBase = isLawn
     ? NAV_FIELD.map((n) => (n.id === 'drivers' ? { id: 'myday', glyph: '☀', label: 'My Day' } : n))
     : NAV_FIELD.filter((n) => n.id !== 'drivers')
-  // Field-crew tabs: schedule calendar (all lines) + payroll (lawn's per-job pay).
+  // Field-crew tabs: payroll (lawn's per-job pay) appended after My Day/Drivers.
   const navField = (() => {
-    const extra = [{ id: 'myschedule', glyph: '▥', label: 'My Schedule' }]
-    if (isLawn) extra.push({ id: 'timesheets', glyph: '⏱', label: 'Time Sheets & Payroll' })
     const base = navFieldBase.slice()
-    const idx = base.findIndex((n) => n.id === 'drivers' || n.id === 'myday')
-    base.splice(idx === -1 ? base.length : idx + 1, 0, ...extra)
+    if (isLawn) {
+      const idx = base.findIndex((n) => n.id === 'myday' || n.id === 'drivers')
+      const entry = { id: 'timesheets', glyph: '⏱', label: 'Time Sheets & Payroll' }
+      base.splice(idx === -1 ? base.length : idx + 1, 0, entry)
+    }
     // On mobile, field work leads the group: My Day (or Drivers & Field),
-    // My Schedule, then Time Sheets & Payroll — office tabs after.
+    // then Time Sheets & Payroll — office tabs after.
     if (isMobile) {
-      const prio = (n) => { const i = ['myday', 'drivers', 'myschedule', 'timesheets'].indexOf(n.id); return i === -1 ? 99 : i }
+      const prio = (n) => { const i = ['myday', 'drivers', 'timesheets'].indexOf(n.id); return i === -1 ? 99 : i }
       base.sort((a, b) => prio(a) - prio(b)) // stable: everything else keeps its order
     }
     return base
   })()
 
   // Techs (staff flagged as drivers) get a focused rail: Dashboard, Routes &
-  // Dispatch, My Day / Drivers & Field, My Schedule, and Time Sheets & Payroll.
+  // Dispatch, My Day / Drivers & Field, and Time Sheets & Payroll.
   const isTech = !isAdmin && !!(user && user.is_driver)
-  const TECH_IDS = ['dashboard', 'routes', 'myday', 'drivers', 'myschedule', 'timesheets']
+  const TECH_IDS = ['dashboard', 'routes', 'myday', 'drivers', 'timesheets']
   const techMain = navMain.filter((n) => ['dashboard', 'routes'].includes(n.id))
   const techField = navField.filter((n) => TECH_IDS.includes(n.id))
 
@@ -215,11 +211,8 @@ export default function App({ user, onSignOut }) {
     schedule: isJunk ? ['Job Calendar', 'One-time junk jobs — click a day to schedule'] : ['Recurring Schedules', 'Set pickup cadence — nth weekday, alternating weeks'],
     invoices: ['Invoicing', 'Per-stop line items · monthly batch billing'],
     clients: ['Clients', 'Add and manage your customers'],
-    import: ['Import Properties', 'Bulk-add service locations to a client'],
-    activity: ['Activity Log', 'Everything you and Trashy Randy have done'],
     drivers: ['Drivers & Field', 'Check-in / check-out, photos and GPS'],
     myday: ['My Day', 'Your jobs — on my way, clock in, complete, photos'],
-    myschedule: ['My Schedule', 'Week or month view of upcoming jobs'],
     timesheets: ['Time Sheets & Payroll', 'Your hours, jobs, and pay — weekly and monthly'],
     team: ['Team', 'Members and their business-line assignments'],
     portal: ['Client Portal', 'Search a client to preview their portal, copy their link, or send a quote'],
@@ -313,11 +306,8 @@ export default function App({ user, onSignOut }) {
     schedule: isJunk ? <JobCalendar app={app} line="junk" accent={activeLineObj.color} /> : <Schedule app={app} />,
     invoices: <Invoices app={app} />,
     clients: <Clients app={app} />,
-    import: <Import app={app} />,
-    activity: <Activity app={app} />,
     drivers: <Drivers app={app} />,
     myday: <MyDay app={app} />,
-    myschedule: <TechSchedule app={app} />,
     timesheets: <TimeSheets app={app} />,
     portal: <Portal app={app} />,
     team: <Team app={app} />,
@@ -336,7 +326,6 @@ export default function App({ user, onSignOut }) {
         { id: 'routes', glyph: '◔', label: 'Routes' },
         // Non-lawn: the field board lives inside Routes now (Plan | Field).
         ...(isLawn ? [{ id: 'myday', glyph: '☀', label: 'My Day' }] : []),
-        { id: 'myschedule', glyph: '▥', label: 'Schedule' },
         ...(isLawn ? [{ id: 'timesheets', glyph: '⏱', label: 'Pay' }] : []),
       ]
     : BOTTOM_NAV
