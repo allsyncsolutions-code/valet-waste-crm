@@ -11,14 +11,12 @@ import Invoices from './views/Invoices.jsx'
 import Dashboard from './views/Dashboard.jsx'
 import Drivers from './views/Drivers.jsx'
 import Team from './views/Team.jsx'
-import Annotations from './views/Annotations.jsx'
 import Automations from './views/Automations.jsx'
 import JobCalendar from './views/JobCalendar.jsx'
 import EmployeePay from './views/EmployeePay.jsx'
 import MyDay from './views/MyDay.jsx'
 import TimeSheets from './views/TimeSheets.jsx'
 import Portal from './views/Portal.jsx'
-import AnnotationLayer from './components/AnnotationLayer.jsx'
 import AiDock from './AiDock.jsx'
 
 // Tabs not yet wired to Supabase show a clean placeholder (no sample data).
@@ -70,7 +68,6 @@ export default function App({ user, onSignOut }) {
   // Remember where the user was across page refreshes (line + screen).
   const [activeLine, setActiveLine] = useState(() => { try { return localStorage.getItem('vw_line') || 'waste' } catch (e) { return 'waste' } })
   const [activeView, setActiveView] = useState(() => { try { return localStorage.getItem('vw_view') || 'clients' } catch (e) { return 'clients' } })
-  const [annotateMode, setAnnotateMode] = useState(false)
   const isAdmin = !!(user && user.role === 'admin')
   const [lineMenuOpen, setLineMenuOpen] = useState(false)
   const [navOpen, setNavOpen] = useState(false) // mobile drawer
@@ -217,7 +214,6 @@ export default function App({ user, onSignOut }) {
     team: ['Team', 'Members and their business-line assignments'],
     portal: ['Client Portal', 'Search a client to preview their portal, copy their link, or send a quote'],
     settings: ['Settings', 'Manage tags and configuration'],
-    annotations: ['Annotations', 'Admin notes flagged with the ✎ tool — review with Claude'],
     automations: ['Automations', 'Scheduled jobs Trashy Randy runs — plus his suggestions awaiting approval'],
     employees: ['Employees', 'Lawn jobs, per-job pay, overrides, and timesheets (Sun–Sat)'],
   }
@@ -312,7 +308,6 @@ export default function App({ user, onSignOut }) {
     portal: <Portal app={app} />,
     team: <Team app={app} />,
     settings: <Settings app={app} />,
-    annotations: <Annotations app={app} />,
     automations: <Automations app={app} />,
     employees: <EmployeePay app={app} />,
   }
@@ -399,7 +394,7 @@ export default function App({ user, onSignOut }) {
 
       <div style={{ flex: 1, overflowY: 'auto', padding: '4px 12px' }}>
         <NavGroup label="OPERATIONS" items={applyNavOrder(isTech ? techMain : navMain, navOrder.main)} activeView={activeView} onGo={go} onReorder={(ids) => saveNavOrder('main', ids)} />
-        <NavGroup label={isTech ? 'MY WORK' : 'FIELD & CLIENTS'} items={applyNavOrder(isTech ? techField : (isAdmin ? [...navField, { id: 'annotations', glyph: '✎', label: 'Annotations' }] : navField), navOrder.field)} activeView={activeView} onGo={go} top={14} onReorder={(ids) => saveNavOrder('field', ids)} />
+        <NavGroup label={isTech ? 'MY WORK' : 'FIELD & CLIENTS'} items={applyNavOrder(isTech ? techField : navField, navOrder.field)} activeView={activeView} onGo={go} top={14} onReorder={(ids) => saveNavOrder('field', ids)} />
       </div>
 
       <div onClick={openAssistant} style={{ margin: '10px 12px', padding: '11px 12px', borderRadius: 10, background: 'linear-gradient(135deg,#1f7a4d,#155e3a)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -459,11 +454,6 @@ export default function App({ user, onSignOut }) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginLeft: 'auto' }}>
             {isMobile && (
               <div onClick={openAssistant} style={{ width: 36, height: 36, borderRadius: 9, background: 'linear-gradient(135deg,#1f7a4d,#155e3a)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: '#fff', fontSize: 15, flex: 'none' }}>✦</div>
-            )}
-            {isAdmin && (
-              <div data-annot-ui onClick={() => setAnnotateMode((v) => !v)} title={annotateMode ? 'Annotation mode is ON — click to turn off' : 'Annotate: flag an element with a note'} style={{ position: 'relative', width: 36, height: 36, borderRadius: 9, border: `1px solid ${annotateMode ? '#1f7a4d' : '#e3e6e2'}`, background: annotateMode ? '#1f7a4d' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: annotateMode ? '#fff' : '#5d6b63', flex: 'none' }}>
-                <span style={{ fontSize: 15 }}>✎</span>
-              </div>
             )}
             {!isMobile && (
               <button onClick={startNewPickup} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '9px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 7, whiteSpace: 'nowrap' }}>
@@ -529,16 +519,6 @@ export default function App({ user, onSignOut }) {
             scrollRef={aiScrollRef}
           />
         </>
-      )}
-
-      {isAdmin && (
-        <AnnotationLayer
-          active={annotateMode}
-          viewName={activeView}
-          viewTitle={viewTitle}
-          onClose={() => setAnnotateMode(false)}
-          onSaved={() => {}}
-        />
       )}
     </div>
   )

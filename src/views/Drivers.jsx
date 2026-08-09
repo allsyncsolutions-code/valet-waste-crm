@@ -2,10 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { MONO } from '../data.js'
 import { STATUS_META } from '../lib/routeModel.js'
 import { loadDayDispatch, checkInStop, checkOutStop, resetStopStatus, flagStopExcess, unflagStopExcess, markStopNudged, skipStop, unskipStop } from '../lib/routesData.js'
-import { loadStopPhotos, uploadStopPhoto, deleteStopPhoto } from '../lib/photosData.js'
+import { loadStopPhotos, deleteStopPhoto } from '../lib/photosData.js'
 import { loadDrivers } from '../lib/teamData.js'
 import { logActivity, currentActorName } from '../lib/activityData.js'
 import { supabase } from '../lib/supabaseClient.js'
+import { queuePhoto } from '../lib/photoOutbox.js'
+import usePhotoOutbox from '../usePhotoOutbox.js'
 
 // Best-effort browser geolocation — resolves null if unavailable/denied.
 function getGps() {
@@ -60,10 +62,22 @@ export default function Drivers({ app, date: dateProp, onDateChange, embedded })
   const [busyStop, setBusyStop] = useState(null)
   const [photos, setPhotos] = useState({}) // stopId -> [photo]
   const [uploadingStop, setUploadingStop] = useState(null)
+  // Optimistic previews of offline-queued photos (so a tech sees their capture
+  // instantly, before it has synced). Cleared as the outbox drains.
+  const [pendingShots, setPendingShots] = useState({}) // stopId -> [{ id, url }]
+  const outbox = usePhotoOutbox()
 
   async function refreshPhotos(rts = routes) {
     const ids = rts.flatMap((r) => r.stops.map((s) => s.id))
     try { setPhotos(await loadStopPhotos(ids)) } catch (e) {}
+    // Drop optimistic previews for stops whose queue has now drained.
+    setPendingShots((prev) => {
+      const next = {}
+      for (const [sid, arr] of Object.entries(prev)) {
+        if ((outbox.byStop[sid] || 0) > 0) next[sid] = arr
+      }
+      return next
+    })
   }
 
   async function addPhoto(stop, file) {
@@ -72,9 +86,12 @@ export default function Drivers({ app, date: dateProp, onDateChange, embedded })
     setErr(null)
     try {
       const gps = await getGps()
-      await uploadStopPhoto(stop.id, file, gps)
-      logActivity({ type: 'photo_added', summary: `Added a photo at ${stop.name}`, entityType: 'route_stop', entityId: stop.id })
-      await refreshPhotos()
+      // Queue, don't block on the upload — works offline, syncs to Supabase later.
+      await queuePhoto({ stopId: stop.id, file, gps })
+      // Instant local preview so the tech sees the capture before it's uploaded.
+      const url = URL.createObjectURL(file)
+      setPendingShots((prev) => ({ ...prev, [stop.id]: [...(prev[stop.id] || []), { id: url, url }] }))
+      logActivity({ type: 'photo_added', summary: `Captured a photo at ${stop.name}`, entityType: 'route_stop', entityId: stop.id })
     } catch (e) { setErr(e.message || String(e)) }
     setUploadingStop(null)
   }
@@ -250,6 +267,13 @@ export default function Drivers({ app, date: dateProp, onDateChange, embedded })
 
       {err && <div style={banner('#c0492f', '#fbeae6')}>{err}</div>}
 
+      {outbox.pending > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9, background: '#fbf3e2', border: '1px solid #ecd9ad', color: '#8a6d1e', borderRadius: 11, padding: '10px 14px', fontSize: 12.5, marginBottom: 14 }}>
+          <span style={{ fontSize: 14 }}>📤</span>
+          <span>{outbox.pending} photo{outbox.pending === 1 ? '' : 's'} queued — {typeof navigator !== 'undefined' && navigator.onLine ? 'uploading…' : 'will upload when back online.'}</span>
+        </div>
+      )}
+
       {loading ? (
         <div style={{ color: '#7c8a82', fontSize: 13, padding: 28, textAlign: 'center' }}>Loading dispatch…</div>
       ) : (
@@ -289,7 +313,7 @@ export default function Drivers({ app, date: dateProp, onDateChange, embedded })
                     {rts.length > 1 && <div style={{ fontFamily: MONO, fontSize: 11, color: '#7c8a82', margin: '6px 2px' }}>{r.code} · {r.name}</div>}
                     {r.stops.length === 0 ? (
                       <div style={{ fontSize: 12, color: '#9aa69e', padding: '6px 2px' }}>No stops on this route.</div>
-                    ) : r.stops.map((s) => <StopRow key={s.id} s={s} busy={busyStop === s.id} photos={photos[s.id] || []} uploading={uploadingStop === s.id} onCheckIn={() => doCheckIn(s)} onCheckOut={() => doCheckOut(s)} onUndo={() => doUndo(s)} onSkip={() => doSkip(s)} onUnskip={() => doUnskip(s)} onOpenClient={s.customerId && app.openClient ? () => app.openClient(s.customerId, s.propertyId) : null} onFlagExcess={() => doFlagExcess(s)} onAddPhoto={(f) => addPhoto(s, f)} onDeletePhoto={removePhoto} />)}
+                    ) : r.stops.map((s) => <StopRow key={s.id} s={s} busy={busyStop === s.id} photos={photos[s.id] || []} pending={pendingShots[s.id] || []} syncing={outbox.byStop[s.id] || 0} uploading={uploadingStop === s.id} onCheckIn={() => doCheckIn(s)} onCheckOut={() => doCheckOut(s)} onUndo={() => doUndo(s)} onSkip={() => doSkip(s)} onUnskip={() => doUnskip(s)} onOpenClient={s.customerId && app.openClient ? () => app.openClient(s.customerId, s.propertyId) : null} onFlagExcess={() => doFlagExcess(s)} onAddPhoto={(f) => addPhoto(s, f)} onDeletePhoto={removePhoto} />)}
                   </div>
                 ))}
               </div>
@@ -339,9 +363,10 @@ export default function Drivers({ app, date: dateProp, onDateChange, embedded })
   )
 }
 
-function StopRow({ s, busy, photos = [], uploading, onCheckIn, onCheckOut, onUndo, onSkip, onUnskip, onOpenClient, onFlagExcess, onAddPhoto, onDeletePhoto }) {
+function StopRow({ s, busy, photos = [], pending = [], syncing = 0, uploading, onCheckIn, onCheckOut, onUndo, onSkip, onUnskip, onOpenClient, onFlagExcess, onAddPhoto, onDeletePhoto }) {
   const meta = STATUS_META[s.status] || STATUS_META.pending
-  const fileRef = useRef(null)
+  const fileRef = useRef(null)   // gallery / file picker
+  const camRef = useRef(null)    // dedicated camera capture (opens rear cam on mobile)
   return (
     <div style={{ padding: '8px 4px', borderTop: '1px solid #f1f3f0', opacity: s.status === 'skipped' ? 0.75 : 1 }}>
       <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
@@ -404,11 +429,25 @@ function StopRow({ s, busy, photos = [], uploading, onCheckIn, onCheckOut, onUnd
             <button onClick={() => onDeletePhoto(p)} title="Delete photo" style={{ position: 'absolute', top: -6, right: -6, width: 18, height: 18, borderRadius: '50%', background: '#c0492f', color: '#fff', border: '2px solid #fff', fontSize: 10, lineHeight: 1, cursor: 'pointer', padding: 0 }}>×</button>
           </div>
         ))}
-        <input ref={fileRef} type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={(e) => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) onAddPhoto(f) }} />
-        <button onClick={() => fileRef.current && fileRef.current.click()} disabled={uploading} style={{ width: 46, height: 46, borderRadius: 8, border: '1.5px dashed #c2ccc3', background: '#fff', color: '#9aa69e', fontSize: 18, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }} title="Add photo">
-          {uploading ? '…' : '+'}
+        {/* Optimistic previews of offline-queued captures (sync pending). */}
+        {pending.map((p) => (
+          <div key={p.id} title="Captured — uploading when online" style={{ position: 'relative', width: 46, height: 46, borderRadius: 8, overflow: 'hidden', border: '1.5px dashed #c08a2e' }}>
+            <img src={p.url} alt="syncing" style={{ width: 46, height: 46, objectFit: 'cover', display: 'block', opacity: 0.85 }} />
+            <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(15,30,20,.32)', color: '#fff', fontSize: 13 }}>⟳</div>
+          </div>
+        ))}
+        {/* Camera capture — opens the device rear camera on mobile. */}
+        <input ref={camRef} type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={(e) => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) onAddPhoto(f) }} />
+        <button onClick={() => camRef.current && camRef.current.click()} disabled={uploading} style={{ width: 46, height: 46, borderRadius: 8, border: 'none', background: '#1f7a4d', color: '#fff', fontSize: 17, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }} title="Take a photo">
+          {uploading ? '…' : '📷'}
+        </button>
+        {/* Attach from gallery / files. */}
+        <input ref={fileRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={(e) => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) onAddPhoto(f) }} />
+        <button onClick={() => fileRef.current && fileRef.current.click()} disabled={uploading} style={{ width: 46, height: 46, borderRadius: 8, border: '1.5px dashed #c2ccc3', background: '#fff', color: '#9aa69e', fontSize: 18, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }} title="Attach from gallery / files">
+          +
         </button>
         {photos.length > 0 && <span style={{ fontSize: 10.5, color: '#9aa69e', fontFamily: MONO }}>{photos.length} photo{photos.length === 1 ? '' : 's'}</span>}
+        {syncing > 0 && <span style={{ fontSize: 10.5, color: '#c08a2e', fontFamily: MONO, display: 'inline-flex', alignItems: 'center', gap: 4 }}>⟳ {syncing} syncing</span>}
       </div>
     </div>
   )

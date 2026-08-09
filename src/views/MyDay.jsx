@@ -5,9 +5,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { MONO } from '../data.js'
 import { loadDayDispatch, checkInStop, checkOutStop, resetStopStatus, markStopOnMyWay, markStopNudged } from '../lib/routesData.js'
-import { loadStopPhotos, uploadStopPhoto, deleteStopPhoto } from '../lib/photosData.js'
+import { loadStopPhotos, deleteStopPhoto } from '../lib/photosData.js'
 import { loadDrivers } from '../lib/teamData.js'
 import { logActivity } from '../lib/activityData.js'
+import { queuePhoto } from '../lib/photoOutbox.js'
+import usePhotoOutbox from '../usePhotoOutbox.js'
 import { supabase } from '../lib/supabaseClient.js'
 
 const LAWN = '#7a9e2e'
@@ -50,6 +52,8 @@ export default function MyDay({ app }) {
   const [err, setErr] = useState('')
   const [busyStop, setBusyStop] = useState(null)
   const [uploadingStop, setUploadingStop] = useState(null)
+  const [pendingShots, setPendingShots] = useState({}) // stopId -> [{ id, url }] optimistic offline previews
+  const outbox = usePhotoOutbox()
   const [openStop, setOpenStop] = useState(null) // expanded job card
   const [viewTech, setViewTech] = useState(isAdmin ? 'all' : 'me') // admin: 'me' | profile id | 'none' | 'all' — admins start on Everyone so unassigned jobs are visible
 
@@ -180,9 +184,10 @@ export default function MyDay({ app }) {
     setErr('')
     try {
       const gps = await getGps()
-      await uploadStopPhoto(s.id, file, gps)
-      logActivity({ type: 'photo_added', summary: `Added a photo at ${s.address || s.name}`, entityType: 'route_stop', entityId: s.id })
-      setPhotos(await loadStopPhotos(jobs.map((x) => x.id)))
+      await queuePhoto({ stopId: s.id, file, gps })
+      const url = URL.createObjectURL(file)
+      setPendingShots((prev) => ({ ...prev, [s.id]: [...(prev[s.id] || []), { id: url, url }] }))
+      logActivity({ type: 'photo_added', summary: `Captured a photo at ${s.address || s.name}`, entityType: 'route_stop', entityId: s.id })
     } catch (e) { setErr(e.message || String(e)) }
     setUploadingStop(null)
   }
@@ -218,6 +223,12 @@ export default function MyDay({ app }) {
       )}
 
       {err && <div style={{ background: '#fbeae6', color: '#c0492f', borderRadius: 10, padding: '10px 13px', fontSize: 13, marginBottom: 12 }}>{err}</div>}
+      {outbox.pending > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9, background: '#fbf3e2', border: '1px solid #ecd9ad', color: '#8a6d1e', borderRadius: 10, padding: '10px 13px', fontSize: 12.5, marginBottom: 12 }}>
+          <span style={{ fontSize: 14 }}>📤</span>
+          <span>{outbox.pending} photo{outbox.pending === 1 ? '' : 's'} queued — {typeof navigator !== 'undefined' && navigator.onLine ? 'uploading…' : 'will upload when back online.'}</span>
+        </div>
+      )}
 
       {loading ? (
         <div style={{ color: '#7c8a82', fontSize: 13, padding: 28, textAlign: 'center' }}>Loading your day…</div>
@@ -237,6 +248,8 @@ export default function MyDay({ app }) {
               onToggle={() => setOpenStop(openStop === s.id ? null : s.id)}
               busy={busyStop === s.id}
               photos={photos[s.id] || []}
+              pending={pendingShots[s.id] || []}
+              syncing={outbox.byStop[s.id] || 0}
               uploading={uploadingStop === s.id}
               team={driverName(s.driverId)}
               onOnMyWay={() => onMyWay(s)}
@@ -253,10 +266,11 @@ export default function MyDay({ app }) {
   )
 }
 
-function JobCard({ s, open, onToggle, busy, photos, uploading, team, onOnMyWay, onClockIn, onComplete, onUndo, onAddPhoto, onDeletePhoto }) {
+function JobCard({ s, open, onToggle, busy, photos = [], pending = [], syncing = 0, uploading, team, onOnMyWay, onClockIn, onComplete, onUndo, onAddPhoto, onDeletePhoto }) {
   const phase = stopPhase(s)
   const meta = STATUS[phase]
-  const fileRef = useRef(null)
+  const fileRef = useRef(null)   // gallery / file picker
+  const camRef = useRef(null)    // dedicated camera capture (opens rear cam on mobile)
   const hasCoords = s.lat != null && s.lng != null && !(Number(s.lat) === 0 && Number(s.lng) === 0)
   const dest = hasCoords ? `${s.lat},${s.lng}` : encodeURIComponent(s.address || '')
 
@@ -319,7 +333,7 @@ function JobCard({ s, open, onToggle, busy, photos, uploading, team, onOnMyWay, 
 
             {/* photos */}
             <div>
-              <div style={rowLabel}>Job photos {photos.length === 0 && <span style={{ color: '#c0492f', fontWeight: 400 }}>(required for pay)</span>}</div>
+              <div style={rowLabel}>Job photos {photos.length === 0 && pending.length === 0 && <span style={{ color: '#c0492f', fontWeight: 400 }}>(required for pay)</span>}</div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 5 }}>
                 {photos.map((p) => (
                   <div key={p.id} style={{ position: 'relative', width: 56, height: 56 }}>
@@ -329,8 +343,20 @@ function JobCard({ s, open, onToggle, busy, photos, uploading, team, onOnMyWay, 
                     <button onClick={() => onDeletePhoto(p)} style={{ position: 'absolute', top: -6, right: -6, width: 18, height: 18, borderRadius: '50%', background: '#c0492f', color: '#fff', border: '2px solid #fff', fontSize: 10, lineHeight: 1, cursor: 'pointer', padding: 0 }}>×</button>
                   </div>
                 ))}
-                <input ref={fileRef} type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={(e) => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) onAddPhoto(f) }} />
-                <button onClick={() => fileRef.current && fileRef.current.click()} disabled={uploading} style={{ width: 56, height: 56, borderRadius: 9, border: '1.5px dashed #c2ccc3', background: '#fff', color: '#9aa69e', fontSize: 20, cursor: 'pointer' }}>{uploading ? '…' : '📷'}</button>
+                {/* Optimistic previews of offline-queued captures (sync pending). */}
+                {pending.map((p) => (
+                  <div key={p.id} title="Captured — uploading when online" style={{ position: 'relative', width: 56, height: 56, borderRadius: 9, overflow: 'hidden', border: '1.5px dashed #c08a2e' }}>
+                    <img src={p.url} alt="syncing" style={{ width: 56, height: 56, objectFit: 'cover', display: 'block', opacity: 0.85 }} />
+                    <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(15,30,20,.32)', color: '#fff', fontSize: 16 }}>⟳</div>
+                  </div>
+                ))}
+                {/* Camera capture — opens the device rear camera on mobile. */}
+                <input ref={camRef} type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={(e) => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) onAddPhoto(f) }} />
+                <button onClick={() => camRef.current && camRef.current.click()} disabled={uploading} title="Take a photo" style={{ width: 56, height: 56, borderRadius: 9, border: 'none', background: '#1f7a4d', color: '#fff', fontSize: 20, cursor: 'pointer' }}>{uploading ? '…' : '📷'}</button>
+                {/* Attach from gallery / files. */}
+                <input ref={fileRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={(e) => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) onAddPhoto(f) }} />
+                <button onClick={() => fileRef.current && fileRef.current.click()} disabled={uploading} title="Attach from gallery / files" style={{ width: 56, height: 56, borderRadius: 9, border: '1.5px dashed #c2ccc3', background: '#fff', color: '#9aa69e', fontSize: 22, cursor: 'pointer' }}>{uploading ? '…' : '+'}</button>
+                {syncing > 0 && <span style={{ fontSize: 11, color: '#c08a2e', fontFamily: MONO, display: 'inline-flex', alignItems: 'center', gap: 4 }}>⟳ {syncing} syncing</span>}
               </div>
             </div>
           </div>
