@@ -289,7 +289,7 @@ export default function Drivers({ app, date: dateProp, onDateChange, embedded })
                     {rts.length > 1 && <div style={{ fontFamily: MONO, fontSize: 11, color: '#7c8a82', margin: '6px 2px' }}>{r.code} · {r.name}</div>}
                     {r.stops.length === 0 ? (
                       <div style={{ fontSize: 12, color: '#9aa69e', padding: '6px 2px' }}>No stops on this route.</div>
-                    ) : r.stops.map((s) => <StopRow key={s.id} s={s} busy={busyStop === s.id} photos={photos[s.id] || []} uploading={uploadingStop === s.id} onCheckIn={() => doCheckIn(s)} onCheckOut={() => doCheckOut(s)} onUndo={() => doUndo(s)} onSkip={() => doSkip(s)} onUnskip={() => doUnskip(s)} onOpenClient={s.customerId && app.openClient ? () => app.openClient(s.customerId) : null} onFlagExcess={() => doFlagExcess(s)} onAddPhoto={(f) => addPhoto(s, f)} onDeletePhoto={removePhoto} />)}
+                    ) : r.stops.map((s) => <StopRow key={s.id} s={s} busy={busyStop === s.id} photos={photos[s.id] || []} uploading={uploadingStop === s.id} onCheckIn={() => doCheckIn(s)} onCheckOut={() => doCheckOut(s)} onUndo={() => doUndo(s)} onSkip={() => doSkip(s)} onUnskip={() => doUnskip(s)} onOpenClient={s.customerId && app.openClient ? () => app.openClient(s.customerId, s.propertyId) : null} onFlagExcess={() => doFlagExcess(s)} onAddPhoto={(f) => addPhoto(s, f)} onDeletePhoto={removePhoto} />)}
                   </div>
                 ))}
               </div>

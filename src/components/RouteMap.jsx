@@ -7,7 +7,7 @@ import { hasCoords } from '../lib/geo.js'
 // Live route map. Renders the depot + numbered stop markers in sequence order
 // and draws the route polyline. Pure Leaflet (free OSM tiles) so there's no
 // per-mapload billing. Re-draws whenever the ordered stop list changes.
-export default function RouteMap({ depot, stops, height = 460 }) {
+export default function RouteMap({ depot, stops, height = 460, onStopClick }) {
   const elRef = useRef(null)
   const mapRef = useRef(null)
   const layerRef = useRef(null)
@@ -65,12 +65,13 @@ export default function RouteMap({ depot, stops, height = 460 }) {
           className: '',
           html: `<div style="width:26px;height:26px;border-radius:50%;background:${meta.bg};color:${meta.fg};border:${
             s.status === 'enroute' ? '2px solid #46c585' : '2px solid #fff'
-          };display:flex;align-items:center;justify-content:center;font:600 12px 'IBM Plex Mono',monospace;box-shadow:0 1px 4px rgba(0,0,0,.3)">${s.seq}</div>`,
+          };display:flex;align-items:center;justify-content:center;font:600 12px 'IBM Plex Mono',monospace;box-shadow:0 1px 4px rgba(0,0,0,.3);cursor:pointer">${s.seq}</div>`,
           iconSize: [26, 26],
           iconAnchor: [13, 13],
         }),
       })
         .bindTooltip(`${s.seq}. ${s.name}`, { direction: 'top' })
+        .on('click', () => { if (onStopClick) onStopClick(s) })
         .addTo(layer)
     })
 

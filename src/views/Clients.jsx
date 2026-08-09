@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { MONO } from '../data.js'
 import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, addProperty, updateProperty, loadPropertyVisits, loadPropertyAddressIndex, countDuplicateProperties, findDuplicateProperties, mergeProperties, deleteProperty, sendPortalInvite, loadClientFieldActivity, loadClientNotes, addClientNote, deleteClientNote, loadPropertyLog } from '../lib/customersData.js'
 import { geocodeAll } from '../lib/importData.js'
@@ -98,16 +98,34 @@ export default function Clients({ app }) {
   const [logPid, setLogPid] = useState(null) // property whose activity log is open
   const [logRows, setLogRows] = useState([])
   const [logBusy, setLogBusy] = useState(false)
+  const [focusPropId, setFocusPropId] = useState(null) // property briefly highlighted when jumped to from Routes/Field
+  const [propSearch, setPropSearch] = useState('') // filter within a client's addresses
+  const propRowRefs = useRef({}) // propertyId → DOM node (for scroll-to-address)
 
-  // A route stop was clicked elsewhere (Routes / Field board) — jump to that client.
+  // A route stop was clicked elsewhere (Routes / Field board) — jump to that
+  // client, and if a specific property was passed, scroll it into view + flash it.
   useEffect(() => {
     const f = app.clientFocus
     if (f && f.id) {
       setSelId(f.id)
       setSearch('')
       setBillingFilter('all')
+      setPropSearch('')
+      if (f.propertyId) setFocusPropId(f.propertyId)
     }
   }, [app.clientFocus])
+
+  // Once the focused property's row is in the DOM, scroll to it and clear the
+  // highlight after a beat. Re-runs as props load / filter changes clear.
+  useEffect(() => {
+    if (!focusPropId) return
+    const node = propRowRefs.current[focusPropId]
+    if (node) {
+      node.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    }
+    const t = setTimeout(() => setFocusPropId(null), 2600)
+    return () => clearTimeout(t)
+  }, [focusPropId, props])
 
   // Load the selected client's service properties.
   useEffect(() => {
@@ -144,6 +162,15 @@ export default function Clients({ app }) {
     return actEvents.filter((e) =>
       `${e.type} ${e.address} ${e.route || ''} ${fmtDate(e.ts)} ${fmtTime(e.ts)}`.toLowerCase().includes(q))
   }, [actEvents, actSearch])
+
+  // Filter a client's service addresses (property managers with many locations
+  // shouldn't have to scroll to find one).
+  const visibleProps = useMemo(() => {
+    const q = propSearch.trim().toLowerCase()
+    if (!q) return props
+    return props.filter((p) =>
+      `${p.address || p.name || ''} ${p.service || ''} ${p.notes || ''} ${(p.pickup_days || []).map(daysLabel).join(' ')}`.toLowerCase().includes(q))
+  }, [props, propSearch])
 
   async function refresh() {
     const rows = await loadCustomers()
@@ -602,6 +629,7 @@ export default function Clients({ app }) {
         {loading && <div style={empty}>Loading…</div>}
         {!loading && !customers.length && <div style={empty}>No clients yet. Add one with the button above, or ask Trashy Randy.</div>}
 
+        <div style={{ maxHeight: 'calc(100dvh - 220px)', overflowY: 'auto', margin: '0 -2px', paddingBottom: 4, WebkitOverflowScrolling: 'touch' }}>
         {list.map((c) => {
           const on = c.id === selId
           return (
@@ -617,6 +645,7 @@ export default function Clients({ app }) {
             </div>
           )
         })}
+        </div>
       </div>
 
       {/* detail */}
@@ -735,17 +764,24 @@ export default function Clients({ app }) {
 
             {(
               <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '18px 20px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10, justifyContent: 'space-between', marginBottom: 10 }}>
-                  <div style={{ fontWeight: 700, fontSize: 14 }}>Addresses ({props.length})</div>
-                  <div style={{ display: 'flex', alignItems: 'baseline', gap: 12 }}>
-                    {props.some((p) => p.lat == null) && (
-                      <div style={{ fontSize: 11.5, color: '#c08a2e' }}>{props.filter((p) => p.lat == null).length} without map pin</div>
-                    )}
-                    {!addingAddr && (
-                      <button onClick={() => { setNewP(BLANK_PROP); setAddingAddr(true); setEditPid(null) }} style={{ flex: 'none', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 8, padding: '7px 12px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>+ Add address</button>
-                    )}
-                  </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, justifyContent: 'space-between', marginBottom: 10 }}>
+                <div style={{ fontWeight: 700, fontSize: 14 }}>Addresses ({props.length}){propSearch.trim() && visibleProps.length !== props.length ? <span style={{ color: '#7c8a82', fontWeight: 500, fontSize: 12 }}> · {visibleProps.length} of {props.length}</span> : null}</div>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 12 }}>
+                  {props.some((p) => p.lat == null) && (
+                    <div style={{ fontSize: 11.5, color: '#c08a2e' }}>{props.filter((p) => p.lat == null).length} without map pin</div>
+                  )}
+                  {!addingAddr && (
+                    <button onClick={() => { setNewP(BLANK_PROP); setAddingAddr(true); setEditPid(null) }} style={{ flex: 'none', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 8, padding: '7px 12px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>+ Add address</button>
+                  )}
                 </div>
+              </div>
+              {props.length >= 2 && (
+                <div style={{ position: 'relative', marginBottom: 10 }}>
+                  <input value={propSearch} onChange={(e) => setPropSearch(e.target.value)} placeholder="Search addresses…" style={searchInput} />
+                  <div style={searchIcon}>⌕</div>
+                  {propSearch && <div onClick={() => setPropSearch('')} style={{ position: 'absolute', right: 11, top: '50%', transform: 'translateY(-50%)', color: '#9aa69e', fontSize: 13, cursor: 'pointer' }}>✕</div>}
+                </div>
+              )}
                 {addingAddr && (
                   <div style={{ border: '1px solid #cfe0d5', background: '#f7faf8', borderRadius: 10, padding: '10px 12px', marginBottom: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
                     <div style={{ fontSize: 10.5, color: '#1f7a4d', fontFamily: MONO, letterSpacing: '.06em', fontWeight: 700 }}>NEW ADDRESS</div>
@@ -779,11 +815,16 @@ export default function Clients({ app }) {
                   </div>
                 )}
                 {!props.length && !addingAddr && (
-                  <div style={{ fontSize: 12.5, color: '#9aa69e', padding: '6px 0 2px' }}>No addresses yet — add the first one with the button above, or use the Import tab for a whole list.</div>
+                  <div style={{ fontSize: 12.5, color: '#9aa69e', padding: '6px 0 2px' }}>No addresses yet — add the first one with the button above, or use Import (in Settings) for a whole list.</div>
+                )}
+                {props.length > 0 && propSearch.trim() && visibleProps.length === 0 && (
+                  <div style={{ fontSize: 12.5, color: '#9aa69e', padding: '6px 0 2px' }}>No addresses match “{propSearch.trim()}”.</div>
                 )}
                 <div style={{ maxHeight: 360, overflowY: 'auto', margin: '0 -6px' }}>
-                  {props.map((p) => (
-                    <div key={p.id} style={{ padding: '8px 6px', borderTop: '1px solid #f1f3f0' }}>
+                  {visibleProps.map((p) => {
+                    const flashing = focusPropId === p.id
+                    return (
+                    <div key={p.id} ref={(el) => { if (el) propRowRefs.current[p.id] = el }} style={{ padding: '8px 6px', borderTop: '1px solid #f1f3f0', background: flashing ? '#eef7f1' : 'transparent', boxShadow: flashing ? 'inset 3px 0 0 #1f7a4d' : 'none', transition: 'background .25s' }}>
                       {editPid === p.id ? (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                           <input value={editP.address} onChange={(e) => setEditP({ ...editP, address: e.target.value })} style={{ ...inp, fontSize: 13 }} placeholder="Full address, City Zip" />
@@ -938,7 +979,8 @@ export default function Clients({ app }) {
                         </>
                       )}
                     </div>
-                  ))}
+                    )
+                  })}
                 </div>
               </div>
             )}

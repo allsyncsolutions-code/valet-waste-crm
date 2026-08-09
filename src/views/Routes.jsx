@@ -772,7 +772,7 @@ export default function RoutesView({ app }) {
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1.4fr 1fr', gap: 16 }}>
         {/* MAP */}
         <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, overflow: 'hidden', minHeight: 300 }}>
-          <RouteMap depot={depot} stops={stops} height={isMobile ? 320 : 520} />
+          <RouteMap depot={depot} stops={stops} height={isMobile ? 320 : 520} onStopClick={(s) => app.openClient(s.customerId, s.propertyId)} />
         </div>
 
         {/* STOP SEQUENCE */}
@@ -821,7 +821,7 @@ export default function RoutesView({ app }) {
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                           <span
-                            onClick={st.customerId && app.openClient ? () => app.openClient(st.customerId) : undefined}
+                            onClick={st.customerId && app.openClient ? () => app.openClient(st.customerId, st.propertyId) : undefined}
                             title={st.customerId ? `Open ${st.clientName || 'client'}'s record` : undefined}
                             style={{ fontWeight: 600, fontSize: 13.5, cursor: st.customerId ? 'pointer' : 'default', color: st.customerId ? '#1f7a4d' : '#1a2420', textDecoration: st.customerId ? 'underline dotted 1px' : 'none', textUnderlineOffset: 3 }}
                           >{st.name}</span>

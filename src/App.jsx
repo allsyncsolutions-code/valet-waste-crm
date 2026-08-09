@@ -85,10 +85,10 @@ export default function App({ user, onSignOut }) {
   })
   useEffect(() => { try { localStorage.setItem('vw_routes_mode', routesMode) } catch (e) {} }, [routesMode])
   // Cross-view: clicking an address on a route opens that client's record.
-  const [clientFocus, setClientFocus] = useState(null) // { id, tick }
-  function openClient(customerId) {
+  const [clientFocus, setClientFocus] = useState(null) // { id, propertyId, tick }
+  function openClient(customerId, propertyId) {
     if (!customerId) return
-    setClientFocus({ id: customerId, tick: Date.now() })
+    setClientFocus({ id: customerId, propertyId: propertyId || null, tick: Date.now() })
     go('clients')
   }
 
