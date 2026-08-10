@@ -118,15 +118,18 @@ export default function MyDay({ app }) {
   }
 
   async function clockIn(s) {
+    // Ask BEFORE checking in: notify the client we've arrived, or check in
+    // silently? Either way the check-in itself is recorded as usual.
+    const notify = window.confirm(`Notify client that you've arrived at ${s.address || s.name}?\n\nOK = yes, text them · Cancel = no text (still checks in)`)
     setBusyStop(s.id)
     setErr('')
     try {
       const gps = await getGps()
       await checkInStop(s.id, gps)
-      logActivity({ type: 'check_in', summary: `Clocked in at ${s.address || s.name}`, entityType: 'route_stop', entityId: s.id })
-      // Tell the property contact we've arrived. The server decides whether to
-      // actually send (multi-location managers auto-suppressed). Best-effort.
-      supabase.functions.invoke('notify-arrival', { body: { stopId: s.id, sentBy: driverName(s.driverId) } }).catch(() => {})
+      logActivity({ type: 'check_in', summary: `Checked in at ${s.address || s.name}`, entityType: 'route_stop', entityId: s.id })
+      // Tell the property contact we've arrived — only if the tech said yes.
+      // Server still decides whether to actually send. Best-effort.
+      if (notify) supabase.functions.invoke('notify-arrival', { body: { stopId: s.id, sentBy: driverName(s.driverId) } }).catch(() => {})
       maybeNudge(s)
       await refresh()
     } catch (e) { setErr(e.message || String(e)) }
