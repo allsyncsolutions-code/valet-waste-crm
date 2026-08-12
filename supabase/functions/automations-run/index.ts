@@ -145,31 +145,46 @@ async function runLawnInvoiceLines(): Promise<string> {
 // times in the invoice's issue month gets one visit-price credited. Randy
 // texts admins the results.
 
-function stripeForm(obj: Record<string, unknown>) {
-  const p = new URLSearchParams()
-  const add = (key: string, val: unknown) => {
-    if (val === undefined || val === null) return
-    if (typeof val === "object") {
-      for (const k of Object.keys(val as Record<string, unknown>)) add(`${key}[${k}]`, (val as Record<string, unknown>)[k])
-    } else {
-      p.append(key, String(val))
-    }
-  }
-  for (const k of Object.keys(obj)) add(k, obj[k])
-  return p.toString()
+// ---- Run Merchant (Run Payments) helpers ------------------------------------
+// Replaces Stripe for the off-session autopay charge. The api_key (1h TTL) is
+// minted from the long-lived refresh_token, cached in app_settings.
+const RUN_HOSTS = {
+  uat: "https://staging-javelin.runpayments.io",
+  production: "https://javelin.runpayments.io",
 }
-async function stripeApi(path: string, opts: { method?: string; body?: Record<string, unknown>; account?: string } = {}) {
-  const sk = Deno.env.get("STRIPE_SECRET_KEY")
-  if (!sk) throw new Error("STRIPE_SECRET_KEY missing.")
-  const headers: Record<string, string> = { Authorization: `Bearer ${sk}`, "Content-Type": "application/x-www-form-urlencoded" }
-  if (opts.account) headers["Stripe-Account"] = opts.account
-  const r = await fetch(`https://api.stripe.com/v1/${path}`, {
-    method: opts.method || "POST",
-    headers,
-    body: opts.body ? stripeForm(opts.body) : undefined,
+function runHost(env?: string | null) {
+  return RUN_HOSTS[(env === "uat" ? "uat" : "production") as keyof typeof RUN_HOSTS]
+}
+async function runAccessToken(): Promise<{ token: string; mid: string; env: string }> {
+  const s = (await sbGet(`app_settings?id=eq.1&select=run_mid,run_refresh_token,run_api_key,run_api_key_expires_at,run_env`))[0] || {}
+  const mid = s.run_mid || ""
+  const env = s.run_env === "uat" ? "uat" : "production"
+  if (!mid || !s.run_refresh_token) throw new Error("Run Merchant isn't configured.")
+  const exp = s.run_api_key_expires_at ? new Date(s.run_api_key_expires_at).getTime() : 0
+  if (s.run_api_key && exp - Date.now() > 5 * 60 * 1000) return { token: s.run_api_key, mid, env }
+  const r = await fetch(`${runHost(env)}/api/v1/api_keys/refresh`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${s.run_api_key || s.run_refresh_token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ token: s.run_refresh_token }),
   })
-  const d = await r.json()
-  if (!r.ok) throw new Error(d?.error?.message || `Stripe ${r.status}`)
+  const d = await r.json().catch(() => ({}))
+  if (!r.ok) throw new Error(d?.message || `Run Merchant key refresh failed: ${r.status}`)
+  await sbPatch(`app_settings?id=eq.1`, {
+    run_api_key: d.api_key,
+    run_refresh_token: d.refresh_token,
+    run_api_key_expires_at: new Date(Number(d.api_key_expires_at) * 1000).toISOString(),
+    run_refresh_token_expires_at: new Date(Number(d.refresh_token_expires_at) * 1000).toISOString(),
+  })
+  return { token: d.api_key, mid, env }
+}
+async function runCharge(env: string, token: string, body: Record<string, unknown>) {
+  const r = await fetch(`${runHost(env)}/api/v1/charge`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  })
+  const d = await r.json().catch(() => ({}))
+  if (!r.ok) throw new Error(d?.message || d?.resp_text || `Run Merchant charge failed: ${r.status}`)
   return d
 }
 
@@ -201,12 +216,11 @@ async function runAutopayCharge(force = false): Promise<string> {
   if (nyDate.slice(8) !== "01" && !force) return `Skipped — autopay charges run on the 1st (today is ${nyDate}).`
   const monthStart = nyDate.slice(0, 8) + "01"
 
-  const settings = (await sbGet(`app_settings?id=eq.1&select=stripe_account_id`))[0] || {}
-  const account = settings.stripe_account_id
-  if (!account) return "Skipped — no connected Stripe account."
+  const settings = (await sbGet(`app_settings?id=eq.1&select=run_mid`))[0] || {}
+  if (!settings.run_mid) return "Skipped — Run Merchant isn't configured."
 
   const customers = await sbGet(
-    `customers?autopay_consent=is.true&autopay_pm_id=not.is.null&stripe_customer_id=not.is.null&select=id,name,stripe_customer_id,autopay_pm_id`,
+    `customers?autopay_consent=is.true&run_vault_id=not.is.null&select=id,name,run_vault_id,run_vault_holder_id`,
   )
   if (!customers.length) return "No clients have autopay enabled."
 
@@ -263,27 +277,32 @@ async function runAutopayCharge(force = false): Promise<string> {
           continue
         }
 
-        // ---- charge the saved card (off-session) ----
+        // ---- charge the saved card (off-session, merchant-initiated) ----
         const cents = Math.round(newTotal * 100)
         if (cents < 50) continue
-        const pi = await stripeApi("payment_intents", {
-          account,
-          body: {
-            amount: cents, currency: "usd",
-            customer: cust.stripe_customer_id,
-            payment_method: cust.autopay_pm_id,
-            off_session: "true", confirm: "true",
-            description: `Autopay — invoice ${inv.number} (${cust.name})`,
-            metadata: { invoice_id: inv.id, invoice_number: inv.number, crm_customer_id: cust.id },
-          },
+        const { token, mid, env } = await runAccessToken()
+        const res = await runCharge(env, token, {
+          mid,
+          amount: cents,
+          vault_id: cust.run_vault_id,
+          vault_holder_id: cust.run_vault_holder_id || undefined,
+          capture: "Y",
+          currency: "USD",
+          cof: "M", // merchant-initiated
+          cof_sched: "Y", // scheduled recurring
+          invoice_id: String(inv.id),
+          order_id: String(inv.id),
         })
-        if (pi.status === "succeeded") {
-          await sbPatch(`invoices?id=eq.${inv.id}`, { status: "paid", paid_at: new Date().toISOString() })
+        if (res.result === "A") {
+          await sbPatch(`invoices?id=eq.${inv.id}`, {
+            status: "paid", paid_at: new Date().toISOString(),
+            run_paid_at: new Date().toISOString(), run_trans_id: String(res.trans_id),
+          })
           charged++
           totalCharged += newTotal
         } else {
           failed++
-          failLines.push(`${cust.name} ${inv.number}: ${pi.status}`)
+          failLines.push(`${cust.name} ${inv.number}: ${res.resp_text || res.result || "declined"}`)
         }
       } catch (e) {
         failed++

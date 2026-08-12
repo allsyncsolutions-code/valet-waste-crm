@@ -22,9 +22,9 @@ function mapCustomer(row) {
     business_line: row.business_line || 'waste',
     billingType: row.billing_type || 'subscription', // subscription | one_time
     autopay: {
-      saved: !!row.autopay_pm_id,
-      brand: row.autopay_card_brand || null,
-      last4: row.autopay_card_last4 || null,
+      saved: !!row.run_vault_id,
+      brand: row.run_card_brand || null,
+      last4: row.run_card_last4 || null,
     },
     tags: (row.customer_tags || []).map((ct) => ct.tag).filter(Boolean),
     createdAt: row.created_at,

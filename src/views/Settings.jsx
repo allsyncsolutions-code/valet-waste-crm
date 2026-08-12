@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { MONO } from '../data.js'
 import { listTags, createTag, updateTag, deleteTag, tagUsageCounts, subscribeTags, TAG_COLORS } from '../lib/tagsData.js'
 import { loadSettings, saveDepot, geocodeAddress, subscribeSettings, saveSmsTemplates, saveRandyTone, saveNotifyOnComplete, RANDY_TONES } from '../lib/settingsData.js'
-import { stripeStatus, stripeOnboard } from '../lib/stripeData.js'
+import { paymentsStatus, savePaymentsCredentials } from '../lib/paymentsData.js'
 import { platformBillingStatus, platformBillingCheckout, platformBillingPortal } from '../lib/platformBillingData.js'
 import { getSmsConfig, saveSmsConfig, sendTestSms, listSmsSubscriptions, ensureSmsSubscription } from '../lib/smsData.js'
 import Import from './Import.jsx'
@@ -32,7 +32,8 @@ export default function Settings({ app }) {
   const [depotMsg, setDepotMsg] = useState(null)
   const [geoBusy, setGeoBusy] = useState(false)
   const [depotSaving, setDepotSaving] = useState(false)
-  const [stripe, setStripe] = useState({ loading: true, data: null, busy: false, err: null })
+  const [pay, setPay] = useState({ loading: true, data: null, busy: false, err: null, msg: null })
+  const [creds, setCreds] = useState({ mid: '', public_key: '', refresh_token: '', env: 'production', webhook_secret: '' })
   const [billing, setBilling] = useState({ loading: true, data: null, busy: false, err: null })
   const [sms, setSms] = useState(EMPTY_SMS)
   const [smsFlags, setSmsFlags] = useState({ rc_secret_set: false, rc_jwt_set: false, rc_webhook_token_set: false })
@@ -118,28 +119,30 @@ export default function Settings({ app }) {
     }
   }
 
-  async function refreshStripe() {
+  async function refreshPay() {
     try {
-      const d = await stripeStatus()
-      setStripe((s) => ({ ...s, loading: false, data: d, err: null }))
+      const d = await paymentsStatus()
+      setPay((s) => ({ ...s, loading: false, data: d, err: null }))
     } catch (e) {
-      setStripe((s) => ({ ...s, loading: false, err: e.message || String(e) }))
+      setPay((s) => ({ ...s, loading: false, err: e.message || String(e) }))
     }
   }
   useEffect(() => {
-    refreshStripe()
-    // returning from Stripe's hosted onboarding — clean the ?stripe= param
+    refreshPay()
+    // returning from the portal pay screen — clean the ?paid= param
     const params = new URLSearchParams(window.location.search)
-    if (params.get('stripe')) window.history.replaceState({}, '', window.location.pathname)
+    if (params.get('paid') || params.get('setup')) window.history.replaceState({}, '', window.location.pathname)
   }, [])
-  async function connectStripe() {
-    setStripe((s) => ({ ...s, busy: true, err: null }))
+  async function saveCreds(e) {
+    e.preventDefault()
+    setPay((s) => ({ ...s, busy: true, err: null, msg: null }))
     try {
-      const d = await stripeOnboard(window.location.origin)
-      if (d && d.url) window.location.href = d.url
-      else throw new Error('Could not start Stripe onboarding.')
-    } catch (e) {
-      setStripe((s) => ({ ...s, busy: false, err: e.message || String(e) }))
+      await savePaymentsCredentials(creds)
+      setPay((s) => ({ ...s, busy: false, msg: 'Saved — Run Merchant is connected.' }))
+      setCreds({ mid: '', public_key: '', refresh_token: '', env: creds.env, webhook_secret: '' })
+      await refreshPay()
+    } catch (e2) {
+      setPay((s) => ({ ...s, busy: false, err: e2.message || String(e2) }))
     }
   }
 
@@ -403,35 +406,53 @@ export default function Settings({ app }) {
         </div>
       </div>
 
-      {/* payments */}
+      {/* payments (Run Merchant) */}
       <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '20px 22px', marginBottom: 16 }}>
-        <div style={{ fontWeight: 700, fontSize: 16 }}>Payments</div>
+        <div style={{ fontWeight: 700, fontSize: 16 }}>Payments — Run Merchant</div>
         <div style={{ fontSize: 12.5, color: '#7c8a82', marginTop: 3, marginBottom: 16 }}>
-          Connect your Stripe account to charge customers. You’ll sign in to Stripe — there are no API keys to copy.
+          Connect your Run Merchant account to charge customers via invoices and autopay. Generate these in the Run Merchant portal under Settings → API credentials.
         </div>
-        {stripe.err && <div style={{ background: '#fdecea', border: '1px solid #f3b7b0', color: '#9a2c1e', borderRadius: 10, padding: '9px 12px', fontSize: 12.5, marginBottom: 14 }}>{stripe.err}</div>}
-        {stripe.loading ? (
-          <div style={{ color: '#9aa69e', fontSize: 13 }}>Checking Stripe status…</div>
-        ) : stripe.data && stripe.data.connected && stripe.data.chargesEnabled ? (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        {pay.err && <div style={{ background: '#fdecea', border: '1px solid #f3b7b0', color: '#9a2c1e', borderRadius: 10, padding: '9px 12px', fontSize: 12.5, marginBottom: 14 }}>{pay.err}</div>}
+        {pay.msg && <div style={{ background: '#eef7f1', border: '1px solid #cfe7da', color: '#1f7a4d', borderRadius: 10, padding: '9px 12px', fontSize: 12.5, marginBottom: 14 }}>{pay.msg}</div>}
+
+        {pay.loading ? (
+          <div style={{ color: '#9aa69e', fontSize: 13 }}>Checking connection…</div>
+        ) : pay.data && pay.data.connected ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
             <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#22b06b', flex: 'none' }} />
             <div style={{ flex: 1 }}>
-              <div style={{ fontWeight: 600, fontSize: 13.5 }}>Connected — ready to accept payments</div>
-              <div style={{ fontSize: 11, color: '#9aa69e', fontFamily: MONO }}>{stripe.data.accountId}</div>
+              <div style={{ fontWeight: 600, fontSize: 13.5 }}>Connected — {pay.data.env === 'uat' ? 'UAT / test mode' : 'live'}</div>
+              <div style={{ fontSize: 11, color: '#9aa69e', fontFamily: MONO }}>MID {pay.data.mid}</div>
             </div>
-            <button onClick={refreshStripe} style={{ background: '#fff', border: '1px solid #e6eae6', color: '#5d6b63', borderRadius: 9, padding: '8px 12px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>Refresh</button>
-          </div>
-        ) : stripe.data && stripe.data.connected ? (
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-              <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#c08a2e', flex: 'none' }} />
-              <div style={{ flex: 1, fontWeight: 600, fontSize: 13.5 }}>Stripe started — onboarding isn’t finished yet</div>
-            </div>
-            <button onClick={connectStripe} disabled={stripe.busy} style={{ background: '#635bff', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: stripe.busy ? 0.6 : 1 }}>{stripe.busy ? 'Opening…' : 'Finish Stripe setup'}</button>
+            <button onClick={refreshPay} style={{ background: '#fff', border: '1px solid #e6eae6', color: '#5d6b63', borderRadius: 9, padding: '8px 12px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>Refresh</button>
           </div>
         ) : (
-          <button onClick={connectStripe} disabled={stripe.busy} style={{ background: '#635bff', color: '#fff', border: 'none', borderRadius: 9, padding: '11px 18px', fontSize: 13.5, fontWeight: 600, cursor: 'pointer', opacity: stripe.busy ? 0.6 : 1 }}>{stripe.busy ? 'Opening…' : 'Connect with Stripe'}</button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+            <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#c08a2e', flex: 'none' }} />
+            <div style={{ fontWeight: 600, fontSize: 13.5 }}>Not connected</div>
+          </div>
         )}
+
+        <form onSubmit={saveCreds}>
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 11 }}>
+            <SField label="Merchant ID (MID)"><input value={creds.mid} onChange={(e) => setCreds((c) => ({ ...c, mid: e.target.value }))} style={inp} placeholder="800000001780" /></SField>
+            <SField label="Environment">
+              <select value={creds.env} onChange={(e) => setCreds((c) => ({ ...c, env: e.target.value }))} style={inp}>
+                <option value="production">Production (live)</option>
+                <option value="uat">UAT / test</option>
+              </select>
+            </SField>
+          </div>
+          <SField label="Public Key"><input value={creds.public_key} onChange={(e) => setCreds((c) => ({ ...c, public_key: e.target.value }))} style={inp} placeholder="Used by Runner.js in the portal" /></SField>
+          <SField label="Refresh Token"><input type="password" value={creds.refresh_token} onChange={(e) => setCreds((c) => ({ ...c, refresh_token: e.target.value }))} style={inp} placeholder="Mints short-lived API keys (30-day TTL)" /></SField>
+          <SField label="Webhook Secret (optional)"><input type="password" value={creds.webhook_secret} onChange={(e) => setCreds((c) => ({ ...c, webhook_secret: e.target.value }))} style={inp} placeholder="From your Run Payments Integration Lead" /></SField>
+          {creds.env === 'uat' && (
+            <div style={{ background: '#f4f6f4', border: '1px solid #e0e4df', borderRadius: 9, padding: '9px 12px', fontSize: 12, color: '#5d6b63', marginBottom: 12, fontFamily: MONO }}>
+              Test card: 4788250000121443 · Visa · exp 10/29 · any CVV
+            </div>
+          )}
+          <button type="submit" disabled={pay.busy || (!creds.mid.trim() && !creds.public_key.trim() && !creds.refresh_token.trim())} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: pay.busy ? 0.6 : 1 }}>{pay.busy ? 'Saving…' : (pay.data && pay.data.connected ? 'Update credentials' : 'Connect Run Merchant')}</button>
+        </form>
       </div>
 
       {/* CRM subscription (platform billing — our own $250/mo) */}

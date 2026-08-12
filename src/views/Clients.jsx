@@ -3,7 +3,8 @@ import { MONO } from '../data.js'
 import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, addProperty, updateProperty, loadPropertyVisits, loadPropertyAddressIndex, countDuplicateProperties, findDuplicateProperties, mergeProperties, deleteProperty, sendPortalInvite, loadClientFieldActivity, loadClientNotes, addClientNote, deleteClientNote, loadPropertyLog } from '../lib/customersData.js'
 import { geocodeAll } from '../lib/importData.js'
 import { listTags, findOrCreateTag, subscribeTags } from '../lib/tagsData.js'
-import { stripeStatus, stripePaymentLink } from '../lib/stripeData.js'
+import { paymentsStatus, invoicePaymentUrl } from '../lib/paymentsData.js'
+import { createInvoice } from '../lib/invoicesData.js'
 import { loadPropertyPhotos, uploadPropertyPhoto, updatePropertyPhoto, deletePropertyPhoto } from '../lib/propertyPhotosData.js'
 
 const todayStr = () => new Date().toISOString().slice(0, 10)
@@ -63,7 +64,7 @@ export default function Clients({ app }) {
   const [tagInput, setTagInput] = useState('')
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [allTags, setAllTags] = useState([])
-  const [stripeOk, setStripeOk] = useState(false)
+  const [paymentsOk, setPaymentsOk] = useState(false)
   const [payLink, setPayLink] = useState(null)
   const [payBusy, setPayBusy] = useState(false)
   const [payErr, setPayErr] = useState(null)
@@ -185,7 +186,7 @@ export default function Clients({ app }) {
     const reloadTags = () => listTags().then(setAllTags).catch(() => {})
     reloadTags()
     countDuplicateProperties().then(setDupCount).catch(() => {})
-    stripeStatus().then((d) => setStripeOk(!!(d && d.connected && d.chargesEnabled))).catch(() => {})
+    paymentsStatus().then((d) => setPaymentsOk(!!(d && d.connected))).catch(() => {})
     const unsubC = subscribeCustomers(() => refresh().catch(() => {}))
     const unsubT = subscribeTags(reloadTags)
     return () => { unsubC && unsubC(); unsubT && unsubT() }
@@ -278,7 +279,14 @@ export default function Clients({ app }) {
     setPayErr(null)
     setPayLink(null)
     try {
-      const d = await stripePaymentLink({ amount: cur.invoice.amount, description: 'Invoice — ' + cur.name, customerName: cur.name })
+      // Create a one-line invoice for the scheduled amount, then mint its pay link.
+      const invId = await createInvoice({
+        customerId: cur.id,
+        status: 'sent',
+        issueDate: new Date().toISOString().slice(0, 10),
+        items: [{ description: 'Service', quantity: 1, unitPrice: Number(cur.invoice.amount) }],
+      })
+      const d = await invoicePaymentUrl(invId)
       setPayLink(d.url)
     } catch (e) {
       setPayErr(e.message || String(e))
@@ -1014,14 +1022,14 @@ export default function Clients({ app }) {
               )}
             </div>
 
-            {stripeOk && cur.invoice && cur.invoice.amount != null && (
+            {paymentsOk && cur.invoice && cur.invoice.amount != null && (
               <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '18px 20px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
                   <div>
                     <div style={{ fontWeight: 700, fontSize: 14 }}>Payment link</div>
                     <div style={{ fontSize: 12, color: '#7c8a82' }}>Charge ${Number(cur.invoice.amount).toFixed(2)} — send the link to your customer.</div>
                   </div>
-                  <button onClick={makePayLink} disabled={payBusy} style={{ flex: 'none', background: '#635bff', color: '#fff', border: 'none', borderRadius: 9, padding: '9px 14px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', opacity: payBusy ? 0.6 : 1 }}>{payBusy ? 'Creating…' : 'Create link'}</button>
+                  <button onClick={makePayLink} disabled={payBusy} style={{ flex: 'none', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '9px 14px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', opacity: payBusy ? 0.6 : 1 }}>{payBusy ? 'Creating…' : 'Create link'}</button>
                 </div>
                 {payErr && <div style={{ marginTop: 10, color: '#9a2c1e', fontSize: 12 }}>{payErr}</div>}
                 {payLink && (

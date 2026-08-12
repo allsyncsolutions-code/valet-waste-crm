@@ -9,11 +9,13 @@
 //   data {token}                 → portal payload: properties, pickups+photos,
 //                                  property photos, invoices, quotes, requests,
 //                                  saved-card status, balance due
-//   setup_session {token, origin, consent} → Stripe Checkout (mode=setup) URL
-//                                  to save a card; consent checkbox required
-//   confirm_setup {token, session_id} → after Checkout returns: set default PM,
-//                                  record consent, Randy texts all admins
-//   remove_card {token}          → detach saved card + clear autopay consent
+//   setup_session {token, origin, consent} → returns Runner.js config
+//                                  (publicKey, mid, env) so the portal can
+//                                  render the inline card form; consent required
+//   save_card {token, account_token, expiration, cvn?, consent}
+//                                  → $0 auth + vault the tokenized card; store
+//                                  vault_id + display metadata; Randy texts admins
+//   remove_card {token}          → delete vault payment account + clear autopay
 //   quote_respond {token, quote_id, response, note} → approve/decline a quote,
 //                                  Randy texts admins
 //   request_service {token, kind, property_ids, message} → log request, Randy
@@ -21,7 +23,8 @@
 //   admin_data {customer_id}     → staff-JWT-authorized copy of `data` for the
 //                                  CRM's Client Portal preview tab
 //
-// Secrets: SENDGRID_API_KEY (required), SENDGRID_FROM, STRIPE_SECRET_KEY.
+// Secrets: SENDGRID_API_KEY (required), SENDGRID_FROM. Run Merchant credentials
+// live in app_settings (set via the `payments` function's save_credentials).
 // Deploy with --no-verify-jwt.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts"
@@ -72,40 +75,60 @@ async function sha256(s: string): Promise<string> {
   return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("")
 }
 
-// ---- Stripe (connected account) ---------------------------------------------
-function form(obj: Record<string, unknown>) {
-  const p = new URLSearchParams()
-  const add = (key: string, val: unknown) => {
-    if (val === undefined || val === null) return
-    if (typeof val === "object") {
-      for (const k of Object.keys(val as Record<string, unknown>)) add(`${key}[${k}]`, (val as Record<string, unknown>)[k])
-    } else {
-      p.append(key, String(val))
-    }
-  }
-  for (const k of Object.keys(obj)) add(k, obj[k])
-  return p.toString()
+// ---- Run Merchant (Run Payments) --------------------------------------------
+// Replaces Stripe for saved-card / autopay. The api_key (1h TTL) is minted from
+// the long-lived refresh_token; cached in app_settings and refreshed near expiry.
+const RUN_HOSTS = {
+  uat: "https://staging-javelin.runpayments.io",
+  production: "https://javelin.runpayments.io",
 }
-async function stripeApi(path: string, opts: { method?: string; body?: Record<string, unknown>; account?: string } = {}) {
-  const sk = Deno.env.get("STRIPE_SECRET_KEY")
-  if (!sk) throw new Error("Stripe isn't configured (STRIPE_SECRET_KEY missing).")
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${sk}`,
-    "Content-Type": "application/x-www-form-urlencoded",
-  }
-  if (opts.account) headers["Stripe-Account"] = opts.account
-  const r = await fetch(`https://api.stripe.com/v1/${path}`, {
-    method: opts.method || "POST",
-    headers,
-    body: opts.body ? form(opts.body) : undefined,
-  })
-  const d = await r.json()
-  if (!r.ok) throw new Error(d?.error?.message || `Stripe ${r.status}`)
-  return d
+function runHost(env?: string | null) {
+  return RUN_HOSTS[(env === "uat" ? "uat" : "production") as keyof typeof RUN_HOSTS]
 }
 
+type RunSettings = {
+  run_mid?: string | null
+  run_public_key?: string | null
+  run_refresh_token?: string | null
+  run_api_key?: string | null
+  run_api_key_expires_at?: string | null
+  run_env?: string | null
+}
 async function getSettings() {
-  return (await sbGet(`app_settings?id=eq.1&select=company_name,logo_url,stripe_account_id`))[0] || {}
+  return (await sbGet(`app_settings?id=eq.1&select=company_name,logo_url,run_mid,run_public_key,run_refresh_token,run_api_key,run_api_key_expires_at,run_env`))[0] || {}
+}
+
+async function runAccessToken(s: RunSettings): Promise<{ token: string; mid: string; env: string }> {
+  const mid = s.run_mid || ""
+  const env = s.run_env === "uat" ? "uat" : "production"
+  if (!mid || !s.run_refresh_token) throw new Error("Payments aren't configured yet — please contact us.")
+  const exp = s.run_api_key_expires_at ? new Date(s.run_api_key_expires_at).getTime() : 0
+  if (s.run_api_key && exp - Date.now() > 5 * 60 * 1000) return { token: s.run_api_key, mid, env }
+  const r = await fetch(`${runHost(env)}/api/v1/api_keys/refresh`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${s.run_api_key || s.run_refresh_token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ token: s.run_refresh_token }),
+  })
+  const d = await r.json().catch(() => ({}))
+  if (!r.ok) throw new Error(d?.message || `Run Merchant key refresh failed: ${r.status}`)
+  await sbPatch(`app_settings?id=eq.1`, {
+    run_api_key: d.api_key,
+    run_refresh_token: d.refresh_token,
+    run_api_key_expires_at: new Date(Number(d.api_key_expires_at) * 1000).toISOString(),
+    run_refresh_token_expires_at: new Date(Number(d.refresh_token_expires_at) * 1000).toISOString(),
+  })
+  return { token: d.api_key, mid, env }
+}
+
+async function runApi(env: string, token: string, path: string, opts: { method?: string; body?: Record<string, unknown> } = {}) {
+  const r = await fetch(`${runHost(env)}/api/v1/${path}`, {
+    method: opts.method || "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  })
+  const d = await r.json().catch(() => ({}))
+  if (!r.ok) throw new Error(d?.message || d?.resp_text || `Run Merchant ${r.status}`)
+  return d
 }
 
 // ---- SMS to admins (Trashy Randy) -------------------------------------------
@@ -170,7 +193,7 @@ async function createMagicLink(customerId: string, slug: string): Promise<string
 
 // ---- session helper ----------------------------------------------------------
 const CUST_COLS =
-  "id,name,email,phone,portal_slug,stripe_customer_id,autopay_consent,autopay_consented_at,autopay_pm_id,autopay_card_brand,autopay_card_last4"
+  "id,name,email,phone,portal_slug,autopay_consent,autopay_consented_at,run_vault_id,run_vault_holder_id,run_card_brand,run_card_last4"
 
 async function customerFromToken(token: string): Promise<any | null> {
   if (!token) return null
@@ -257,7 +280,7 @@ async function portalData(cust: any) {
   }
 
   const invoices = await sbGet(
-    `invoices?customer_id=eq.${cust.id}&status=neq.draft&select=id,number,status,total,due_date,issue_date,stripe_payment_url&order=issue_date.desc&limit=36`,
+    `invoices?customer_id=eq.${cust.id}&status=neq.draft&select=id,number,status,total,due_date,issue_date,payment_url,run_trans_id&order=issue_date.desc&limit=36`,
   )
   const balanceDue = invoices
     .filter((i: any) => i.status === "sent")
@@ -289,10 +312,13 @@ async function portalData(cust: any) {
     quotes,
     requests,
     payment: {
-      available: !!(settings.stripe_account_id && Deno.env.get("STRIPE_SECRET_KEY")),
-      saved: !!cust.autopay_pm_id,
-      brand: cust.autopay_card_brand || null,
-      last4: cust.autopay_card_last4 || null,
+      available: !!(settings.run_mid && settings.run_public_key),
+      publicKey: settings.run_public_key || null,
+      mid: settings.run_mid || null,
+      env: settings.run_env || "production",
+      saved: !!cust.run_vault_id,
+      brand: cust.run_card_brand || null,
+      last4: cust.run_card_last4 || null,
       consent: !!cust.autopay_consent,
     },
   }
@@ -375,88 +401,85 @@ Deno.serve(async (req) => {
     }
 
     if (action === "setup_session") {
+      // No hosted checkout with Run Merchant — return the Runner.js config so
+      // the portal can render the inline card form. Consent is required and
+      // recorded on save_card once tokenization succeeds.
       const cust = await customerFromToken(String(token || ""))
       if (!cust) return json({ error: "Session expired — sign in again." }, 401)
       if (!body.consent) return json({ error: "Please check the box agreeing to automatic monthly charges first." }, 400)
       const settings = await getSettings()
-      const account = settings.stripe_account_id
-      if (!account) return json({ error: "Payments aren't set up yet — please contact us." }, 400)
-
-      // Find or create the Stripe customer on the connected account.
-      let scid = cust.stripe_customer_id
-      if (scid) {
-        try { await stripeApi(`customers/${scid}`, { method: "GET", account }) } catch { scid = null }
-      }
-      if (!scid) {
-        const sc = await stripeApi("customers", {
-          account,
-          body: { name: cust.name, email: cust.email || undefined, metadata: { crm_customer_id: cust.id } },
-        })
-        scid = sc.id
-        await sbPatch(`customers?id=eq.${cust.id}`, { stripe_customer_id: scid })
-      }
-
-      const origin = String(body.origin || PORTAL_ORIGIN)
-      const session = await stripeApi("checkout/sessions", {
-        account,
-        body: {
-          mode: "setup",
-          customer: scid,
-          payment_method_types: ["card"],
-          success_url: `${origin}/?portal=${enc(cust.portal_slug)}&setup_session={CHECKOUT_SESSION_ID}`,
-          cancel_url: `${origin}/?portal=${enc(cust.portal_slug)}&setup=cancelled`,
-          metadata: { crm_customer_id: cust.id, autopay_consent: "true" },
-        },
+      if (!settings.run_mid || !settings.run_public_key) return json({ error: "Payments aren't set up yet — please contact us." }, 400)
+      return json({
+        ok: true,
+        publicKey: settings.run_public_key,
+        mid: settings.run_mid,
+        env: settings.run_env || "production",
       })
-      return json({ ok: true, url: session.url })
     }
 
-    if (action === "confirm_setup") {
+    if (action === "save_card") {
+      // Runner.js has tokenized the card in the browser; we now vault it via a
+      // $0 auth (capture:N, vault:Y). Stores the vault_id + display metadata.
       const cust = await customerFromToken(String(token || ""))
       if (!cust) return json({ error: "Session expired — sign in again." }, 401)
-      if (!body.session_id) return json({ error: "Missing session_id." }, 400)
+      if (!body.account_token || !body.expiration) return json({ error: "Missing tokenized card details." }, 400)
       const settings = await getSettings()
-      const account = settings.stripe_account_id
-      if (!account) return json({ error: "Payments aren't set up yet." }, 400)
+      if (!settings.run_mid) return json({ error: "Payments aren't set up yet — please contact us." }, 400)
+      const { token, mid, env } = await runAccessToken(settings)
 
-      const session = await stripeApi(`checkout/sessions/${enc(String(body.session_id))}`, { method: "GET", account })
-      if (session.metadata?.crm_customer_id !== cust.id) return json({ error: "That checkout session doesn't belong to this account." }, 403)
-      if (!session.setup_intent) return json({ error: "Card setup wasn't completed." }, 400)
-      const si = await stripeApi(`setup_intents/${session.setup_intent}`, { method: "GET", account })
-      const pmId = si.payment_method
-      if (!pmId || si.status !== "succeeded") return json({ error: "Card setup wasn't completed." }, 400)
-
-      const alreadySaved = cust.autopay_pm_id === pmId
-      const pm = await stripeApi(`payment_methods/${pmId}`, { method: "GET", account })
-      await stripeApi(`customers/${cust.stripe_customer_id}`, {
-        account,
-        body: { invoice_settings: { default_payment_method: pmId } },
+      const alreadySaved = !!cust.run_vault_id
+      const res = await runApi(env, token, "charge", {
+        method: "POST",
+        body: {
+          mid,
+          amount: "0.00",
+          account_token: String(body.account_token),
+          expiration: String(body.expiration),
+          capture: "N",
+          vault: "Y",
+          cof: "C",
+          cof_sched: "N",
+          cof_perm: body.consent ? "Y" : "N",
+          name: cust.name || undefined,
+          email: cust.email || undefined,
+          cvn: body.cvn ? String(body.cvn) : undefined,
+          currency: "USD",
+        },
       })
+      if (res.result && res.result !== "A") {
+        return json({ error: res.resp_text || "Your card couldn't be verified. Please try another card." })
+      }
       await sbPatch(`customers?id=eq.${cust.id}`, {
-        autopay_pm_id: pmId,
-        autopay_card_brand: pm.card?.brand || null,
-        autopay_card_last4: pm.card?.last4 || null,
-        autopay_consent: true,
-        autopay_consented_at: new Date().toISOString(),
+        run_vault_id: res.vault_id ?? null,
+        run_vault_holder_id: res.vault_holder_id ?? cust.run_vault_holder_id ?? null,
+        run_card_brand: res.card_type || null,
+        run_card_last4: String(res.card_number || "").slice(-4) || null,
+        run_card_exp: String(body.expiration) || null,
+        autopay_consent: !!body.consent,
+        autopay_consented_at: body.consent ? new Date().toISOString() : null,
       })
-      if (!alreadySaved) {
-        const cardTxt = pm.card ? `${pm.card.brand?.toUpperCase()} ••${pm.card.last4}` : "a card"
+      if (!alreadySaved && body.consent) {
+        const cardTxt = res.card_type ? `${String(res.card_type).toUpperCase()} ••${String(res.card_number || "").slice(-4)}` : "a card"
         await textAdmins(
           `💳 ${cust.name} saved their payment method (${cardTxt}) to be charged to invoices — they agreed to automatic charges at the start of each month. 5th-week-free applies. — Trashy Randy`,
         )
       }
-      return json({ ok: true, brand: pm.card?.brand || null, last4: pm.card?.last4 || null })
+      return json({ ok: true, brand: res.card_type || null, last4: String(res.card_number || "").slice(-4) || null })
     }
 
     if (action === "remove_card") {
       const cust = await customerFromToken(String(token || ""))
       if (!cust) return json({ error: "Session expired — sign in again." }, 401)
-      const settings = await getSettings()
-      if (cust.autopay_pm_id && settings.stripe_account_id) {
-        try { await stripeApi(`payment_methods/${cust.autopay_pm_id}/detach`, { account: settings.stripe_account_id }) } catch (_e) { /* already gone */ }
+      if (cust.run_vault_id) {
+        const settings = await getSettings()
+        try {
+          const { token, env } = await runAccessToken(settings)
+          await runApi(env, token, `vault_payment_accounts/${cust.run_vault_id}`, { method: "DELETE" })
+        } catch (_e) { /* already gone */ }
       }
       await sbPatch(`customers?id=eq.${cust.id}`, {
-        autopay_pm_id: null, autopay_card_brand: null, autopay_card_last4: null,
+        run_vault_id: null, run_vault_holder_id: null,
+        run_card_brand: null, run_card_last4: null, run_card_exp: null,
         autopay_consent: false,
       })
       await textAdmins(`💳 ${cust.name} removed their saved payment method — autopay is off for them now. — Trashy Randy`)

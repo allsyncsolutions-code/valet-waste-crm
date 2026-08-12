@@ -6,8 +6,9 @@
 // Also renders inside the CRM's "Client Portal" tab in PREVIEW mode
 // (previewCustomerId prop): staff JWT fetches the same payload via the
 // portal fn's admin_data action, and all client actions are disabled.
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '../lib/supabaseClient.js'
+import { loadRunner } from '../lib/runnerJs.js'
 
 const GREEN = '#1f7a4d'
 const tokenKey = (slug) => `vw_portal_${slug}`
@@ -109,8 +110,7 @@ export default function PortalPage({ slug, code, previewCustomerId, shareToken }
         if (shared || preview) { await loadData(); return }
 
         const params = new URLSearchParams(window.location.search)
-        const setupSession = params.get('setup_session')
-        const setupCancelled = params.get('setup') === 'cancelled'
+        const payInvoice = params.get('pay_invoice')
 
         if (code) {
           // Arrived from the emailed link: swap the one-time code for a session.
@@ -120,29 +120,15 @@ export default function PortalPage({ slug, code, previewCustomerId, shareToken }
           url.searchParams.delete('code')
           window.history.replaceState({}, '', url.toString())
           await loadData(r.token)
+          if (payInvoice) setTab('pay_invoice')
           return
         }
 
         const saved = localStorage.getItem(tokenKey(slug))
         if (saved) {
           try {
-            if (setupSession) {
-              // Back from Stripe Checkout — confirm the saved card.
-              try {
-                const r = await portalApi({ action: 'confirm_setup', token: saved, session_id: setupSession })
-                setNotice(`✓ Your ${r.brand ? r.brand.toUpperCase() + ' ' : ''}card ending ${r.last4 || ''} is saved — autopay is on and your 5th pickup week is free.`)
-              } catch (e) { setNotice(`Card setup didn't finish: ${e.message || e}`) }
-              const url = new URL(window.location.href)
-              url.searchParams.delete('setup_session')
-              window.history.replaceState({}, '', url.toString())
-            }
-            if (setupCancelled) {
-              setNotice('Card setup was cancelled — no changes made.')
-              const url = new URL(window.location.href)
-              url.searchParams.delete('setup')
-              window.history.replaceState({}, '', url.toString())
-            }
             await loadData(saved)
+            if (payInvoice) setTab('pay_invoice')
             return
           } catch (e) { localStorage.removeItem(tokenKey(slug)) }
         }
@@ -268,8 +254,9 @@ export default function PortalPage({ slug, code, previewCustomerId, shareToken }
       {tab === 'pickups' && <PickupsTab data={data} />}
       {tab === 'photos' && <PhotosTab data={data} />}
       {tab === 'quotes' && <QuotesTab data={data} token={token} preview={preview} onChanged={() => loadData(token)} />}
-      {tab === 'invoices' && <InvoicesTab data={data} />}
+      {tab === 'invoices' && <InvoicesTab data={data} onPay={(id) => { const u = new URL(window.location.href); u.searchParams.set('pay_invoice', id); window.history.replaceState({}, '', u.toString()); setTab('pay_invoice') }} />}
       {tab === 'payments' && <PaymentsTab data={data} token={token} preview={preview} onChanged={() => loadData(token)} setNotice={setNotice} />}
+      {tab === 'pay_invoice' && <PayInvoiceTab data={data} token={token} preview={preview} onChanged={() => loadData(token)} setNotice={setNotice} onDone={() => setTab('invoices')} />}
       {tab === 'request' && <RequestTab data={data} token={token} preview={preview} onChanged={() => loadData(token)} />}
 
       {!preview && !shared && (
@@ -560,7 +547,7 @@ function QuotesTab({ data, token, preview, onChanged }) {
 }
 
 // ---- Invoices ------------------------------------------------------------------
-function InvoicesTab({ data }) {
+function InvoicesTab({ data, onPay }) {
   const payment = data.payment || {}
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -580,8 +567,8 @@ function InvoicesTab({ data }) {
           <div style={{ fontWeight: 800, fontSize: 15 }}>{money(inv.total)}</div>
           {inv.status === 'paid' ? (
             <span style={chip('#e7f1eb', GREEN)}>PAID</span>
-          ) : inv.stripe_payment_url ? (
-            <a href={inv.stripe_payment_url} target="_blank" rel="noreferrer" style={{ ...btnPrimary, padding: '8px 16px', textDecoration: 'none' }}>Pay now</a>
+          ) : inv.payment_url || inv.stripe_payment_url ? (
+            <button onClick={() => onPay && onPay(inv.id)} style={{ ...btnPrimary, padding: '8px 16px' }}>Pay now</button>
           ) : (
             <span style={chip('#faf3e2', '#8a6414')}>OPEN</span>
           )}
@@ -592,20 +579,63 @@ function InvoicesTab({ data }) {
 }
 
 // ---- Payments (saved card + 5th-week-free) ---------------------------------------
+// Inline Runner.js card form (Run Merchant). Card data is tokenized in an
+// iframe Runner owns — only the account_token + expiry reach our backend.
 function PaymentsTab({ data, token, preview, onChanged, setNotice }) {
   const payment = data.payment || {}
   const [consent, setConsent] = useState(false)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
+  const [runnerReady, setRunnerReady] = useState(false)
+  const runnerRef = useRef(null)
+  const formRef = useRef(null)
 
-  async function startSetup() {
-    if (preview) return
+  // Mount the Runner.js iframe fields once we have the public key/mid.
+  useEffect(() => {
+    if (preview || !payment.available || !payment.publicKey || !formRef.current) return
+    let cancelled = false
+    loadRunner().then((Runner) => {
+      if (cancelled || !formRef.current) return
+      const r = new Runner()
+      r.init({
+        element: '#run-form',
+        publicKey: payment.publicKey,
+        mid: payment.mid,
+        env: payment.env === 'uat' ? 'staging' : 'production',
+        useExpiry: true,
+        useCvv: true,
+      })
+      runnerRef.current = r
+      setRunnerReady(true)
+    }).catch((e) => setErr(e.message || String(e)))
+    return () => { cancelled = true }
+  }, [preview, payment.available, payment.publicKey, payment.mid, payment.env])
+
+  async function saveCard() {
+    if (preview || !runnerRef.current) return
+    if (!consent) { setErr('Please check the box agreeing to automatic monthly charges first.'); return }
     setBusy(true)
     setErr('')
     try {
-      const r = await portalApi({ action: 'setup_session', token, origin: window.location.origin, consent })
-      window.location.href = r.url
-    } catch (e) { setErr(e.message || String(e)); setBusy(false) }
+      await new Promise((resolve, reject) => {
+        runnerRef.current.tokenize(async (res) => {
+          if (!res || (!res.account_token && !res.token)) { reject(new Error('Card entry incomplete.')); return }
+          try {
+            const r = await portalApi({
+              action: 'save_card', token,
+              account_token: res.account_token || res.token,
+              expiration: res.expiry,
+              cvn: res.cvv,
+              consent,
+            })
+            resolve(r)
+          } catch (e) { reject(e) }
+        })
+      })
+      setNotice(`✓ Your card is saved — autopay is on and your 5th pickup week is free.`)
+      await onChanged()
+    } catch (e) { setErr(e.message || String(e)) }
+    setBusy(false)
   }
 
   async function removeCard() {
@@ -639,30 +669,38 @@ function PaymentsTab({ data, token, preview, onChanged, setNotice }) {
 
           <div style={card}>
             <div style={{ fontWeight: 700, fontSize: 14.5, marginBottom: 10 }}>Save a payment method</div>
-            {!payment.available && (
+            {!payment.available ? (
               <div style={{ background: '#faf3e2', color: '#8a6414', borderRadius: 9, padding: '9px 12px', fontSize: 13, marginBottom: 12 }}>
                 Online card setup isn't available yet — please contact us to set up autopay.
               </div>
+            ) : (
+              <>
+                <div ref={formRef}>
+                  <div id="run-form" style={{ minHeight: 64, marginBottom: 4 }}>
+                    {!runnerReady && <div style={{ color: '#9aa69e', fontSize: 12.5, padding: '8px 2px' }}>Loading secure card form…</div>}
+                  </div>
+                </div>
+                <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13.5, color: '#3c4a42', lineHeight: 1.5, cursor: 'pointer', marginTop: 8 }}>
+                  <input
+                    type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)}
+                    style={{ marginTop: 3, width: 16, height: 16, accentColor: GREEN }}
+                  />
+                  <span>
+                    I'm OK with my saved card being <b>charged automatically at the start of each month</b> for
+                    my open invoices. I can remove my card any time to turn this off.
+                  </span>
+                </label>
+                <button
+                  disabled={!consent || busy || preview || !runnerReady}
+                  title={preview ? 'Disabled in admin preview' : !consent ? 'Check the box above first' : undefined}
+                  onClick={saveCard}
+                  style={{ ...btnPrimary, marginTop: 14, padding: '12px 22px', opacity: (!consent || preview || !runnerReady) ? 0.55 : 1 }}
+                >{busy ? 'Saving…' : '🔒 Save payment method'}</button>
+                <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 10 }}>
+                  Card details are entered in a secure Run Payments form — we never see or store your card number.
+                </div>
+              </>
             )}
-            <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13.5, color: '#3c4a42', lineHeight: 1.5, cursor: 'pointer' }}>
-              <input
-                type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)}
-                style={{ marginTop: 3, width: 16, height: 16, accentColor: GREEN }}
-              />
-              <span>
-                I'm OK with my saved card being <b>charged automatically at the start of each month</b> for
-                my open invoices. I can remove my card any time to turn this off.
-              </span>
-            </label>
-            <button
-              disabled={!consent || busy || preview || !payment.available}
-              title={preview ? 'Disabled in admin preview' : !consent ? 'Check the box above first' : undefined}
-              onClick={startSetup}
-              style={{ ...btnPrimary, marginTop: 14, padding: '12px 22px', opacity: (!consent || preview || !payment.available) ? 0.55 : 1 }}
-            >{busy ? 'Opening secure checkout…' : '🔒 Save payment method'}</button>
-            <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 10 }}>
-              Card details are entered on Stripe's secure page — we never see or store your card number.
-            </div>
           </div>
         </>
       ) : (
@@ -689,6 +727,139 @@ function PaymentsTab({ data, token, preview, onChanged, setNotice }) {
           </div>
         </>
       )}
+    </div>
+  )
+}
+
+// ---- Pay an invoice (one-time charge via Runner.js) ------------------------------
+// Reached from an invoice pay link (/?pay_invoice=<id>) or the Invoices tab's
+// "Pay now". Shows the invoice + a Runner.js card form; on success marks paid.
+function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
+  const params = new URLSearchParams(typeof window !== 'undefined' ? window.location.search : '')
+  const invoiceId = params.get('pay_invoice')
+  const inv = (data.invoices || []).find((i) => String(i.id) === String(invoiceId))
+  const payment = data.payment || {}
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const [runnerReady, setRunnerReady] = useState(false)
+  const [saveCard, setSaveCard] = useState(false)
+  const runnerRef = useRef(null)
+  const formRef = useRef(null)
+
+  useEffect(() => {
+    if (preview || !payment.available || !payment.publicKey || !formRef.current) return
+    let cancelled = false
+    loadRunner().then((Runner) => {
+      if (cancelled || !formRef.current) return
+      const r = new Runner()
+      r.init({
+        element: '#run-pay-form',
+        publicKey: payment.publicKey,
+        mid: payment.mid,
+        env: payment.env === 'uat' ? 'staging' : 'production',
+        useExpiry: true,
+        useCvv: true,
+      })
+      runnerRef.current = r
+      setRunnerReady(true)
+    }).catch((e) => setErr(e.message || String(e)))
+    return () => { cancelled = true }
+  }, [preview, payment.available, payment.publicKey, payment.mid, payment.env])
+
+  async function pay() {
+    if (preview || !runnerRef.current || !inv) return
+    setBusy(true)
+    setErr('')
+    try {
+      const res = await new Promise((resolve, reject) => {
+        runnerRef.current.tokenize(async (t) => {
+          if (!t || (!t.account_token && !t.token)) { reject(new Error('Card entry incomplete.')); return }
+          try {
+            // charge_invoice lives in the `payments` edge function (not portal).
+            const { data, error } = await supabase.functions.invoke('payments', {
+              body: {
+                action: 'charge_invoice',
+                invoice_id: String(inv.id),
+                account_token: t.account_token || t.token,
+                expiration: t.expiry,
+                cvn: t.cvv,
+                save_card: saveCard,
+              },
+            })
+            if (error) {
+              let msg = error.message || String(error)
+              try { const j = await error.context?.json?.(); if (j?.error) msg = j.error } catch (_e) { /* keep msg */ }
+              reject(new Error(msg))
+            } else if (data && data.error) {
+              reject(new Error(data.error))
+            } else {
+              resolve(data)
+            }
+          } catch (e) { reject(e) }
+        })
+      })
+      if (res && res.ok) {
+        setNotice(`✓ Payment of ${money(inv.total)} received — thank you!${res.saved ? ' Your card is saved for autopay.' : ''}`)
+        await onChanged()
+        onDone && onDone()
+      } else if (res && res.declined) {
+        setErr(res.resp_text || 'Your card was declined. Please try another card.')
+      } else {
+        setErr((res && res.error) || 'Payment could not be completed.')
+      }
+    } catch (e) {
+      setErr(e.message || String(e))
+    }
+    setBusy(false)
+  }
+
+  if (!inv) {
+    return <div style={{ ...card, textAlign: 'center', color: '#9aa69e', fontSize: 13 }}>This invoice isn't available. <button onClick={onDone} style={{ color: GREEN, background: 'none', border: 'none', cursor: 'pointer', fontWeight: 600 }}>Back to invoices</button></div>
+  }
+  if (inv.status === 'paid') {
+    return (
+      <div style={{ ...card, textAlign: 'center' }}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: GREEN }}>✓ Invoice {inv.number} is paid</div>
+        <button onClick={onDone} style={{ ...btnGhost, marginTop: 12 }}>Back to invoices</button>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {err && <div style={{ background: '#fbeae6', color: '#c0492f', borderRadius: 9, padding: '9px 12px', fontSize: 13 }}>{err}</div>}
+      <div style={card}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 15 }}>Invoice {inv.number}</div>
+            <div style={{ fontSize: 12, color: '#7c8a82' }}>{inv.due_date ? `Due ${fmtD(inv.due_date)}` : fmtD(inv.issue_date)}</div>
+          </div>
+          <span style={{ flex: 1 }} />
+          <div style={{ fontWeight: 800, fontSize: 18 }}>{money(inv.total)}</div>
+        </div>
+      </div>
+      <div style={card}>
+        <div style={{ fontWeight: 700, fontSize: 14.5, marginBottom: 10 }}>Pay with card</div>
+        <div ref={formRef}>
+          <div id="run-pay-form" style={{ minHeight: 64, marginBottom: 4 }}>
+            {!runnerReady && <div style={{ color: '#9aa69e', fontSize: 12.5, padding: '8px 2px' }}>Loading secure card form…</div>}
+          </div>
+        </div>
+        {!payment.saved && (
+          <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, color: '#3c4a42', lineHeight: 1.5, cursor: 'pointer', marginTop: 8 }}>
+            <input type="checkbox" checked={saveCard} onChange={(e) => setSaveCard(e.target.checked)} style={{ marginTop: 3, width: 16, height: 16, accentColor: GREEN }} />
+            <span>Save this card for autopay (charged automatically at the start of each month for open invoices).</span>
+          </label>
+        )}
+        <button
+          disabled={busy || preview || !runnerReady}
+          onClick={pay}
+          style={{ ...btnPrimary, marginTop: 14, padding: '12px 22px', opacity: (busy || preview || !runnerReady) ? 0.55 : 1 }}
+        >{busy ? 'Processing…' : `Pay ${money(inv.total)}`}</button>
+        <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 10 }}>
+          Card details are entered in a secure Run Payments form — we never see or store your card number.
+        </div>
+      </div>
     </div>
   )
 }

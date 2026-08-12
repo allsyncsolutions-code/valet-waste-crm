@@ -1,9 +1,9 @@
 // Data layer for invoices + line items. Invoices are real billing documents
 // (distinct from invoice_schedules, which is the recurring-billing config).
-// Stripe payment links are minted through the `stripe` edge function so the
-// platform secret key stays server-side.
+// Payment links are minted through the `payments` edge function (Run Merchant)
+// so merchant credentials stay server-side.
 import { supabase } from './supabaseClient.js'
-import { stripePaymentLink } from './stripeData.js'
+import { invoicePaymentUrl } from './paymentsData.js'
 import { logActivity } from './activityData.js'
 import { loadSettings } from './settingsData.js'
 import { sendSms, renderTemplate } from './smsData.js'
@@ -53,7 +53,9 @@ function mapInvoice(row) {
     discount: num(row.discount),
     subtotal: num(row.subtotal),
     total: num(row.total),
-    stripePaymentUrl: row.stripe_payment_url || null,
+    stripePaymentUrl: row.payment_url || row.stripe_payment_url || null,
+    paymentUrl: row.payment_url || row.stripe_payment_url || null,
+    runTransId: row.run_trans_id || null,
     sentAt: row.sent_at,
     paidAt: row.paid_at,
     createdAt: row.created_at,
@@ -157,21 +159,14 @@ export async function deleteInvoice(id, number) {
   logActivity({ type: 'invoice_deleted', summary: `Deleted invoice ${number || ''}`.trim(), entityType: 'invoice' })
 }
 
-// Mint a Stripe checkout link for the invoice total, store it, and mark sent.
+// Mint a Run Merchant pay link (the in-portal Runner.js pay screen) for the
+// invoice, store it, and mark sent.
 export async function sendInvoiceLink(invoice) {
   if (!invoice.total || invoice.total < 0.5) {
     throw new Error('Invoice total must be at least $0.50 to create a payment link.')
   }
-  const d = await stripePaymentLink({
-    amount: invoice.total,
-    description: `${invoice.number}${invoice.customerName ? ' — ' + invoice.customerName : ''}`,
-    customerName: invoice.customerName,
-  })
-  if (!d || !d.url) throw new Error('Stripe did not return a payment link.')
-  await setInvoiceStatus(invoice.id, 'sent', {
-    stripe_payment_url: d.url,
-    sent_at: new Date().toISOString(),
-  })
+  const d = await invoicePaymentUrl(invoice.id)
+  if (!d || !d.url) throw new Error('Could not create a payment link.')
   logActivity({ type: 'invoice_sent', summary: `Sent payment link for invoice ${invoice.number} (${money(invoice.total)})`, entityType: 'invoice', entityId: invoice.id })
   return d.url
 }
@@ -183,7 +178,7 @@ export async function textInvoice(invoice, customMessage) {
   if (!invoice.customerPhone) throw new Error('This customer has no phone number on file.')
 
   // Reuse the stored pay link, or mint one (also marks the invoice sent).
-  let payUrl = invoice.stripePaymentUrl
+  let payUrl = invoice.paymentUrl || invoice.stripePaymentUrl
   if (!payUrl) payUrl = await sendInvoiceLink(invoice)
 
   const settings = await loadSettings().catch(() => null)

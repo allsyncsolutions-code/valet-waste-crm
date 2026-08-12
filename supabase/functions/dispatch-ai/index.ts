@@ -75,9 +75,20 @@ const TONES: Record<string, string> = {
 }
 const DEFAULT_TONE = "spicy"
 
+// Field-verification playbook — drivers rebuilding route data from the truck.
+const FIELD_OPS = `FIELD MODE — "Check My Location" (route/data cleanup):
+Drivers tap Check My Location at each stop and you receive their GPS. They are DRIVING — ask ONE short question per turn. The flow:
+1) find_nearby_properties with the GPS. Confirm the closest match by FULL address, always saying the zip when two candidates are similar ("1711 Main St in 32277 — is that where you are?"). Never assume between lookalike streets in different zips.
+2) If they say no and give a different address, or nothing on file is close: ask who the client is. find_clients to match; create_client if new (name alone is fine for now).
+3) Ask: one-time stop, or every <today's weekday>? If recurring, edit_property to add that weekday to pickup_days.
+4) Ask the price. Save it on the property (edit_property price) AND add_invoice_line to that client's current-month draft (description like "Valet trash — <address> — <date>"). Every confirmed visit gets a line; the draft goes out at month end.
+5) Ensure it's on today's route (add_stop_to_route if it isn't), then set_stop_status check_in — confirming the location counts as arriving.
+End of day: run cleanup_unconfirmed_stops WITHOUT confirm, read the list back, and only call again with confirm=true after an explicit yes. Skipped stops are left alone.
+Also in your toolbox now: move_stop (up/down/position), remove_stop, set_stop_status (on_my_way / check_in / check_out / reset), optimize_route (nearest-neighbor reorder that keeps done stops in place), add_invoice_line. For last-minute add-ons, use find_nearby_properties or list_route_stops to recommend WHERE the new stop fits best, then move_stop it into position.`
+
 function buildSystem(tone?: string | null): string {
   const key = (tone || DEFAULT_TONE).toLowerCase()
-  return `${BASE_SYSTEM}\n\n${TONES[key] || TONES[DEFAULT_TONE]}`
+  return `${BASE_SYSTEM}\n\n${FIELD_OPS}\n\n${TONES[key] || TONES[DEFAULT_TONE]}`
 }
 
 const tools = [
@@ -671,6 +682,105 @@ const tools = [
         status: { type: "string", description: "Filter by status, e.g. 'new', 'open', 'done'." },
         limit: { type: "number", description: "Max requests (default 25)." },
       },
+    },
+  },
+  {
+    name: "find_nearby_properties",
+    description:
+      "Rank EVERY address on file (any client, subscription or not, paused or not) by straight-line distance from a GPS point. Used by the drivers' Check My Location button. Returns the closest matches with client, price, pickup days, distance in feet/miles, and whether each is already on today's route (with stop id + check-in state). Confirm the match with the driver — say the zip out loud when two candidates are similar.",
+    input_schema: {
+      type: "object",
+      properties: {
+        lat: { type: "number", description: "Driver GPS latitude." },
+        lng: { type: "number", description: "Driver GPS longitude." },
+        limit: { type: "number", description: "Max matches (default 5, max 10)." },
+        date: { type: "string", description: "YYYY-MM-DD for the on-route check (default today)." },
+      },
+      required: ["lat", "lng"],
+    },
+  },
+  {
+    name: "set_stop_status",
+    description:
+      "Field status for one route stop: on_my_way (stamps + the app texts the client separately), check_in (arrived — starts service), check_out (done), or reset (back to pending, clears times). Identify the stop by stop_id, or by address + date. Use check_in after the driver confirms a Check My Location match.",
+    input_schema: {
+      type: "object",
+      properties: {
+        status: { type: "string", description: "on_my_way | check_in | check_out | reset" },
+        stop_id: { type: "string", description: "route_stops id, when known." },
+        address: { type: "string", description: "Match the stop by property address instead." },
+        date: { type: "string", description: "YYYY-MM-DD (default today) when matching by address." },
+      },
+      required: ["status"],
+    },
+  },
+  {
+    name: "move_stop",
+    description:
+      "Reorder a stop within its route: direction 'up'/'down' one slot, or position N to drop it at a specific visit number. Renumbers the whole route. Identify by stop_id or address + date.",
+    input_schema: {
+      type: "object",
+      properties: {
+        stop_id: { type: "string" },
+        address: { type: "string" },
+        date: { type: "string", description: "YYYY-MM-DD (default today)." },
+        direction: { type: "string", description: "'up' or 'down' (one slot)." },
+        position: { type: "number", description: "Target visit number (1-based) — overrides direction." },
+      },
+    },
+  },
+  {
+    name: "remove_stop",
+    description:
+      "Take one stop OFF its route (the address/property itself is kept). Identify by stop_id or address + date. For skipping with a reason use skip_stop instead; for wholesale end-of-day cleanup use cleanup_unconfirmed_stops.",
+    input_schema: {
+      type: "object",
+      properties: {
+        stop_id: { type: "string" },
+        address: { type: "string" },
+        date: { type: "string", description: "YYYY-MM-DD (default today)." },
+      },
+    },
+  },
+  {
+    name: "add_invoice_line",
+    description:
+      "Append a line to the client's CURRENT-MONTH DRAFT invoice (creates the draft if none exists), updating totals. Used per confirmed visit in field mode and for one-time stops; the draft is sent at month end. Give customer_id or client_name, a description, and the amount.",
+    input_schema: {
+      type: "object",
+      properties: {
+        customer_id: { type: "string" },
+        client_name: { type: "string" },
+        description: { type: "string", description: "e.g. 'Valet trash — 1711 Main St — 2026-08-10'" },
+        amount: { type: "number", description: "Dollar amount for this line." },
+      },
+      required: ["description", "amount"],
+    },
+  },
+  {
+    name: "cleanup_unconfirmed_stops",
+    description:
+      "End-of-day data cleanup: list route stops for a date that were never checked in (skipped stops are left alone). Call WITHOUT confirm first — it changes nothing and returns the list; read it back to the user. Only after an explicit YES call again with confirm=true, which removes those stops from the route AND pauses their addresses (recoverable on the Clients screen — nothing is deleted).",
+    input_schema: {
+      type: "object",
+      properties: {
+        date: { type: "string", description: "YYYY-MM-DD (default today)." },
+        route_code: { type: "string", description: "Limit to one route code; omit for all routes that date." },
+        confirm: { type: "boolean", description: "false/omitted = preview only. true = actually remove + pause." },
+      },
+    },
+  },
+  {
+    name: "optimize_route",
+    description:
+      "Reorder a date's route by nearest-neighbor driving order: starts from the depot (or the last completed stop), keeps already checked-in/done stops in their current position, and renumbers the rest by proximity. Returns the new visit order. Stops with no coordinates go to the end.",
+    input_schema: {
+      type: "object",
+      properties: {
+        route_code: { type: "string", description: "Route code, e.g. 'A'." },
+        date: { type: "string", description: "YYYY-MM-DD (default today)." },
+      },
+      required: ["route_code"],
     },
   },
 ]
@@ -2018,6 +2128,226 @@ async function listServiceRequests(a: any) {
   return { count: rows.length, requests: rows.map((r: any) => ({ kind: r.kind, message: r.message, status: r.status, created: r.created_at, client: r.customer_id ? (names[r.customer_id] || null) : null, properties: (r.property_ids || []).length })) }
 }
 
+// ---- field ops (Check My Location workflow) --------------------------------
+async function sbDel(path: string) {
+  const r = await fetch(`${REST}/${path}`, { method: "DELETE", headers: HEADERS })
+  if (!r.ok) throw new Error(`DELETE ${path}: ${r.status} ${await r.text()}`)
+}
+
+async function findNearbyProperties(a: any) {
+  const lat = Number(a.lat), lng = Number(a.lng)
+  if (!isFinite(lat) || !isFinite(lng)) throw new Error("lat and lng are required.")
+  const limit = Math.min(Number(a.limit ?? 5) || 5, 10)
+  const date = a.date ? String(a.date) : today()
+  const props = await sbGet(`properties?select=id,name,address,service,price,paused,pickup_days,lat,lng,customer_id,customers(name)&lat=not.is.null&lng=not.is.null`)
+  const ranked = (props as any[])
+    .map((p: any) => ({ ...p, miles: milesBetween(lat, lng, p.lat, p.lng) }))
+    .sort((x: any, y: any) => x.miles - y.miles)
+    .slice(0, limit)
+  const routes = await sbGet(`routes?service_date=eq.${enc(date)}&select=id,code`)
+  let stopsToday: any[] = []
+  if (routes.length) {
+    stopsToday = await sbGet(`route_stops?route_id=in.(${routes.map((r: any) => enc(r.id)).join(",")})&select=id,property_id,route_id,status,check_in`)
+  }
+  const byProp: Record<string, any> = {}
+  for (const s of stopsToday) byProp[s.property_id] = s
+  return {
+    date,
+    matches: ranked.map((p: any) => ({
+      property_id: p.id,
+      address: p.address || p.name,
+      client: p.customers?.name ?? null,
+      customer_id: p.customer_id ?? null,
+      service: p.service ?? null,
+      price: p.price ?? null,
+      paused: !!p.paused,
+      pickup_days: p.pickup_days ?? [],
+      distance_feet: Math.round(p.miles * 5280),
+      distance_miles: Math.round(p.miles * 100) / 100,
+      on_route_today: byProp[p.id]
+        ? {
+            stop_id: byProp[p.id].id,
+            route_code: routes.find((r: any) => r.id === byProp[p.id].route_id)?.code ?? null,
+            status: byProp[p.id].status,
+            checked_in: !!byProp[p.id].check_in,
+          }
+        : null,
+    })),
+  }
+}
+
+// Find one stop by id, or by address on a date's routes.
+async function resolveStop(a: any): Promise<any> {
+  if (a.stop_id) {
+    const s = await sbGet(`route_stops?id=eq.${enc(a.stop_id)}&select=id,route_id,seq,status,check_in,check_out,property_id,properties(address,name),routes(code,service_date)`)
+    if (!s.length) throw new Error("No stop with that id.")
+    return s[0]
+  }
+  const date = a.date ? String(a.date) : today()
+  const addr = String(a.address ?? "").trim()
+  if (!addr) throw new Error("Give a stop_id or an address.")
+  const routes = await sbGet(`routes?service_date=eq.${enc(date)}&select=id,code,service_date`)
+  if (!routes.length) throw new Error(`No routes on ${date}.`)
+  const stops = await sbGet(
+    `route_stops?route_id=in.(${routes.map((r: any) => enc(r.id)).join(",")})&select=id,route_id,seq,status,check_in,check_out,property_id,properties!inner(address,name)&properties.address=ilike.${enc(`*${addr}*`)}`,
+  )
+  if (!stops.length) throw new Error(`No stop matching "${addr}" on ${date}.`)
+  if (stops.length > 1) {
+    return { needs_clarification: true, which: "stop", matches: stops.map((s: any) => ({ stop_id: s.id, address: s.properties?.address })) }
+  }
+  const s = stops[0]
+  s.routes = routes.find((r: any) => r.id === s.route_id)
+  return s
+}
+
+async function setStopStatus(a: any) {
+  const s = await resolveStop(a)
+  if (s.needs_clarification) return s
+  const st = String(a.status ?? "").trim()
+  const now = new Date().toISOString()
+  let patch: any
+  if (st === "on_my_way") patch = { on_my_way_at: now }
+  else if (st === "check_in") patch = { status: "enroute", check_in: now }
+  else if (st === "check_out") patch = { status: "done", check_in: s.check_in ?? now, check_out: now }
+  else if (st === "reset") patch = { status: "pending", check_in: null, check_out: null, on_my_way_at: null }
+  else throw new Error("status must be on_my_way, check_in, check_out, or reset.")
+  await sbPatch(`route_stops?id=eq.${enc(s.id)}`, patch)
+  return { ok: true, stop_id: s.id, address: s.properties?.address || s.properties?.name, route: s.routes?.code ?? null, date: s.routes?.service_date ?? null, set: st }
+}
+
+async function moveStopTool(a: any) {
+  const s = await resolveStop(a)
+  if (s.needs_clarification) return s
+  const stops = await sbGet(`route_stops?route_id=eq.${enc(s.route_id)}&select=id,seq&order=seq.asc`)
+  const idx = stops.findIndex((x: any) => x.id === s.id)
+  let to: number
+  if (a.position != null) to = Math.max(0, Math.min(stops.length - 1, Number(a.position) - 1))
+  else if (a.direction === "up") to = Math.max(0, idx - 1)
+  else if (a.direction === "down") to = Math.min(stops.length - 1, idx + 1)
+  else throw new Error("Give direction 'up'/'down' or a position number.")
+  const [row] = stops.splice(idx, 1)
+  stops.splice(to, 0, row)
+  for (let i = 0; i < stops.length; i++) {
+    if (stops[i].seq !== i + 1) await sbPatch(`route_stops?id=eq.${enc(stops[i].id)}`, { seq: i + 1 })
+  }
+  return { ok: true, address: s.properties?.address || s.properties?.name, new_position: to + 1, of: stops.length }
+}
+
+async function removeStopTool(a: any) {
+  const s = await resolveStop(a)
+  if (s.needs_clarification) return s
+  await sbDel(`route_stops?id=eq.${enc(s.id)}`)
+  return { ok: true, removed: s.properties?.address || s.properties?.name, route: s.routes?.code ?? null, date: s.routes?.service_date ?? null, note: "Off the route — the address itself is kept." }
+}
+
+async function addInvoiceLine(a: any) {
+  let customerId: string | null = a.customer_id ?? null
+  if (!customerId && a.client_name) {
+    const custs = await sbGet(`customers?name=ilike.${enc(`*${a.client_name}*`)}&select=id,name&limit=5`)
+    if (custs.length === 1) customerId = custs[0].id
+    else if (!custs.length) throw new Error(`No client matching "${a.client_name}".`)
+    else return { needs_clarification: true, which: "client", matches: custs.map((c: any) => ({ id: c.id, name: c.name })) }
+  }
+  if (!customerId) throw new Error("Give customer_id or client_name.")
+  const amount = Math.round(Number(a.amount) * 100) / 100
+  if (!isFinite(amount) || amount <= 0) throw new Error("A positive amount is required.")
+  const d = today()
+  const monthStart = d.slice(0, 8) + "01"
+  let inv = (await sbGet(`invoices?customer_id=eq.${enc(customerId)}&status=eq.draft&issue_date=gte.${enc(monthStart)}&select=id,number,discount&order=created_at.desc&limit=1`))[0]
+  if (!inv) {
+    inv = (await sbPost("invoices", { customer_id: customerId, status: "draft", issue_date: d, subtotal: 0, total: 0, discount: 0 }))[0]
+  }
+  const lines = await sbGet(`invoice_line_items?invoice_id=eq.${enc(inv.id)}&select=id,amount,position`)
+  await sbPost("invoice_line_items", {
+    invoice_id: inv.id,
+    description: String(a.description ?? "Service"),
+    quantity: 1,
+    unit_price: amount,
+    amount,
+    position: lines.length,
+  })
+  const subtotal = Math.round((lines.reduce((t: number, l: any) => t + Number(l.amount || 0), 0) + amount) * 100) / 100
+  const total = Math.max(0, Math.round((subtotal - Number(inv.discount || 0)) * 100) / 100)
+  await sbPatch(`invoices?id=eq.${enc(inv.id)}`, { subtotal, total })
+  return { ok: true, invoice: inv.number ?? null, line: a.description, amount, new_total: total, note: "On this month's draft — goes out at month end." }
+}
+
+async function cleanupUnconfirmed(a: any) {
+  const date = a.date ? String(a.date) : today()
+  const wantCode = a.route_code ? String(a.route_code).trim().toUpperCase() : null
+  const routes = (await sbGet(`routes?service_date=eq.${enc(date)}&select=id,code`)).filter((r: any) => !wantCode || r.code === wantCode)
+  if (!routes.length) throw new Error(`No routes on ${date}${wantCode ? ` with code ${wantCode}` : ""}.`)
+  const stops = await sbGet(`route_stops?route_id=in.(${routes.map((r: any) => enc(r.id)).join(",")})&select=id,route_id,check_in,status,property_id,properties(address,name)`)
+  const unconfirmed = (stops as any[]).filter((s: any) => !s.check_in && s.status !== "done" && s.status !== "skipped")
+  const list = unconfirmed.map((s: any) => ({
+    stop_id: s.id,
+    address: s.properties?.address || s.properties?.name,
+    route: routes.find((r: any) => r.id === s.route_id)?.code ?? null,
+  }))
+  if (!a.confirm) {
+    return { date, count: list.length, unconfirmed: list, note: "PREVIEW ONLY — nothing changed. Read this list back and get an explicit YES, then call again with confirm=true." }
+  }
+  let removed = 0
+  const pausedIds = new Set<string>()
+  for (const s of unconfirmed) {
+    await sbDel(`route_stops?id=eq.${enc(s.id)}`)
+    removed++
+    if (s.property_id && !pausedIds.has(s.property_id)) {
+      await sbPatch(`properties?id=eq.${enc(s.property_id)}`, { paused: true })
+      pausedIds.add(s.property_id)
+    }
+  }
+  return { ok: true, date, removed, paused: pausedIds.size, note: "Removed from the route and PAUSED (recoverable on the Clients screen — nothing deleted)." }
+}
+
+async function optimizeRouteTool(a: any) {
+  const code = String(a.route_code ?? "").trim().toUpperCase()
+  const date = a.date ? String(a.date) : today()
+  if (!code) throw new Error("route_code is required.")
+  const route = (await sbGet(`routes?code=eq.${enc(code)}&service_date=eq.${enc(date)}&select=id,code`))[0]
+  if (!route) throw new Error(`No Route ${code} on ${date}.`)
+  const stops = await sbGet(`route_stops?route_id=eq.${enc(route.id)}&select=id,seq,lat,lng,check_in,status,property_id,properties(address,name,lat,lng)&order=seq.asc`)
+  const locate = (s: any) => ({ lat: s.properties?.lat ?? s.lat, lng: s.properties?.lng ?? s.lng })
+  const settings = await sbGet(`app_settings?id=eq.1&select=depot_lat,depot_lng`)
+  let curLat: number | null = settings[0]?.depot_lat ?? null
+  let curLng: number | null = settings[0]?.depot_lng ?? null
+  const fixed = (stops as any[]).filter((s: any) => s.check_in || s.status === "done")
+  const todo = (stops as any[]).filter((s: any) => !s.check_in && s.status !== "done")
+  const located = todo.filter((s: any) => { const l = locate(s); return l.lat != null && l.lng != null })
+  const unlocated = todo.filter((s: any) => { const l = locate(s); return l.lat == null || l.lng == null })
+  if (fixed.length) { const l = locate(fixed[fixed.length - 1]); if (l.lat != null) { curLat = l.lat; curLng = l.lng } }
+  if ((curLat == null || curLng == null) && located.length) { const l = locate(located[0]); curLat = l.lat; curLng = l.lng }
+  const ordered: any[] = []
+  const pool = [...located]
+  while (pool.length && curLat != null && curLng != null) {
+    let bi = 0
+    let bd = Infinity
+    for (let i = 0; i < pool.length; i++) {
+      const l = locate(pool[i])
+      const dmi = milesBetween(curLat, curLng, l.lat, l.lng)
+      if (dmi < bd) { bd = dmi; bi = i }
+    }
+    const [nxt] = pool.splice(bi, 1)
+    ordered.push(nxt)
+    const l = locate(nxt)
+    curLat = l.lat
+    curLng = l.lng
+  }
+  const finalOrder = [...fixed, ...ordered, ...pool, ...unlocated]
+  for (let i = 0; i < finalOrder.length; i++) {
+    if (finalOrder[i].seq !== i + 1) await sbPatch(`route_stops?id=eq.${enc(finalOrder[i].id)}`, { seq: i + 1 })
+  }
+  return {
+    ok: true,
+    route: code,
+    date,
+    reordered: ordered.length,
+    kept_in_place: fixed.length,
+    missing_coords: unlocated.length,
+    order: finalOrder.map((s: any, i: number) => `${i + 1}. ${s.properties?.address || s.properties?.name}`),
+  }
+}
+
 async function runTool(name: string, input: any): Promise<unknown> {
   switch (name) {
     case "find_clients": return await findClients(input)
@@ -2062,6 +2392,13 @@ async function runTool(name: string, input: any): Promise<unknown> {
     case "list_team": return await listTeam(input)
     case "list_quotes": return await listQuotes(input)
     case "list_service_requests": return await listServiceRequests(input)
+    case "find_nearby_properties": return await findNearbyProperties(input)
+    case "set_stop_status": return await setStopStatus(input)
+    case "move_stop": return await moveStopTool(input)
+    case "remove_stop": return await removeStopTool(input)
+    case "add_invoice_line": return await addInvoiceLine(input)
+    case "cleanup_unconfirmed_stops": return await cleanupUnconfirmed(input)
+    case "optimize_route": return await optimizeRouteTool(input)
     default: throw new Error(`Unknown tool: ${name}`)
   }
 }

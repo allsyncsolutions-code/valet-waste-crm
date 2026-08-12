@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { MONO } from '../data.js'
 import { hasSupabase } from '../lib/supabaseClient.js'
 import { loadCustomers, createClient, loadProperties } from '../lib/customersData.js'
-import { stripeStatus } from '../lib/stripeData.js'
+import { paymentsStatus } from '../lib/paymentsData.js'
 import {
   loadInvoices,
   createInvoice,
@@ -43,7 +43,7 @@ export default function Invoices({ app }) {
   const [filter, setFilter] = useState('all')
   const [search, setSearch] = useState('')
   const [selId, setSelId] = useState(null)
-  const [stripeOk, setStripeOk] = useState(false)
+  const [paymentsOk, setPaymentsOk] = useState(false)
 
   const [showForm, setShowForm] = useState(false)
   const [editId, setEditId] = useState(null)
@@ -77,7 +77,7 @@ export default function Invoices({ app }) {
     }
     refresh().catch((e) => setErr(e.message || String(e))).finally(() => setLoading(false))
     loadCustomers().then(setCustomers).catch(() => {})
-    stripeStatus().then((d) => setStripeOk(!!(d && d.connected && d.chargesEnabled))).catch(() => {})
+    paymentsStatus().then((d) => setPaymentsOk(!!(d && d.connected))).catch(() => {})
     const unsub = subscribeInvoices(() => refresh().catch(() => {}))
     return () => unsub && unsub()
   }, [app.activeLine])
@@ -256,9 +256,9 @@ export default function Invoices({ app }) {
       </div>
 
       {err && <div style={errorBox}>{err}</div>}
-      {!stripeOk && !loading && (
+      {!paymentsOk && !loading && (
         <div style={{ marginBottom: 14, background: '#fff7e9', border: '1px solid #f0dcb0', color: '#8a6320', borderRadius: 11, padding: '9px 13px', fontSize: 12.5 }}>
-          Stripe isn’t connected yet — you can still create and edit invoices, but “Send payment link” needs Stripe set up in Settings → Payments.
+          Run Merchant isn’t connected yet — you can still create and edit invoices, but “Send payment link” needs Run Merchant set up in Settings → Payments.
         </div>
       )}
 
@@ -316,7 +316,7 @@ export default function Invoices({ app }) {
               Select an invoice, or create a new one.
             </div>
           )}
-          {cur && <InvoiceDetail inv={cur} stripeOk={stripeOk} busy={busy} onEdit={() => openEdit(cur)} onMarkPaid={onMarkPaid} onSend={onSend} onText={onText} onDelete={onDelete} />}
+          {cur && <InvoiceDetail inv={cur} paymentsOk={paymentsOk} busy={busy} onEdit={() => openEdit(cur)} onMarkPaid={onMarkPaid} onSend={onSend} onText={onText} onDelete={onDelete} />}
         </div>
       </div>
 
@@ -438,7 +438,7 @@ export default function Invoices({ app }) {
   )
 }
 
-function InvoiceDetail({ inv, stripeOk, busy, onEdit, onMarkPaid, onSend, onText, onDelete }) {
+function InvoiceDetail({ inv, paymentsOk, busy, onEdit, onMarkPaid, onSend, onText, onDelete }) {
   const meta = STATUS_META[inv.status] || STATUS_META.draft
   return (
     <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, overflow: 'hidden' }}>
@@ -492,21 +492,21 @@ function InvoiceDetail({ inv, stripeOk, busy, onEdit, onMarkPaid, onSend, onText
       )}
 
       {/* pay link */}
-      {inv.stripePaymentUrl && (
-        <div style={{ margin: '0 22px 14px', display: 'flex', gap: 8, alignItems: 'center', background: '#f3f1ff', border: '1px solid #ddd6ff', borderRadius: 10, padding: '10px 12px' }}>
+      {inv.paymentUrl && (
+        <div style={{ margin: '0 22px 14px', display: 'flex', gap: 8, alignItems: 'center', background: '#eef7f1', border: '1px solid #cfe7da', borderRadius: 10, padding: '10px 12px' }}>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 11.5, color: '#5b54c9', fontWeight: 600 }}>Stripe payment link</div>
-            <input readOnly value={inv.stripePaymentUrl} onFocus={(e) => e.target.select()} style={{ width: '100%', border: '1px solid #ddd6ff', background: '#fff', borderRadius: 7, padding: '6px 9px', fontSize: 11.5, marginTop: 5, boxSizing: 'border-box' }} />
+            <div style={{ fontSize: 11.5, color: '#1f7a4d', fontWeight: 600 }}>Payment link</div>
+            <input readOnly value={inv.paymentUrl} onFocus={(e) => e.target.select()} style={{ width: '100%', border: '1px solid #cfe7da', background: '#fff', borderRadius: 7, padding: '6px 9px', fontSize: 11.5, marginTop: 5, boxSizing: 'border-box' }} />
           </div>
-          <a href={inv.stripePaymentUrl} target="_blank" rel="noreferrer" style={{ flex: 'none', background: '#635bff', color: '#fff', borderRadius: 8, padding: '9px 13px', fontSize: 12.5, fontWeight: 600, textDecoration: 'none' }}>Open</a>
+          <a href={inv.paymentUrl} target="_blank" rel="noreferrer" style={{ flex: 'none', background: '#1f7a4d', color: '#fff', borderRadius: 8, padding: '9px 13px', fontSize: 12.5, fontWeight: 600, textDecoration: 'none' }}>Open</a>
         </div>
       )}
 
       {/* actions */}
       <div style={{ display: 'flex', gap: 9, padding: '14px 22px', borderTop: '1px solid #f0f2ef', flexWrap: 'wrap' }}>
         {inv.status === 'draft' && <button onClick={onEdit} disabled={busy} style={ghostBtn}>Edit</button>}
-        {inv.status !== 'paid' && stripeOk && (
-          <button onClick={onSend} disabled={busy} style={{ background: '#635bff', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: busy ? 0.6 : 1 }}>{busy ? 'Working…' : inv.stripePaymentUrl ? 'Resend link' : 'Send payment link'}</button>
+        {inv.status !== 'paid' && paymentsOk && (
+          <button onClick={onSend} disabled={busy} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: busy ? 0.6 : 1 }}>{busy ? 'Working…' : inv.paymentUrl ? 'Resend link' : 'Send payment link'}</button>
         )}
         {inv.status !== 'paid' && (
           <button onClick={onText} disabled={busy || !inv.customerPhone} title={inv.customerPhone ? '' : 'No phone number on file for this customer'} style={{ background: '#fff', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: inv.customerPhone ? 'pointer' : 'not-allowed', opacity: busy || !inv.customerPhone ? 0.5 : 1 }}>{busy ? 'Working…' : 'Text invoice'}</button>
