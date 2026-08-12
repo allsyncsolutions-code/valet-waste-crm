@@ -49,7 +49,48 @@ async function sbGet(path: string) {
 async function sbPatch(path: string, body: unknown) {
   await fetch(`${SUPABASE_URL}/rest/v1/${path}`, { method: "PATCH", headers: restHeaders, body: JSON.stringify(body) })
 }
+async function sbPost(path: string, body: unknown) {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    method: "POST",
+    headers: { ...restHeaders, Prefer: "return=representation" },
+    body: JSON.stringify(body),
+  })
+  return r
+}
 const enc = encodeURIComponent
+
+// ---- crypto helpers ----------------------------------------------------------
+async function sha256(s: string): Promise<string> {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s))
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("")
+}
+
+// ---- reveal allowlist + email ------------------------------------------------
+// Who may request a reveal code. Enforced server-side only — never ship to client.
+const REVEAL_ALLOWLIST = ["david@allsynccrm.com", "francesca@runpayments.io"]
+async function sendRevealEmail(to: string, code: string) {
+  const key = Deno.env.get("SENDGRID_API_KEY")
+  if (!key) throw new Error("SENDGRID_API_KEY is not configured.")
+  const from = Deno.env.get("SENDGRID_FROM") || "valetwastefl@allsynccrm.com"
+  const r = await fetch("https://api.sendgrid.com/v3/mail/send", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      personalizations: [{ to: [{ email: to }] }],
+      from: { email: from, name: "Valet Waste CRM" },
+      subject: "Your Run Merchant key reveal code",
+      content: [{ type: "text/html", value: `<p>Someone requested to view the Run Merchant credentials in Valet Waste Settings.</p><p>Your code is: <b style="font-size:20px;letter-spacing:2px">${code}</b></p><p>It expires in 15 minutes. If you didn't request this, you can ignore this email.</p>` }],
+    }),
+  })
+  if (!r.ok) throw new Error(`SendGrid ${r.status}: ${await r.text()}`)
+}
+
+// Mask a secret for display: show first 4 + last 4, hide the middle.
+function mask(s: string | null | undefined): string | null {
+  if (!s) return null
+  if (s.length <= 8) return "•".repeat(s.length)
+  return `${s.slice(0, 4)}${"•".repeat(Math.max(4, s.length - 8))}${s.slice(-4)}`
+}
 
 // ---- Run Merchant API helpers ------------------------------------------------
 // Base host flips between UAT and production by merchant env. api_key (1h TTL)
@@ -178,7 +219,21 @@ Deno.serve(async (req) => {
 
     if (action === "status") {
       const s = await getSettings()
-      return json({ connected: !!s.run_mid, mid: s.run_mid || null, env: s.run_env || "production" })
+      // Return masked secrets for display — never plaintext here. Plaintext is
+      // only returned by reveal_verify after a code is confirmed.
+      return json({
+        connected: !!(s.run_mid && s.run_public_key && s.run_refresh_token),
+        ready: !!(s.run_mid && s.run_public_key && s.run_refresh_token),
+        env: s.run_env || "production",
+        mid: s.run_mid || null,
+        fields: {
+          mid: s.run_mid ? { set: true, masked: mask(s.run_mid) } : { set: false },
+          public_key: s.run_public_key ? { set: true, masked: mask(s.run_public_key) } : { set: false },
+          refresh_token: s.run_refresh_token ? { set: true, masked: mask(s.run_refresh_token) } : { set: false },
+          webhook_secret: s.run_webhook_secret ? { set: true, masked: mask(s.run_webhook_secret) } : { set: false },
+        },
+        refresh_token_expires_at: s.run_refresh_token_expires_at || null,
+      })
     }
 
     if (action === "save_credentials") {
@@ -194,9 +249,47 @@ Deno.serve(async (req) => {
       }
       if (body.env === "uat" || body.env === "production") patch.run_env = body.env
       if (typeof body.webhook_secret === "string" && body.webhook_secret.trim()) patch.run_webhook_secret = body.webhook_secret.trim()
-      if (!Object.keys(patch).length) return json({ error: "Nothing to save." }, 400)
+      if (!Object.keys(patch).length) return json({ error: "Nothing to save — enter at least one value." }, 400)
       await sbPatch(`app_settings?id=eq.1`, patch)
       return json({ ok: true })
+    }
+
+    if (action === "reveal_request") {
+      // Always return generic success so the allowlist isn't leaked. Only
+      // allowlisted emails actually get a code emailed.
+      const email = String(body.email || "").trim().toLowerCase()
+      const generic = { ok: true, message: "If that email is approved, a 6-digit code is on its way." }
+      if (!REVEAL_ALLOWLIST.includes(email)) return json(generic)
+      // 6-digit code.
+      const code = String(Math.floor(100000 + Math.random() * 900000))
+      await sbPost("run_reveal_codes", {
+        email,
+        code_hash: await sha256(code),
+        expires_at: new Date(Date.now() + 15 * 60000).toISOString(),
+      })
+      try { await sendRevealEmail(email, code) } catch (e) { return json({ error: "Could not send the code email: " + (e instanceof Error ? e.message : String(e)) }) }
+      return json(generic)
+    }
+
+    if (action === "reveal_verify") {
+      const email = String(body.email || "").trim().toLowerCase()
+      const code = String(body.code || "").trim()
+      if (!REVEAL_ALLOWLIST.includes(email) || !code) return json({ error: "Invalid code." }, 400)
+      const hash = await sha256(code)
+      const rows = await sbGet(`run_reveal_codes?email=eq.${enc(email)}&code_hash=eq.${hash}&order=created_at.desc&limit=1`)
+      const r = rows[0]
+      if (!r || r.used_at || new Date(r.expires_at).getTime() < Date.now()) {
+        return json({ error: "That code is invalid or expired — request a new one." }, 400)
+      }
+      await sbPatch(`run_reveal_codes?id=eq.${r.id}`, { used_at: new Date().toISOString() })
+      const s = await getSettings()
+      return json({
+        ok: true,
+        mid: s.run_mid || null,
+        public_key: s.run_public_key || null,
+        refresh_token: s.run_refresh_token || null,
+        webhook_secret: s.run_webhook_secret || null,
+      })
     }
 
     if (action === "payment_url") {

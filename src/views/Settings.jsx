@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { MONO } from '../data.js'
 import { listTags, createTag, updateTag, deleteTag, tagUsageCounts, subscribeTags, TAG_COLORS } from '../lib/tagsData.js'
 import { loadSettings, saveDepot, geocodeAddress, subscribeSettings, saveSmsTemplates, saveRandyTone, saveNotifyOnComplete, RANDY_TONES } from '../lib/settingsData.js'
-import { paymentsStatus, savePaymentsCredentials } from '../lib/paymentsData.js'
+import { paymentsStatus, savePaymentsCredentials, revealRequest, revealVerify } from '../lib/paymentsData.js'
 import { platformBillingStatus, platformBillingCheckout, platformBillingPortal } from '../lib/platformBillingData.js'
 import { getSmsConfig, saveSmsConfig, sendTestSms, listSmsSubscriptions, ensureSmsSubscription } from '../lib/smsData.js'
 import Import from './Import.jsx'
@@ -34,6 +34,9 @@ export default function Settings({ app }) {
   const [depotSaving, setDepotSaving] = useState(false)
   const [pay, setPay] = useState({ loading: true, data: null, busy: false, err: null, msg: null })
   const [creds, setCreds] = useState({ mid: '', public_key: '', refresh_token: '', env: 'production', webhook_secret: '' })
+  // Key reveal flow: null = closed; {step:'email'|'code'} = modal open; revealed plaintext after verify.
+  const [reveal, setReveal] = useState(null)
+  const [revealed, setRevealed] = useState(null)
   const [billing, setBilling] = useState({ loading: true, data: null, busy: false, err: null })
   const [sms, setSms] = useState(EMPTY_SMS)
   const [smsFlags, setSmsFlags] = useState({ rc_secret_set: false, rc_jwt_set: false, rc_webhook_token_set: false })
@@ -138,11 +141,43 @@ export default function Settings({ app }) {
     setPay((s) => ({ ...s, busy: true, err: null, msg: null }))
     try {
       await savePaymentsCredentials(creds)
-      setPay((s) => ({ ...s, busy: false, msg: 'Saved — Run Merchant is connected.' }))
+      const d = await paymentsStatus()
+      const missing = []
+      if (!d.fields?.mid?.set) missing.push('MID')
+      if (!d.fields?.public_key?.set) missing.push('public key')
+      if (!d.fields?.refresh_token?.set) missing.push('refresh token')
+      setPay((s) => ({ ...s, busy: false, data: d, msg: missing.length ? `Saved. Still missing: ${missing.join(', ')}.` : 'Saved — Run Merchant is fully connected.' }))
       setCreds({ mid: '', public_key: '', refresh_token: '', env: creds.env, webhook_secret: '' })
-      await refreshPay()
+      setRevealed(null)
     } catch (e2) {
       setPay((s) => ({ ...s, busy: false, err: e2.message || String(e2) }))
+    }
+  }
+  async function startReveal(e) {
+    e?.preventDefault?.()
+    setReveal({ step: 'email', email: '', code: '', busy: false, err: null, msg: null })
+  }
+  async function sendRevealCode(e) {
+    e.preventDefault()
+    const email = (reveal.email || '').trim().toLowerCase()
+    if (!email) return
+    setReveal((r) => ({ ...r, busy: true, err: null, msg: null }))
+    try {
+      const d = await revealRequest(email)
+      setReveal((r) => ({ ...r, busy: false, step: 'code', msg: d.message || 'If that email is approved, a code is on its way.' }))
+    } catch (e2) {
+      setReveal((r) => ({ ...r, busy: false, err: e2.message || String(e2) }))
+    }
+  }
+  async function verifyRevealCode(e) {
+    e.preventDefault()
+    setReveal((r) => ({ ...r, busy: true, err: null }))
+    try {
+      const d = await revealVerify(reveal.email, reveal.code)
+      setRevealed({ mid: d.mid, public_key: d.public_key, refresh_token: d.refresh_token, webhook_secret: d.webhook_secret })
+      setReveal(null)
+    } catch (e2) {
+      setReveal((r) => ({ ...r, busy: false, err: e2.message || String(e2) }))
     }
   }
 
@@ -415,27 +450,37 @@ export default function Settings({ app }) {
         {pay.err && <div style={{ background: '#fdecea', border: '1px solid #f3b7b0', color: '#9a2c1e', borderRadius: 10, padding: '9px 12px', fontSize: 12.5, marginBottom: 14 }}>{pay.err}</div>}
         {pay.msg && <div style={{ background: '#eef7f1', border: '1px solid #cfe7da', color: '#1f7a4d', borderRadius: 10, padding: '9px 12px', fontSize: 12.5, marginBottom: 14 }}>{pay.msg}</div>}
 
+        {/* status + masked stored values */}
         {pay.loading ? (
-          <div style={{ color: '#9aa69e', fontSize: 13 }}>Checking connection…</div>
-        ) : pay.data && pay.data.connected ? (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
-            <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#22b06b', flex: 'none' }} />
-            <div style={{ flex: 1 }}>
-              <div style={{ fontWeight: 600, fontSize: 13.5 }}>Connected — {pay.data.env === 'uat' ? 'UAT / test mode' : 'live'}</div>
-              <div style={{ fontSize: 11, color: '#9aa69e', fontFamily: MONO }}>MID {pay.data.mid}</div>
-            </div>
-            <button onClick={refreshPay} style={{ background: '#fff', border: '1px solid #e6eae6', color: '#5d6b63', borderRadius: 9, padding: '8px 12px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>Refresh</button>
-          </div>
+          <div style={{ color: '#9aa69e', fontSize: 13, marginBottom: 16 }}>Checking connection…</div>
         ) : (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
-            <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#c08a2e', flex: 'none' }} />
-            <div style={{ fontWeight: 600, fontSize: 13.5 }}>Not connected</div>
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+              <span style={{ width: 10, height: 10, borderRadius: '50%', background: pay.data?.ready ? '#22b06b' : (pay.data?.connected ? '#c08a2e' : '#c08a2e'), flex: 'none' }} />
+              <div style={{ flex: 1, fontWeight: 600, fontSize: 13.5 }}>
+                {pay.data?.ready ? `Connected${pay.data.env === 'uat' ? ' — UAT / test mode' : ' — live'}` : pay.data?.connected ? 'Partially configured — missing fields below' : 'Not connected'}
+              </div>
+              <button onClick={refreshPay} style={{ background: '#fff', border: '1px solid #e6eae6', color: '#5d6b63', borderRadius: 9, padding: '8px 12px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>Refresh</button>
+              {pay.data?.connected && (
+                <button onClick={startReveal} style={{ background: '#fff', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 9, padding: '8px 12px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>Reveal keys</button>
+              )}
+            </div>
+            {pay.data?.connected && (
+              <div style={{ background: '#f7f9f7', border: '1px solid #e6eae6', borderRadius: 9, padding: '10px 12px', fontSize: 12, fontFamily: MONO, color: '#5d6b63', lineHeight: 1.8 }}>
+                <div>MID: <span style={{ color: pay.data.fields?.mid?.set ? '#1a2420' : '#c0492f' }}>{pay.data.fields?.mid?.set ? (revealed?.mid || pay.data.fields.mid.masked) : 'not set'}</span></div>
+                <div>Public key: <span style={{ color: pay.data.fields?.public_key?.set ? '#1a2420' : '#c0492f' }}>{pay.data.fields?.public_key?.set ? (revealed?.public_key || pay.data.fields.public_key.masked) : 'not set'}</span></div>
+                <div>Refresh token: <span style={{ color: pay.data.fields?.refresh_token?.set ? '#1a2420' : '#c0492f' }}>{pay.data.fields?.refresh_token?.set ? (revealed?.refresh_token || pay.data.fields.refresh_token.masked) : 'not set'}</span>{pay.data.refresh_token_expires_at ? ` · expires ${new Date(pay.data.refresh_token_expires_at).toLocaleDateString()}` : ''}</div>
+                <div>Webhook secret: <span style={{ color: pay.data.fields?.webhook_secret?.set ? '#1a2420' : '#9aa69e' }}>{pay.data.fields?.webhook_secret?.set ? (revealed?.webhook_secret || pay.data.fields.webhook_secret.masked) : 'not set'}</span></div>
+              </div>
+            )}
+            {revealed && <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 6 }}>Plaintext shown for this session only — it clears on save or refresh.</div>}
           </div>
         )}
 
+        {/* enter / update — partial saves allowed */}
         <form onSubmit={saveCreds}>
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 11 }}>
-            <SField label="Merchant ID (MID)"><input value={creds.mid} onChange={(e) => setCreds((c) => ({ ...c, mid: e.target.value }))} style={inp} placeholder="800000001780" /></SField>
+            <SField label="Merchant ID (MID)"><input value={creds.mid} onChange={(e) => setCreds((c) => ({ ...c, mid: e.target.value }))} style={inp} placeholder={pay.data?.fields?.mid?.set ? 'Saved — enter new to replace' : '800000001780'} /></SField>
             <SField label="Environment">
               <select value={creds.env} onChange={(e) => setCreds((c) => ({ ...c, env: e.target.value }))} style={inp}>
                 <option value="production">Production (live)</option>
@@ -443,16 +488,46 @@ export default function Settings({ app }) {
               </select>
             </SField>
           </div>
-          <SField label="Public Key"><input value={creds.public_key} onChange={(e) => setCreds((c) => ({ ...c, public_key: e.target.value }))} style={inp} placeholder="Used by Runner.js in the portal" /></SField>
-          <SField label="Refresh Token"><input type="password" value={creds.refresh_token} onChange={(e) => setCreds((c) => ({ ...c, refresh_token: e.target.value }))} style={inp} placeholder="Mints short-lived API keys (30-day TTL)" /></SField>
-          <SField label="Webhook Secret (optional)"><input type="password" value={creds.webhook_secret} onChange={(e) => setCreds((c) => ({ ...c, webhook_secret: e.target.value }))} style={inp} placeholder="From your Run Payments Integration Lead" /></SField>
+          <SField label="Public Key"><input value={creds.public_key} onChange={(e) => setCreds((c) => ({ ...c, public_key: e.target.value }))} style={inp} placeholder={pay.data?.fields?.public_key?.set ? 'Saved — enter new to replace' : 'Used by Runner.js in the portal'} /></SField>
+          <SField label="Refresh Token"><input type="password" value={creds.refresh_token} onChange={(e) => setCreds((c) => ({ ...c, refresh_token: e.target.value }))} style={inp} placeholder={pay.data?.fields?.refresh_token?.set ? 'Saved — enter new to replace' : 'Mints short-lived API keys (30-day TTL)'} /></SField>
+          <SField label="Webhook Secret (optional)"><input type="password" value={creds.webhook_secret} onChange={(e) => setCreds((c) => ({ ...c, webhook_secret: e.target.value }))} style={inp} placeholder={pay.data?.fields?.webhook_secret?.set ? 'Saved — enter new to replace' : 'From your Run Payments Integration Lead'} /></SField>
           {creds.env === 'uat' && (
             <div style={{ background: '#f4f6f4', border: '1px solid #e0e4df', borderRadius: 9, padding: '9px 12px', fontSize: 12, color: '#5d6b63', marginBottom: 12, fontFamily: MONO }}>
               Test card: 4788250000121443 · Visa · exp 10/29 · any CVV
             </div>
           )}
-          <button type="submit" disabled={pay.busy || (!creds.mid.trim() && !creds.public_key.trim() && !creds.refresh_token.trim())} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: pay.busy ? 0.6 : 1 }}>{pay.busy ? 'Saving…' : (pay.data && pay.data.connected ? 'Update credentials' : 'Connect Run Merchant')}</button>
+          <button type="submit" disabled={pay.busy || (!creds.mid.trim() && !creds.public_key.trim() && !creds.refresh_token.trim() && !creds.webhook_secret.trim())} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: pay.busy ? 0.6 : 1 }}>{pay.busy ? 'Saving…' : 'Save'}</button>
+          <span style={{ fontSize: 11.5, color: '#9aa69e', marginLeft: 12 }}>Saves anything you've entered — leave fields blank to keep what's stored.</span>
         </form>
+
+        {/* reveal modal */}
+        {reveal && (
+          <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.4)', zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }} onClick={() => setReveal(null)}>
+            <div onClick={(e) => e.stopPropagation()} style={{ background: '#fff', borderRadius: 13, padding: '22px 24px', maxWidth: 380, width: '100%', boxSizing: 'border-box' }}>
+              <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6 }}>Reveal Run Merchant keys</div>
+              <div style={{ fontSize: 12.5, color: '#7c8a82', marginBottom: 14 }}>A 6-digit code will be emailed to an approved address. Allowed: david@allsynccrm.com, francesca@runpayments.io.</div>
+              {reveal.err && <div style={{ background: '#fdecea', border: '1px solid #f3b7b0', color: '#9a2c1e', borderRadius: 9, padding: '8px 11px', fontSize: 12.5, marginBottom: 12 }}>{reveal.err}</div>}
+              {reveal.msg && <div style={{ background: '#eef7f1', border: '1px solid #cfe7da', color: '#1f7a4d', borderRadius: 9, padding: '8px 11px', fontSize: 12.5, marginBottom: 12 }}>{reveal.msg}</div>}
+              {reveal.step === 'email' ? (
+                <form onSubmit={sendRevealCode}>
+                  <SField label="Your email"><input value={reveal.email} onChange={(e) => setReveal((r) => ({ ...r, email: e.target.value }))} style={inp} placeholder="david@allsynccrm.com" autoFocus /></SField>
+                  <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
+                    <button type="button" onClick={() => setReveal(null)} style={{ background: '#fff', border: '1px solid #dde2dd', color: '#5d6b63', borderRadius: 9, padding: '9px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
+                    <button type="submit" disabled={reveal.busy || !reveal.email.trim()} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '9px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: reveal.busy ? 0.6 : 1 }}>{reveal.busy ? 'Sending…' : 'Send code'}</button>
+                  </div>
+                </form>
+              ) : (
+                <form onSubmit={verifyRevealCode}>
+                  <SField label="6-digit code"><input value={reveal.code} onChange={(e) => setReveal((r) => ({ ...r, code: e.target.value }))} style={{ ...inp, fontFamily: MONO, letterSpacing: 2 }} placeholder="123456" autoFocus /></SField>
+                  <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
+                    <button type="button" onClick={() => setReveal((r) => ({ ...r, step: 'email', code: '', msg: null }))} style={{ background: '#fff', border: '1px solid #dde2dd', color: '#5d6b63', borderRadius: 9, padding: '9px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Back</button>
+                    <button type="submit" disabled={reveal.busy || !reveal.code.trim()} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '9px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: reveal.busy ? 0.6 : 1 }}>{reveal.busy ? 'Verifying…' : 'Reveal'}</button>
+                  </div>
+                </form>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* CRM subscription (platform billing — our own $250/mo) */}

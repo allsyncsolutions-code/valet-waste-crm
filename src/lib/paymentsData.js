@@ -13,8 +13,15 @@ async function call(body) {
 // Merchant connection status for the Settings card.
 export const paymentsStatus = () => call({ action: 'status' })
 
-// Store merchant credentials (staff-only on the backend).
+// Store merchant credentials (staff-only on the backend). Partial saves are
+// fine — only fields with a non-empty value are written.
 export const savePaymentsCredentials = (p) => call({ action: 'save_credentials', ...p })
+
+// Request a 6-digit reveal code emailed to an allowlisted address.
+export const revealRequest = (email) => call({ action: 'reveal_request', email })
+
+// Verify the code; on success returns the plaintext credentials (one-shot).
+export const revealVerify = (email, code) => call({ action: 'reveal_verify', email, code })
 
 // Mint/store the portal pay link for an invoice (marks it 'sent' first time).
 export const invoicePaymentUrl = (invoiceId) =>
