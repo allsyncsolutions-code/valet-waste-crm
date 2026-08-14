@@ -126,6 +126,9 @@ export default function Settings({ app }) {
     try {
       const d = await paymentsStatus()
       setPay((s) => ({ ...s, loading: false, data: d, err: null }))
+      // Keep the Environment dropdown in sync with what's saved — otherwise a
+      // re-save (it always submits env) silently flips a UAT account to live.
+      if (d?.env) setCreds((c) => ({ ...c, env: d.env }))
     } catch (e) {
       setPay((s) => ({ ...s, loading: false, err: e.message || String(e) }))
     }

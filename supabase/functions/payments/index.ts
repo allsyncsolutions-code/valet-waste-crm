@@ -97,7 +97,7 @@ function mask(s: string | null | undefined): string | null {
 // is minted from the long-lived refresh_token; we cache it in app_settings and
 // only refresh within 5 minutes of expiry.
 const RUN_HOSTS = {
-  uat: "https://staging-javelin.runpayments.io",
+  uat: "https://javelin-staging.runpayments.io",
   production: "https://javelin.runpayments.io",
 }
 type RunSettings = {
@@ -233,6 +233,11 @@ Deno.serve(async (req) => {
           webhook_secret: s.run_webhook_secret ? { set: true, masked: mask(s.run_webhook_secret) } : { set: false },
         },
         refresh_token_expires_at: s.run_refresh_token_expires_at || null,
+        // Runner.js config for the staff "Take payment" form. The public key is
+        // client-side by design (it's served to every portal pay page).
+        runner: s.run_mid && s.run_public_key
+          ? { public_key: s.run_public_key, mid: s.run_mid, env: s.run_env || "production" }
+          : null,
       })
     }
 
@@ -325,7 +330,7 @@ Deno.serve(async (req) => {
 
       const settings = await getSettings()
       const { token, mid, env } = await getAccessToken(settings)
-      const cust = (await sbGet(`customers?id=eq.${inv.customer_id}&select=id,name,email,phone,run_vault_holder_id`))[0] || {}
+      const cust = (await sbGet(`customers?id=eq.${inv.customer_id}&select=id,name,email,phone,run_vault_id,run_vault_holder_id`))[0] || {}
 
       const chargeBody: ChargeBody = {
         mid,
@@ -339,7 +344,13 @@ Deno.serve(async (req) => {
         name: body.name || cust.name || undefined,
         email: cust.email || undefined,
       }
-      if (body.account_token && body.expiration) {
+      if (body.use_saved) {
+        // Staff "Take payment" with the customer's card on file (vaulted).
+        if (!cust.run_vault_id) return json({ error: "No saved card on file for this customer." }, 400)
+        chargeBody.vault_id = cust.run_vault_id
+        chargeBody.vault_holder_id = cust.run_vault_holder_id || undefined
+        chargeBody.cof = "M" // merchant-initiated, card on file
+      } else if (body.account_token && body.expiration) {
         chargeBody.account_token = String(body.account_token)
         chargeBody.expiration = String(body.expiration)
         if (body.cvn) chargeBody.cvn = String(body.cvn)

@@ -28,6 +28,8 @@ export const invoicePaymentUrl = (invoiceId) =>
   call({ action: 'payment_url', invoice_id: invoiceId, origin: window.location.origin })
 
 // Run a one-time charge against a tokenized card (from Runner.js). Optionally
-// vault the card for autopay (save_card).
+// vault the card for autopay (save_card). Pass useSaved:true to charge the
+// customer's card on file (vault) instead of a freshly tokenized card — used
+// by the staff "Take payment" modal.
 export const chargeInvoice = (p) =>
-  call({ action: 'charge_invoice', invoice_id: p.invoiceId, account_token: p.accountToken, expiration: p.expiration, cvn: p.cvn, name: p.name, address: p.address, save_card: !!p.saveCard })
+  call({ action: 'charge_invoice', invoice_id: p.invoiceId, account_token: p.accountToken, expiration: p.expiration, cvn: p.cvn, name: p.name, address: p.address, save_card: !!p.saveCard, use_saved: !!p.useSaved })

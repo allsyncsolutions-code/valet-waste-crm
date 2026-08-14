@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { MONO } from '../data.js'
 import { hasSupabase } from '../lib/supabaseClient.js'
 import { loadCustomers, createClient, loadProperties } from '../lib/customersData.js'
-import { paymentsStatus } from '../lib/paymentsData.js'
+import { paymentsStatus, chargeInvoice } from '../lib/paymentsData.js'
+import { loadRunner } from '../lib/runnerJs.js'
 import {
   loadInvoices,
   createInvoice,
@@ -44,6 +45,8 @@ export default function Invoices({ app }) {
   const [search, setSearch] = useState('')
   const [selId, setSelId] = useState(null)
   const [paymentsOk, setPaymentsOk] = useState(false)
+  const [payCfg, setPayCfg] = useState(null) // Runner.js config for "Take payment"
+  const [takePay, setTakePay] = useState(false)
 
   const [showForm, setShowForm] = useState(false)
   const [editId, setEditId] = useState(null)
@@ -77,7 +80,7 @@ export default function Invoices({ app }) {
     }
     refresh().catch((e) => setErr(e.message || String(e))).finally(() => setLoading(false))
     loadCustomers().then(setCustomers).catch(() => {})
-    paymentsStatus().then((d) => setPaymentsOk(!!(d && d.connected))).catch(() => {})
+    paymentsStatus().then((d) => { setPaymentsOk(!!(d && d.connected)); setPayCfg(d?.runner || null) }).catch(() => {})
     const unsub = subscribeInvoices(() => refresh().catch(() => {}))
     return () => unsub && unsub()
   }, [app.activeLine])
@@ -316,9 +319,18 @@ export default function Invoices({ app }) {
               Select an invoice, or create a new one.
             </div>
           )}
-          {cur && <InvoiceDetail inv={cur} paymentsOk={paymentsOk} busy={busy} onEdit={() => openEdit(cur)} onMarkPaid={onMarkPaid} onSend={onSend} onText={onText} onDelete={onDelete} />}
+          {cur && <InvoiceDetail inv={cur} paymentsOk={paymentsOk} busy={busy} onEdit={() => openEdit(cur)} onMarkPaid={onMarkPaid} onSend={onSend} onText={onText} onDelete={onDelete} onTakePayment={payCfg ? () => setTakePay(true) : null} />}
         </div>
       </div>
+
+      {takePay && cur && (
+        <TakePaymentModal
+          inv={cur}
+          cfg={payCfg}
+          onClose={() => setTakePay(false)}
+          onPaid={async () => { await refresh().catch(() => {}) }}
+        />
+      )}
 
       {showForm && (
         <div onClick={() => !saving && setShowForm(false)} style={overlay}>
@@ -438,7 +450,7 @@ export default function Invoices({ app }) {
   )
 }
 
-function InvoiceDetail({ inv, paymentsOk, busy, onEdit, onMarkPaid, onSend, onText, onDelete }) {
+function InvoiceDetail({ inv, paymentsOk, busy, onEdit, onMarkPaid, onSend, onText, onDelete, onTakePayment }) {
   const meta = STATUS_META[inv.status] || STATUS_META.draft
   return (
     <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, overflow: 'hidden' }}>
@@ -507,6 +519,9 @@ function InvoiceDetail({ inv, paymentsOk, busy, onEdit, onMarkPaid, onSend, onTe
         {inv.status === 'draft' && <button onClick={onEdit} disabled={busy} style={ghostBtn}>Edit</button>}
         {inv.status !== 'paid' && paymentsOk && (
           <button onClick={onSend} disabled={busy} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: busy ? 0.6 : 1 }}>{busy ? 'Working…' : inv.paymentUrl ? 'Resend link' : 'Send payment link'}</button>
+        )}
+        {inv.status !== 'paid' && inv.status !== 'void' && onTakePayment && (
+          <button onClick={onTakePayment} disabled={busy} style={{ background: '#fff', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: busy ? 0.6 : 1 }}>💳 Take payment</button>
         )}
         {inv.status !== 'paid' && (
           <button onClick={onText} disabled={busy || !inv.customerPhone} title={inv.customerPhone ? '' : 'No phone number on file for this customer'} style={{ background: '#fff', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: inv.customerPhone ? 'pointer' : 'not-allowed', opacity: busy || !inv.customerPhone ? 0.5 : 1 }}>{busy ? 'Working…' : 'Text invoice'}</button>
@@ -612,3 +627,130 @@ const overlay = { position: 'fixed', inset: 0, background: 'rgba(15,30,20,.45)',
 const modal = { maxWidth: '100%', background: '#fff', borderRadius: 14, padding: 22, boxShadow: '0 20px 60px rgba(0,0,0,.25)' }
 const cancelBtn = { flex: 'none', background: '#fff', border: '1px solid #dde2dd', color: '#5d6b63', borderRadius: 9, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }
 const primaryBtn = { flex: 1, background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }
+
+// ---- Take payment modal ------------------------------------------------------
+// Staff-side charge: key in the customer's card (Runner.js iframe — the PAN
+// never touches our code) or charge their saved card on file in one click.
+// Uses the same `payments` fn charge_invoice as the customer pay page, so the
+// invoice is marked paid on approval.
+function TakePaymentModal({ inv, cfg, onClose, onPaid }) {
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const [done, setDone] = useState(false)
+  const [runnerReady, setRunnerReady] = useState(false)
+  const runnerRef = useRef(null)
+
+  useEffect(() => {
+    if (!cfg?.public_key) return
+    let cancelled = false
+    loadRunner().then((Runner) => {
+      if (cancelled) return
+      const r = new Runner()
+      r.init({
+        element: '#run-take-form',
+        publicKey: cfg.public_key,
+        mid: cfg.mid,
+        env: cfg.env === 'uat' ? 'staging' : 'production',
+        useExpiry: true,
+        useCvv: true,
+      })
+      runnerRef.current = r
+      setRunnerReady(true)
+    }).catch((e) => setErr(e.message || String(e)))
+    return () => { cancelled = true }
+  }, [cfg?.public_key, cfg?.mid, cfg?.env])
+
+  function finish(res) {
+    if (res && res.ok) {
+      setDone(true)
+      onPaid && onPaid()
+    } else if (res && res.declined) {
+      setErr(res.resp_text || 'The card was declined.')
+    } else {
+      setErr((res && res.error) || 'Payment could not be completed.')
+    }
+  }
+
+  async function chargeSaved() {
+    if (!window.confirm(`Charge ${inv.customerName}'s saved ${String(inv.savedCard?.brand || 'card').toUpperCase()} ••${inv.savedCard?.last4} for ${money(inv.total)}?`)) return
+    setBusy(true)
+    setErr('')
+    try {
+      finish(await chargeInvoice({ invoiceId: inv.id, useSaved: true }))
+    } catch (e) { setErr(e.message || String(e)) }
+    setBusy(false)
+  }
+
+  async function chargeKeyed() {
+    if (!runnerRef.current) return
+    setBusy(true)
+    setErr('')
+    try {
+      const res = await new Promise((resolve, reject) => {
+        runnerRef.current.tokenize(async (t) => {
+          if (!t || (!t.account_token && !t.token)) { reject(new Error('Card entry incomplete.')); return }
+          try {
+            resolve(await chargeInvoice({
+              invoiceId: inv.id,
+              accountToken: t.account_token || t.token,
+              expiration: t.expiry,
+              cvn: t.cvv,
+              name: inv.customerName,
+            }))
+          } catch (e) { reject(e) }
+        })
+      })
+      finish(res)
+    } catch (e) { setErr(e.message || String(e)) }
+    setBusy(false)
+  }
+
+  return (
+    <div onClick={() => !busy && onClose()} style={overlay}>
+      <div onClick={(e) => e.stopPropagation()} style={{ ...modal, width: 440 }}>
+        {done ? (
+          <div style={{ textAlign: 'center', padding: '10px 0' }}>
+            <div style={{ fontSize: 30 }}>✓</div>
+            <div style={{ fontWeight: 700, fontSize: 16, color: '#1f7a4d', marginTop: 6 }}>Payment received</div>
+            <div style={{ fontSize: 13, color: '#5d6b63', marginTop: 6 }}>Invoice {inv.number} is paid — {money(inv.total)}.</div>
+            <button onClick={onClose} style={{ ...primaryBtn, flex: 'none', marginTop: 16, padding: '10px 22px' }}>Done</button>
+          </div>
+        ) : (
+          <>
+            <div style={{ fontWeight: 700, fontSize: 16 }}>Take payment</div>
+            <div style={{ fontSize: 12.5, color: '#7c8a82', marginTop: 3, marginBottom: 14 }}>
+              Invoice {inv.number} · {inv.customerName} · <b style={{ color: '#1a2420' }}>{money(inv.total)}</b>
+            </div>
+            {err && <div style={{ ...errorBox, marginBottom: 12 }}>{err}</div>}
+
+            {inv.savedCard && (
+              <>
+                <button onClick={chargeSaved} disabled={busy} style={{ ...primaryBtn, width: '100%', padding: '12px 16px', opacity: busy ? 0.6 : 1 }}>
+                  {busy ? 'Working…' : `Charge saved ${String(inv.savedCard.brand).toUpperCase()} ••${inv.savedCard.last4} — ${money(inv.total)}`}
+                </button>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '14px 0' }}>
+                  <div style={{ flex: 1, height: 1, background: '#e6eae6' }} />
+                  <span style={{ fontSize: 11.5, color: '#9aa69e' }}>or enter a card</span>
+                  <div style={{ flex: 1, height: 1, background: '#e6eae6' }} />
+                </div>
+              </>
+            )}
+
+            <div id="run-take-form" style={{ minHeight: 64, marginBottom: 6 }}>
+              {!runnerReady && <div style={{ color: '#9aa69e', fontSize: 12.5, padding: '8px 2px' }}>Loading secure card form…</div>}
+            </div>
+            <div style={{ display: 'flex', gap: 9, marginTop: 10 }}>
+              <button onClick={onClose} disabled={busy} style={cancelBtn}>Cancel</button>
+              <button onClick={chargeKeyed} disabled={busy || !runnerReady} style={{ ...primaryBtn, opacity: (busy || !runnerReady) ? 0.6 : 1 }}>
+                {busy ? 'Processing…' : `Charge ${money(inv.total)}`}
+              </button>
+            </div>
+            <div style={{ fontSize: 11, color: '#9aa69e', marginTop: 10 }}>
+              Card details are entered in a secure Run Payments field — they never touch this app's code or database.
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}

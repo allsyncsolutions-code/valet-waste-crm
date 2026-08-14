@@ -45,6 +45,11 @@ function mapInvoice(row) {
     customerEmail: row.customers?.email || '',
     customerPhone: row.customers?.phone || '',
     customerAddress: row.customers?.address || '',
+    // Card on file (Run Merchant vault) — powers the staff "Take payment"
+    // modal's charge-saved-card shortcut.
+    savedCard: row.customers?.run_vault_id
+      ? { brand: row.customers.run_card_brand || 'card', last4: row.customers.run_card_last4 || '••••' }
+      : null,
     number: row.number,
     status: row.status,
     issueDate: row.issue_date,
@@ -63,7 +68,7 @@ function mapInvoice(row) {
   }
 }
 
-const SELECT = '*, customers(name,email,phone,address,business_line), invoice_line_items(*)'
+const SELECT = '*, customers(name,email,phone,address,business_line,run_vault_id,run_card_brand,run_card_last4), invoice_line_items(*)'
 
 export async function loadInvoices(line) {
   const { data, error } = await supabase

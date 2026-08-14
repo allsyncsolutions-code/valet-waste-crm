@@ -149,7 +149,7 @@ async function runLawnInvoiceLines(): Promise<string> {
 // Replaces Stripe for the off-session autopay charge. The api_key (1h TTL) is
 // minted from the long-lived refresh_token, cached in app_settings.
 const RUN_HOSTS = {
-  uat: "https://staging-javelin.runpayments.io",
+  uat: "https://javelin-staging.runpayments.io",
   production: "https://javelin.runpayments.io",
 }
 function runHost(env?: string | null) {

@@ -79,7 +79,7 @@ async function sha256(s: string): Promise<string> {
 // Replaces Stripe for saved-card / autopay. The api_key (1h TTL) is minted from
 // the long-lived refresh_token; cached in app_settings and refreshed near expiry.
 const RUN_HOSTS = {
-  uat: "https://staging-javelin.runpayments.io",
+  uat: "https://javelin-staging.runpayments.io",
   production: "https://javelin.runpayments.io",
 }
 function runHost(env?: string | null) {
@@ -383,6 +383,42 @@ Deno.serve(async (req) => {
         expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
       })
       return json({ ok: true, token: sessionToken, name: cust.name })
+    }
+
+    if (action === "pay_info") {
+      // Standalone pay page — no portal session required. The slug + invoice id
+      // pair in the emailed/texted link acts as the bearer capability; we only
+      // return this ONE invoice (plus Runner config), never the rest of the
+      // portal payload. The charge itself goes through the `payments` fn.
+      const invoiceId = String(body.invoice_id || "")
+      if (!slug || !invoiceId) return json({ error: "Missing slug or invoice_id." }, 400)
+      const cust = (await sbGet(`customers?portal_slug=eq.${enc(String(slug))}&select=id,name`))[0]
+      if (!cust) return json({ error: "This payment link isn't valid." }, 404)
+      const inv = (await sbGet(
+        `invoices?id=eq.${enc(invoiceId)}&customer_id=eq.${cust.id}&select=id,number,status,total,subtotal,discount,due_date,issue_date,invoice_line_items(description,quantity,unit_price,amount,position)`,
+      ))[0]
+      if (!inv) return json({ error: "This payment link isn't valid." }, 404)
+      const settings = await getSettings()
+      const items = (inv.invoice_line_items || [])
+        .slice()
+        .sort((a: any, b: any) => (a.position ?? 0) - (b.position ?? 0))
+        .map((li: any) => ({ description: li.description || "", quantity: Number(li.quantity || 0), unit_price: Number(li.unit_price || 0), amount: Number(li.amount || 0) }))
+      return json({
+        ok: true,
+        company: { name: settings.company_name || "Valet Waste FL", logo_url: settings.logo_url || null },
+        customer_name: cust.name,
+        invoice: {
+          id: inv.id, number: inv.number, status: inv.status,
+          total: inv.total, subtotal: inv.subtotal, discount: inv.discount,
+          due_date: inv.due_date, issue_date: inv.issue_date, items,
+        },
+        payment: {
+          available: !!(settings.run_mid && settings.run_public_key),
+          publicKey: settings.run_public_key || null,
+          mid: settings.run_mid || null,
+          env: settings.run_env || "production",
+        },
+      })
     }
 
     if (action === "data") {
