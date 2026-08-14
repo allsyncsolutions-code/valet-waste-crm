@@ -162,13 +162,25 @@ async function runAccessToken(): Promise<{ token: string; mid: string; env: stri
   if (!mid || !s.run_refresh_token) throw new Error("Run Merchant isn't configured.")
   const exp = s.run_api_key_expires_at ? new Date(s.run_api_key_expires_at).getTime() : 0
   if (s.run_api_key && exp - Date.now() > 5 * 60 * 1000) return { token: s.run_api_key, mid, env }
-  const r = await fetch(`${runHost(env)}/api/v1/api_keys/refresh`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${s.run_api_key || s.run_refresh_token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ token: s.run_refresh_token }),
-  })
-  const d = await r.json().catch(() => ({}))
-  if (!r.ok) throw new Error(d?.message || `Run Merchant key refresh failed: ${r.status}`)
+  // Refresh uses BOTH the api_key and refresh_token (docs are ambiguous about
+  // which goes in the header vs body — try both shapes before failing).
+  const attempts = s.run_api_key
+    ? [{ bearer: s.run_api_key, token: s.run_refresh_token }, { bearer: s.run_refresh_token, token: s.run_api_key }]
+    : [{ bearer: s.run_refresh_token, token: s.run_refresh_token }]
+  let d: Record<string, unknown> = {}
+  let ok = false
+  let status = 0
+  for (const a of attempts) {
+    const r = await fetch(`${runHost(env)}/api/v1/api_keys/refresh`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${a.bearer}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ token: a.token }),
+    })
+    d = await r.json().catch(() => ({}))
+    if (r.ok) { ok = true; break }
+    status = r.status
+  }
+  if (!ok) throw new Error((d?.message as string) || `Run Merchant key refresh failed: ${status}`)
   await sbPatch(`app_settings?id=eq.1`, {
     run_api_key: d.api_key,
     run_refresh_token: d.refresh_token,

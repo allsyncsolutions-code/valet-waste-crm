@@ -117,6 +117,30 @@ function runHost(env?: string | null) {
   return RUN_HOSTS[(env === "uat" ? "uat" : "production") as keyof typeof RUN_HOSTS]
 }
 
+// Mint a fresh api_key from the stored api_key + refresh_token pair. Run's
+// docs say the refresh uses BOTH credentials but are ambiguous about which
+// goes in the Authorization header vs the body — so try the primary shape
+// first and the swapped shape on failure. Without a stored api_key (legacy
+// state) fall back to refresh-token-only, which Run may reject.
+async function runKeyRefresh(env: string, apiKey: string | null, refreshToken: string) {
+  const attempts = apiKey
+    ? [{ bearer: apiKey, token: refreshToken }, { bearer: refreshToken, token: apiKey }]
+    : [{ bearer: refreshToken, token: refreshToken }]
+  let last: { status: number; body: Record<string, unknown> } = { status: 0, body: {} }
+  for (const a of attempts) {
+    const r = await fetch(`${runHost(env)}/api/v1/api_keys/refresh`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${a.bearer}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ token: a.token }),
+    })
+    const d = await r.json().catch(() => ({}))
+    if (r.ok) return d
+    last = { status: r.status, body: d }
+  }
+  const hint = apiKey ? "" : " — the API Key may be missing: paste it from the Run portal in Settings → Payments."
+  throw new Error((last.body?.message as string) || (last.body?.error as string) || `Run Merchant key refresh failed: ${last.status}${hint}`)
+}
+
 // Return a live bearer token, refreshing first if the cached api_key is near
 // expiry. Mutates app_settings with the new key on refresh.
 async function getAccessToken(s: RunSettings): Promise<{ token: string; mid: string; env: string }> {
@@ -128,14 +152,7 @@ async function getAccessToken(s: RunSettings): Promise<{ token: string; mid: str
   if (s.run_api_key && exp - Date.now() > fiveMin) {
     return { token: s.run_api_key, mid, env }
   }
-  // Refresh. Body {token}; Authorization can be the expired/any bearer per docs.
-  const r = await fetch(`${runHost(env)}/api/v1/api_keys/refresh`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${s.run_api_key || s.run_refresh_token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ token: s.run_refresh_token }),
-  })
-  const d = await r.json().catch(() => ({}))
-  if (!r.ok) throw new Error(d?.message || `Run Merchant key refresh failed: ${r.status}`)
+  const d = await runKeyRefresh(env, s.run_api_key || null, s.run_refresh_token)
   await sbPatch(`app_settings?id=eq.1`, {
     run_api_key: d.api_key,
     run_refresh_token: d.refresh_token,
@@ -229,6 +246,7 @@ Deno.serve(async (req) => {
         fields: {
           mid: s.run_mid ? { set: true, masked: mask(s.run_mid) } : { set: false },
           public_key: s.run_public_key ? { set: true, masked: mask(s.run_public_key) } : { set: false },
+          api_key: s.run_api_key ? { set: true, masked: mask(s.run_api_key) } : { set: false },
           refresh_token: s.run_refresh_token ? { set: true, masked: mask(s.run_refresh_token) } : { set: false },
           webhook_secret: s.run_webhook_secret ? { set: true, masked: mask(s.run_webhook_secret) } : { set: false },
         },
@@ -248,9 +266,17 @@ Deno.serve(async (req) => {
       if (typeof body.public_key === "string" && body.public_key.trim()) patch.run_public_key = body.public_key.trim()
       if (typeof body.refresh_token === "string" && body.refresh_token.trim()) {
         patch.run_refresh_token = body.refresh_token.trim()
-        // Force a fresh access-token mint on next API call.
+        // Force a fresh access-token mint on next API call (unless a new
+        // api_key arrives in this same save, below).
         patch.run_api_key = null
         patch.run_api_key_expires_at = null
+      }
+      if (typeof body.api_key === "string" && body.api_key.trim()) {
+        // The portal-issued api_key lives ~1h; assume it was just generated so
+        // charges can use it immediately. If it's actually stale, the charge
+        // 401s and the refresh path takes over.
+        patch.run_api_key = body.api_key.trim()
+        patch.run_api_key_expires_at = new Date(Date.now() + 30 * 60000).toISOString()
       }
       if (body.env === "uat" || body.env === "production") patch.run_env = body.env
       if (typeof body.webhook_secret === "string" && body.webhook_secret.trim()) patch.run_webhook_secret = body.webhook_secret.trim()
@@ -292,6 +318,7 @@ Deno.serve(async (req) => {
         ok: true,
         mid: s.run_mid || null,
         public_key: s.run_public_key || null,
+        api_key: s.run_api_key || null,
         refresh_token: s.run_refresh_token || null,
         webhook_secret: s.run_webhook_secret || null,
       })
@@ -364,7 +391,20 @@ Deno.serve(async (req) => {
         chargeBody.cof_perm = "Y"
       }
 
-      const res = await runCharge(env, token, chargeBody)
+      let res
+      try {
+        res = await runCharge(env, token, chargeBody)
+      } catch (e) {
+        // A stale cached api_key comes back as a 401 — force one refresh and
+        // retry the charge before giving up.
+        const msg = e instanceof Error ? e.message : String(e)
+        if (/\b401\b/.test(msg)) {
+          const fresh = await getAccessToken({ ...settings, run_api_key_expires_at: null })
+          res = await runCharge(fresh.env, fresh.token, chargeBody)
+        } else {
+          throw e
+        }
+      }
       if (res.result !== "A") {
         return json({ ok: false, declined: true, result: res.result, resp_text: res.resp_text || "Declined", trans_id: res.trans_id || null })
       }

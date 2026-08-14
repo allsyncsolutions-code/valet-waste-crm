@@ -33,7 +33,7 @@ export default function Settings({ app }) {
   const [geoBusy, setGeoBusy] = useState(false)
   const [depotSaving, setDepotSaving] = useState(false)
   const [pay, setPay] = useState({ loading: true, data: null, busy: false, err: null, msg: null })
-  const [creds, setCreds] = useState({ mid: '', public_key: '', refresh_token: '', env: 'production', webhook_secret: '' })
+  const [creds, setCreds] = useState({ mid: '', public_key: '', api_key: '', refresh_token: '', env: 'production', webhook_secret: '' })
   // Key reveal flow: null = closed; {step:'email'|'code'} = modal open; revealed plaintext after verify.
   const [reveal, setReveal] = useState(null)
   const [revealed, setRevealed] = useState(null)
@@ -148,9 +148,10 @@ export default function Settings({ app }) {
       const missing = []
       if (!d.fields?.mid?.set) missing.push('MID')
       if (!d.fields?.public_key?.set) missing.push('public key')
+      if (!d.fields?.api_key?.set) missing.push('API key')
       if (!d.fields?.refresh_token?.set) missing.push('refresh token')
       setPay((s) => ({ ...s, busy: false, data: d, msg: missing.length ? `Saved. Still missing: ${missing.join(', ')}.` : 'Saved — Run Merchant is fully connected.' }))
-      setCreds({ mid: '', public_key: '', refresh_token: '', env: creds.env, webhook_secret: '' })
+      setCreds({ mid: '', public_key: '', api_key: '', refresh_token: '', env: creds.env, webhook_secret: '' })
       setRevealed(null)
     } catch (e2) {
       setPay((s) => ({ ...s, busy: false, err: e2.message || String(e2) }))
@@ -177,7 +178,7 @@ export default function Settings({ app }) {
     setReveal((r) => ({ ...r, busy: true, err: null }))
     try {
       const d = await revealVerify(reveal.email, reveal.code)
-      setRevealed({ mid: d.mid, public_key: d.public_key, refresh_token: d.refresh_token, webhook_secret: d.webhook_secret })
+      setRevealed({ mid: d.mid, public_key: d.public_key, api_key: d.api_key, refresh_token: d.refresh_token, webhook_secret: d.webhook_secret })
       setReveal(null)
     } catch (e2) {
       setReveal((r) => ({ ...r, busy: false, err: e2.message || String(e2) }))
@@ -472,6 +473,7 @@ export default function Settings({ app }) {
               <div style={{ background: '#f7f9f7', border: '1px solid #e6eae6', borderRadius: 9, padding: '10px 12px', fontSize: 12, fontFamily: MONO, color: '#5d6b63', lineHeight: 1.8 }}>
                 <div>MID: <span style={{ color: pay.data.fields?.mid?.set ? '#1a2420' : '#c0492f' }}>{pay.data.fields?.mid?.set ? (revealed?.mid || pay.data.fields.mid.masked) : 'not set'}</span></div>
                 <div>Public key: <span style={{ color: pay.data.fields?.public_key?.set ? '#1a2420' : '#c0492f' }}>{pay.data.fields?.public_key?.set ? (revealed?.public_key || pay.data.fields.public_key.masked) : 'not set'}</span></div>
+                <div>API key: <span style={{ color: pay.data.fields?.api_key?.set ? '#1a2420' : '#c0492f' }}>{pay.data.fields?.api_key?.set ? (revealed?.api_key || pay.data.fields.api_key.masked) : 'not set — needed to mint access keys'}</span></div>
                 <div>Refresh token: <span style={{ color: pay.data.fields?.refresh_token?.set ? '#1a2420' : '#c0492f' }}>{pay.data.fields?.refresh_token?.set ? (revealed?.refresh_token || pay.data.fields.refresh_token.masked) : 'not set'}</span>{pay.data.refresh_token_expires_at ? ` · expires ${new Date(pay.data.refresh_token_expires_at).toLocaleDateString()}` : ''}</div>
                 <div>Webhook secret: <span style={{ color: pay.data.fields?.webhook_secret?.set ? '#1a2420' : '#9aa69e' }}>{pay.data.fields?.webhook_secret?.set ? (revealed?.webhook_secret || pay.data.fields.webhook_secret.masked) : 'not set'}</span></div>
               </div>
@@ -492,6 +494,7 @@ export default function Settings({ app }) {
             </SField>
           </div>
           <SField label="Public Key"><input value={creds.public_key} onChange={(e) => setCreds((c) => ({ ...c, public_key: e.target.value }))} style={inp} placeholder={pay.data?.fields?.public_key?.set ? 'Saved — enter new to replace' : 'Used by Runner.js in the portal'} /></SField>
+          <SField label="API Key"><input type="password" value={creds.api_key} onChange={(e) => setCreds((c) => ({ ...c, api_key: e.target.value }))} style={inp} placeholder={pay.data?.fields?.api_key?.set ? 'Saved — enter new to replace' : 'From Run portal — pairs with the refresh token'} /></SField>
           <SField label="Refresh Token"><input type="password" value={creds.refresh_token} onChange={(e) => setCreds((c) => ({ ...c, refresh_token: e.target.value }))} style={inp} placeholder={pay.data?.fields?.refresh_token?.set ? 'Saved — enter new to replace' : 'Mints short-lived API keys (30-day TTL)'} /></SField>
           <SField label="Webhook Secret (optional)"><input type="password" value={creds.webhook_secret} onChange={(e) => setCreds((c) => ({ ...c, webhook_secret: e.target.value }))} style={inp} placeholder={pay.data?.fields?.webhook_secret?.set ? 'Saved — enter new to replace' : 'From your Run Payments Integration Lead'} /></SField>
           {creds.env === 'uat' && (
@@ -499,7 +502,7 @@ export default function Settings({ app }) {
               Test card: 4788250000121443 · Visa · exp 10/29 · any CVV
             </div>
           )}
-          <button type="submit" disabled={pay.busy || (!creds.mid.trim() && !creds.public_key.trim() && !creds.refresh_token.trim() && !creds.webhook_secret.trim())} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: pay.busy ? 0.6 : 1 }}>{pay.busy ? 'Saving…' : 'Save'}</button>
+          <button type="submit" disabled={pay.busy || (!creds.mid.trim() && !creds.public_key.trim() && !creds.api_key.trim() && !creds.refresh_token.trim() && !creds.webhook_secret.trim())} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: pay.busy ? 0.6 : 1 }}>{pay.busy ? 'Saving…' : 'Save'}</button>
           <span style={{ fontSize: 11.5, color: '#9aa69e', marginLeft: 12 }}>Saves anything you've entered — leave fields blank to keep what's stored.</span>
         </form>
 
