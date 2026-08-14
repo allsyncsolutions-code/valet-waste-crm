@@ -675,11 +675,12 @@ function PaymentsTab({ data, token, preview, onChanged, setNotice }) {
               </div>
             ) : (
               <>
+                {/* Runner.js owns #run-form's children — React must not render
+                    inside it (breaks reconciliation → removeChild crash). */}
                 <div ref={formRef}>
-                  <div id="run-form" style={{ minHeight: 64, marginBottom: 4 }}>
-                    {!runnerReady && <div style={{ color: '#9aa69e', fontSize: 12.5, padding: '8px 2px' }}>Loading secure card form…</div>}
-                  </div>
+                  <div id="run-form" style={{ minHeight: 64, marginBottom: 4 }} />
                 </div>
+                {!runnerReady && <div style={{ color: '#9aa69e', fontSize: 12.5, padding: '0 2px 8px' }}>Loading secure card form…</div>}
                 <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13.5, color: '#3c4a42', lineHeight: 1.5, cursor: 'pointer', marginTop: 8 }}>
                   <input
                     type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)}
@@ -840,11 +841,12 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
       </div>
       <div style={card}>
         <div style={{ fontWeight: 700, fontSize: 14.5, marginBottom: 10 }}>Pay with card</div>
+        {/* Runner.js owns #run-pay-form's children — React must not render
+            inside it (breaks reconciliation → removeChild crash). */}
         <div ref={formRef}>
-          <div id="run-pay-form" style={{ minHeight: 64, marginBottom: 4 }}>
-            {!runnerReady && <div style={{ color: '#9aa69e', fontSize: 12.5, padding: '8px 2px' }}>Loading secure card form…</div>}
-          </div>
+          <div id="run-pay-form" style={{ minHeight: 64, marginBottom: 4 }} />
         </div>
+        {!runnerReady && <div style={{ color: '#9aa69e', fontSize: 12.5, padding: '0 2px 8px' }}>Loading secure card form…</div>}
         {!payment.saved && (
           <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, color: '#3c4a42', lineHeight: 1.5, cursor: 'pointer', marginTop: 8 }}>
             <input type="checkbox" checked={saveCard} onChange={(e) => setSaveCard(e.target.checked)} style={{ marginTop: 3, width: 16, height: 16, accentColor: GREEN }} />

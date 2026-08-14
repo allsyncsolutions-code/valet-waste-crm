@@ -736,9 +736,10 @@ function TakePaymentModal({ inv, cfg, onClose, onPaid }) {
               </>
             )}
 
-            <div id="run-take-form" style={{ minHeight: 64, marginBottom: 6 }}>
-              {!runnerReady && <div style={{ color: '#9aa69e', fontSize: 12.5, padding: '8px 2px' }}>Loading secure card form…</div>}
-            </div>
+            {/* Runner.js owns #run-take-form's children — keep React out of it
+                (rendering inside breaks reconciliation → removeChild crash). */}
+            <div id="run-take-form" style={{ minHeight: 64, marginBottom: 6 }} />
+            {!runnerReady && <div style={{ color: '#9aa69e', fontSize: 12.5, padding: '0 2px 8px' }}>Loading secure card form…</div>}
             <div style={{ display: 'flex', gap: 9, marginTop: 10 }}>
               <button onClick={onClose} disabled={busy} style={cancelBtn}>Cancel</button>
               <button onClick={chargeKeyed} disabled={busy || !runnerReady} style={{ ...primaryBtn, opacity: (busy || !runnerReady) ? 0.6 : 1 }}>
