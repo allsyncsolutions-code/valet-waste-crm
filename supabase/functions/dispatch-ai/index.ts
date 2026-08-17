@@ -55,6 +55,12 @@ Guidelines:
 - ONE-TIME vs PERMANENT day changes: "skip just this week" / "move this Thursday's pickup to Friday" = ONE-TIME → use move_pickup_once (records an override; the regular schedule is untouched and rebuilds respect it). "Change their day to Friday going forward" = PERMANENT → edit_property pickup_days. If it's ambiguous which they mean, ask before acting.
 - MULTIPLE ADDRESSES: many clients have several service addresses. For any address-specific action (day change, skip, one-off pickup, photo, price edit) where the user named only the CLIENT, call list_properties first — if the client has more than one address, ASK which address they mean instead of guessing. Tools that resolve by address return needs_clarification with candidates; present those choices to the user.
 - SKIPPING A STOP: use skip_stop to mark a stop skipped WITH a reason (it stays on the route, flagged SKIPPED, visible to dispatch) — never delete/remove a stop just because it won't be serviced that day. skip_stop with undo:true puts it back to pending.
+- TAKING ADDRESSES OFF ROUTES FOR GOOD: routes REBUILD each day from every unpaused property's pickup_days, so remove_stop only clears ONE stop for ONE date — the address comes right back on the next build. To stop servicing an address (or a whole client), PAUSE it: pause_properties by_customer pauses ALL of a client's addresses and pulls their pending stops off today's and future routes in one shot ("take all of Acme's addresses off the routes", "we no longer service Ancient City"); edit_property paused:true does one address. update_client status:"paused" now cascades the same way automatically. Resume with pause_properties paused:false or update_client status:"active". Nothing is deleted — addresses are kept and recoverable.
+- CLIENT RECORD EDITS: update_client edits ANY profile field (contact info, status, billing type, business line, notes summary, arrival-text setting). add_property adds ONE new service address under a client (edit_property with new_address fixes a wrong address and re-pins the map). add_client_note drops a dated note on the client's notes log — use it whenever staff say "note on <client>: …" or tell you something worth keeping on the record; list_client_notes reads the log back.
+- TAGS: tag_client adds, untag_client removes one from a client, list_tags shows them all with usage, edit_tag renames/recolors/deletes a tag EVERYWHERE it's used. Remember tags are labels for grouping — never for pickup days.
+- SETTINGS YOU CAN EDIT: set_randy_tone changes your own personality when staff ask (instant, no confirmation needed). set_depot changes the yard / route starting location, and set_message_template rewrites the customer-facing SMS templates (see them first with get_message_templates) — these two are BUSINESS-WIDE: read the exact new value back and get an explicit YES before calling the tool. Templates are customer-facing: clean, professional, only supported {tokens}.
+- CLIENT PORTAL: get_portal_status tells you everything about a client's portal — their link, whether they've logged in, card on file + autopay, balance due, open quotes/requests, and 5th-week-free credits already applied. THE PITCH: clients who save a card for autopay get every 5th pickup week in a month FREE (months with 5 pickup weeks). invite_portal texts them a one-time login link (7-day) with that pitch — email fallback if no phone. When staff ask "has <client> set up autopay/portal?", check get_portal_status; if not set up, offer to send the invite.
+- SUGGESTING AUTOMATIONS: when staff ask for something recurring you can't do, or you notice a repeating chore, log it with suggest_automation — it lands on the Automations tab as 'suggested' AND texts David (the admins) so it gets seen. Never claim it's running; it needs backend approval first.
 - After making a change, confirm what you did in one short sentence.`
 
 // Selectable personalities for Randy's STAFF chat replies. The customer-facing
@@ -141,19 +147,21 @@ const tools = [
   },
   {
     name: "update_client",
-    description: "Update an existing customer's contact details, status or notes. Only provided fields change.",
+    description: "Update any field on an existing customer's profile: name, contact details, status, notes summary, billing type, business line, or their arrival-text setting. Only provided fields change.",
     input_schema: {
       type: "object",
       properties: {
         customer_id: { type: "string" },
         name: { type: "string" },
-        address: { type: "string" },
+        address: { type: "string", description: "The client's MAILING/billing address — service addresses live on properties (use add_property / edit_property for those)." },
         contact_name: { type: "string" },
         email: { type: "string" },
         phone: { type: "string" },
-        notes: { type: "string" },
-        status: { type: "string", enum: ["active", "paused", "prospect"] },
+        notes: { type: "string", description: "Replaces the one-line notes summary. For a dated running note use add_client_note instead." },
+        status: { type: "string", enum: ["active", "paused", "prospect"], description: "Setting 'paused' ALSO pauses all the client's addresses and pulls their pending stops off today's/future routes; 'active' unpauses all their addresses." },
         billing_type: { type: "string", enum: ["subscription", "one_time"], description: "Switch the client between subscription and single-payment." },
+        business_line: { type: "string", enum: ["waste", "junk", "lawn"], description: "Which business line the client belongs to." },
+        notify_on_service: { type: ["boolean", "null"], description: "Arrival-text setting: true=always text on check-in, false=never, null=auto (single-property clients only)." },
       },
       required: ["customer_id"],
     },
@@ -355,13 +363,15 @@ const tools = [
   {
     name: "edit_property",
     description:
-      "Edit ONE existing property and/or clear its 'Needs review' flag. Find it by address (and optionally the client name to disambiguate). Use this to fix a flagged property the owner is reviewing — set the price, service, pickup day(s), or notes, and set mark_reviewed:true to clear the flag once it's correct. Set needs_review:true to flag a property for review.",
+      "Edit ONE existing property and/or clear its 'Needs review' flag. Find it by address (and optionally the client name to disambiguate). Use this to fix a flagged property the owner is reviewing — set the price, service, pickup day(s), or notes — or to correct the ADDRESS itself (new_address re-geocodes the pin). Set mark_reviewed:true to clear the flag once it's correct, needs_review:true to flag it.",
     input_schema: {
       type: "object",
       properties: {
         address: { type: "string", description: "Address (or part of it) of the property to edit. Required unless property_id is given." },
         property_id: { type: "string", description: "Exact property id, if known. Use instead of address." },
         client_name: { type: "string", description: "Optional — the owning client, to disambiguate a shared address." },
+        new_address: { type: "string", description: "CORRECTED street address (fixes a typo/wrong address; the map pin is re-geocoded)." },
+        new_name: { type: "string", description: "New display name for the property." },
         price: { type: "number", description: "New price for this property." },
         service: { type: "string", description: "New service, e.g. 'Trash / Recycle'." },
         notes: { type: "string", description: "New bin-placement / access note." },
@@ -369,6 +379,7 @@ const tools = [
         pickup_freq: { type: "string", description: "weekly | biweekly | monthly | on_call." },
         mark_reviewed: { type: "boolean", description: "True to clear the Needs review flag (property is now correct)." },
         needs_review: { type: "boolean", description: "True to flag this property for review. Ignored if mark_reviewed is set." },
+        paused: { type: "boolean", description: "true PAUSES this address — pulls its pending stops off today's/future routes and keeps it off route builds until resumed. false resumes it. For a whole client use pause_properties." },
       },
     },
   },
@@ -383,6 +394,22 @@ const tools = [
         by_tag: { type: "string", description: "Tag name — affects properties of clients carrying this tag." },
         address_contains: { type: "string", description: "Match properties whose address or name contains this text (e.g. a city or street)." },
         needs_review: { type: "boolean", description: "True to flag for review (default), false to clear the flag." },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "pause_properties",
+    description:
+      "PAUSE or RESUME service for MANY addresses in one shot — selected by client, tag, or address text. Pausing marks the properties paused AND pulls their pending (never checked-in) stops off today's and future routes; paused addresses are skipped by every route build until resumed. Use for 'take all of Acme's addresses off the routes' or 'we no longer service <client>'. Nothing is deleted — addresses are kept and recoverable. Resume with paused:false (they rejoin route builds on their pickup days). For a SINGLE address use edit_property with paused.",
+    input_schema: {
+      type: "object",
+      properties: {
+        by_customer: { type: "string", description: "Client/business name — affects all of that client's addresses." },
+        by_customer_id: { type: "string", description: "Exact client id, if known." },
+        by_tag: { type: "string", description: "Tag name — addresses of clients carrying this tag." },
+        address_contains: { type: "string", description: "Match addresses whose address or name contains this text." },
+        paused: { type: "boolean", description: "true = pause (default). false = resume service." },
       },
       required: [],
     },
@@ -783,6 +810,155 @@ const tools = [
       required: ["route_code"],
     },
   },
+  {
+    name: "add_property",
+    description:
+      "Add ONE new service address (property) under an existing client. Use for 'add 123 Oak St to Acme' / 'they have a new address'. Geocodes the address immediately. For MANY addresses at once use bulk_add_properties instead. To change an existing address use edit_property.",
+    input_schema: {
+      type: "object",
+      properties: {
+        customer_id: { type: "string", description: "The client's id (preferred — from find_clients)." },
+        client_name: { type: "string", description: "Client name, if you don't have the id." },
+        address: { type: "string", description: "Full street address of the new property." },
+        name: { type: "string", description: "Optional display name (e.g. 'Building B')." },
+        price: { type: "number", description: "Monthly (or per-visit) price for this address." },
+        service: { type: "string", description: "Service, e.g. 'Trash / Recycle'." },
+        pickup_days: { type: "array", items: { type: "string" }, description: "Full lowercase day names, e.g. ['monday','thursday']." },
+        pickup_freq: { type: "string", description: "weekly | biweekly | monthly | on_call (default weekly)." },
+        notes: { type: "string", description: "Bin placement / access note." },
+        needs_review: { type: "boolean", description: "True to flag it for review (uncertain data)." },
+      },
+      required: ["address"],
+    },
+  },
+  {
+    name: "untag_client",
+    description: "Remove a tag from a customer (the tag itself stays in the tag list). Use for 'take the North Side tag off Acme'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        customer_id: { type: "string" },
+        tag: { type: "string", description: "Tag label to remove from this client." },
+      },
+      required: ["customer_id", "tag"],
+    },
+  },
+  {
+    name: "list_tags",
+    description: "List every tag with its color and how many clients carry it. Use for 'what tags do we have?' or before renaming/merging tags.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "edit_tag",
+    description:
+      "Rename, recolor, or DELETE a tag everywhere it's used (tags are shared — renaming updates every client carrying it; deleting removes it from all clients). Use for 'rename Northside to North Side', 'make the VIP tag gold', 'delete the old-pricing tag'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        tag: { type: "string", description: "Current tag label." },
+        new_name: { type: "string", description: "New label (rename)." },
+        color: { type: "string", description: "New hex color like #b07a1e." },
+        delete: { type: "boolean", description: "True to delete the tag entirely (removes it from every client)." },
+      },
+      required: ["tag"],
+    },
+  },
+  {
+    name: "add_client_note",
+    description:
+      "Add a dated note to a client's running notes log (shown newest-first on their client record). Use for 'note on Acme: gate code changed to 4482' or after a call worth recording. This is the notes LOG — for replacing the one-line summary field use update_client notes.",
+    input_schema: {
+      type: "object",
+      properties: {
+        customer_id: { type: "string", description: "The client's id (preferred)." },
+        client_name: { type: "string", description: "Client name, if you don't have the id." },
+        note: { type: "string", description: "The note text (keep it clean — it's on the client's record)." },
+        author: { type: "string", description: "Staff member the note is from, if they said so (default: Trashy Randy)." },
+      },
+      required: ["note"],
+    },
+  },
+  {
+    name: "list_client_notes",
+    description: "Read a client's notes log, newest first. Use for 'any notes on Acme?' / 'what's the history with this client?'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        customer_id: { type: "string" },
+        client_name: { type: "string" },
+        limit: { type: "number", description: "Max notes (default 15)." },
+      },
+    },
+  },
+  {
+    name: "set_randy_tone",
+    description:
+      "Change YOUR OWN chat personality (the Settings › Randy tone). Takes effect from the next reply. Use when staff say 'tone it down', 'be professional', 'go full spicy', etc.",
+    input_schema: {
+      type: "object",
+      properties: {
+        tone: { type: "string", enum: ["spicy", "funny", "friendly", "professional", "hype", "deadpan"], description: "The new personality." },
+      },
+      required: ["tone"],
+    },
+  },
+  {
+    name: "set_depot",
+    description:
+      "Set the depot / starting location (the yard) used as the route map's home pin and the optimizer's start point. Geocodes the address. BUSINESS-WIDE setting: read the address back and get an explicit yes BEFORE calling this.",
+    input_schema: {
+      type: "object",
+      properties: {
+        address: { type: "string", description: "Full street address of the yard / starting location." },
+        name: { type: "string", description: "Display name (default 'Yard')." },
+      },
+      required: ["address"],
+    },
+  },
+  {
+    name: "get_message_templates",
+    description:
+      "Read the editable SMS message templates from Settings (check-in arrival, check-out complete, reminder, invoice) plus the company name, with the {token} placeholders each supports. Use before editing a template or when asked 'what does the arrival text say?'.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "set_message_template",
+    description:
+      "Rewrite one of the Settings SMS templates (checkin | checkout | reminder | invoice) or the company name. Templates are CUSTOMER-FACING — keep them clean and professional. BUSINESS-WIDE setting: read the exact new text back and get an explicit yes BEFORE calling this. Supported tokens: {customerName} {serviceType} {address} {companyName}, plus {invoiceNumber} {total} {payLink} on the invoice template.",
+    input_schema: {
+      type: "object",
+      properties: {
+        template: { type: "string", enum: ["checkin", "checkout", "reminder", "invoice", "company_name"], description: "Which template (or company_name) to set." },
+        text: { type: "string", description: "The full new template text (with {tokens}), or the new company name." },
+      },
+      required: ["template", "text"],
+    },
+  },
+  {
+    name: "get_portal_status",
+    description:
+      "Everything about a client's PORTAL: their permanent portal link, whether they've ever logged in (and when last seen), saved card + autopay consent, balance due, open quotes, open service requests, and any 5th-week-free credits already applied. Use for 'has Acme set up their portal?', 'do they have a card on file?', 'what's in their portal?'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        customer_id: { type: "string" },
+        client_name: { type: "string" },
+      },
+    },
+  },
+  {
+    name: "invite_portal",
+    description:
+      "Invite a client to their customer portal with the 5th-week-free pitch: texts them a one-time login link (good for 7 days) explaining that saving a card for autopay makes every 5th pickup week in a month FREE. Falls back to email when the client has no phone. Use for 'invite Acme to the portal', 'send them the 5th week free offer'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        customer_id: { type: "string" },
+        client_name: { type: "string" },
+        custom_message: { type: "string", description: "Optional custom SMS text; supports {customerName} {companyName} {link} tokens. Omit for the standard pitch. Must be clean/professional." },
+      },
+    },
+  },
 ]
 
 // ---- PostgREST helpers (service role) ----
@@ -849,12 +1025,21 @@ function logForTool(name: string, out: any): Promise<void> | undefined {
     case "bulk_add_properties": return logActivity("properties_imported", `Imported ${out.inserted} properties for ${out.client}`, "customer", out.customer_id)
     case "edit_property": return out.needs_clarification ? undefined : logActivity("property_updated", `Updated property ${out.address}${out.needs_review === false ? " (reviewed)" : ""}`, "property", out.id)
     case "flag_properties": return out.changed ? logActivity("properties_flagged", `${out.needs_review ? "Flagged" : "Cleared review on"} ${out.changed} propert${out.changed === 1 ? "y" : "ies"}`, "customer") : undefined
+    case "pause_properties": return out.changed ? logActivity("properties_paused", `${out.paused ? "Paused" : "Resumed"} ${out.changed} address${out.changed === 1 ? "" : "es"}${out.stops_removed ? ` (${out.stops_removed} stops off routes)` : ""}`, "customer") : undefined
     case "add_property_photo": return out.needs_clarification ? undefined : logActivity("property_photo_added", `Logged a ${out.date} photo on ${out.address}`, "property", out.id)
     case "skip_stop": return out.ok ? logActivity(out.undone ? "stop_unskipped" : "stop_skipped", `${out.undone ? "Un-skipped" : "Skipped"} ${out.address} (${out.date})${out.reason ? ` — ${out.reason}` : ""}`, "property", out.property_id) : undefined
     case "move_pickup_once": return out.ok ? logActivity("day_changed_once", `One-time move: ${out.address} off ${out.skip_date}${out.service_date ? ` → ${out.service_date}` : " (skipped)"}`, "property", out.property_id) : undefined
     case "send_sms": return out.ok ? logActivity("sms_sent", `Texted ${out.to}`) : undefined
     case "text_invoice": return out.ok ? logActivity(out.preview ? "invoice_previewed" : "invoice_texted", out.preview ? `Previewed invoice ${out.invoice} to ${out.sent_to}` : `Texted invoice ${out.invoice} to ${out.client}`, "invoice") : undefined
-    case "suggest_automation": return out.ok ? logActivity("automation_suggested", `Suggested automation: ${out.name}`) : undefined
+    case "suggest_automation": return out.ok ? logActivity("automation_suggested", `Suggested automation: ${out.name}${out.admins_texted ? ` (texted ${out.admins_texted} admin${out.admins_texted === 1 ? "" : "s"})` : ""}`) : undefined
+    case "add_property": return out.ok ? logActivity("property_added", `Added ${out.address} under ${out.client}`, "property", out.id) : undefined
+    case "untag_client": return out.ok ? logActivity("client_untagged", `Removed tag "${out.tag}" from a client`, "customer", out.customer_id) : undefined
+    case "edit_tag": return out.ok ? logActivity("tag_edited", out.deleted ? `Deleted tag "${out.deleted}"` : `Tag "${out.was}" → "${out.tag}"`) : undefined
+    case "add_client_note": return out.ok ? logActivity("client_note_added", `Note on ${out.client}: ${String(out.note).slice(0, 80)}`, "customer", out.customer_id) : undefined
+    case "set_randy_tone": return out.ok ? logActivity("settings", `Randy tone set to ${out.tone}`, "app_settings", "1") : undefined
+    case "set_depot": return out.ok ? logActivity("settings", `Depot / starting location set to ${out.depot}`, "app_settings", "1") : undefined
+    case "set_message_template": return out.ok ? logActivity("settings", `Updated the ${out.template} SMS template`, "app_settings", "1") : undefined
+    case "invite_portal": return out.ok ? logActivity("portal_invited", `Portal invite (5th week free) sent to ${out.client} via ${out.via}`, "customer") : undefined
     case "create_job": return out.ok ? logActivity("job_created", `Scheduled a job${out.address ? ` at ${out.address}` : ""} for ${out.date}`, "job", out.id) : undefined
     case "merge_service": return out.changed ? logActivity("service_merged", `Changed ${out.changed} propert${out.changed === 1 ? "y" : "ies"} from \"${out.from}\" to ${out.to == null ? "(none)" : `\"${out.to}\"`}`, "property") : undefined
     default: return undefined
@@ -1090,13 +1275,35 @@ async function createClient(a: any) {
 
 async function updateClient(a: any) {
   const patch: Record<string, unknown> = {}
-  for (const k of ["name", "address", "contact_name", "email", "phone", "notes", "status", "billing_type"]) {
+  for (const k of ["name", "address", "contact_name", "email", "phone", "notes", "status", "billing_type", "business_line", "notify_on_service"]) {
     if (a[k] !== undefined) patch[k] = a[k]
   }
   if (Object.keys(patch).length === 0) throw new Error("No fields to update.")
   const [row] = await sbPatch(`customers?id=eq.${enc(a.customer_id)}`, patch)
   if (!row) throw new Error("Customer not found.")
-  return { id: row.id, name: row.name, updated: Object.keys(patch) }
+  const out: any = { id: row.id, name: row.name, updated: Object.keys(patch) }
+  // Client status cascades to their addresses — otherwise the daily route build
+  // (which only checks properties.paused) keeps putting a "paused" client's
+  // stops right back on the routes.
+  if (patch.status === "paused") {
+    const props = await sbGet(`properties?customer_id=eq.${enc(row.id)}&paused=eq.false&select=id`)
+    const ids = props.map((p: any) => p.id)
+    for (let i = 0; i < ids.length; i += 100) {
+      await sbPatch(`properties?id=in.(${ids.slice(i, i + 100).join(",")})`, { paused: true })
+    }
+    out.addresses_paused = ids.length
+    out.stops_removed = await pullPendingStops(ids)
+    out.note = "Client paused — all their addresses are paused and their pending stops pulled off today's/future routes (recoverable)."
+  } else if (patch.status === "active") {
+    const props = await sbGet(`properties?customer_id=eq.${enc(row.id)}&paused=eq.true&select=id`)
+    const ids = props.map((p: any) => p.id)
+    for (let i = 0; i < ids.length; i += 100) {
+      await sbPatch(`properties?id=in.(${ids.slice(i, i + 100).join(",")})`, { paused: false })
+    }
+    out.addresses_resumed = ids.length
+    if (ids.length) out.note = "Client active — their addresses are unpaused and rejoin route builds on their pickup days."
+  }
+  return out
 }
 
 async function createSchedule(a: any) {
@@ -1408,6 +1615,14 @@ async function editProperty(a: any) {
   }
   // Build the patch.
   const patch: Record<string, unknown> = {}
+  if (a.new_address !== undefined && String(a.new_address).trim()) {
+    const newAddr = String(a.new_address).trim()
+    patch.address = newAddr
+    const loc = await geocode(newAddr)
+    patch.lat = loc?.lat ?? null
+    patch.lng = loc?.lng ?? null
+  }
+  if (a.new_name !== undefined) patch.name = a.new_name
   if (a.price !== undefined) patch.price = a.price
   if (a.service !== undefined) patch.service = a.service
   if (a.notes !== undefined) patch.notes = a.notes
@@ -1415,15 +1630,23 @@ async function editProperty(a: any) {
   if (a.pickup_freq !== undefined) patch.pickup_frequency = a.pickup_freq
   if (a.mark_reviewed === true) patch.needs_review = false
   else if (a.needs_review !== undefined) patch.needs_review = a.needs_review
+  if (a.paused !== undefined) patch.paused = !!a.paused
   if (Object.keys(patch).length === 0) throw new Error("Nothing to change — specify a field to update or mark_reviewed.")
   const [row] = await sbPatch(`properties?id=eq.${enc(propId)}`, patch)
   if (!row) throw new Error("Property not found.")
-  return {
+  const out: any = {
     id: row.id,
     address: row.address || row.name,
     updated: Object.keys(patch),
     needs_review: row.needs_review,
   }
+  if (patch.paused === true) {
+    out.stops_removed = await pullPendingStops([row.id])
+    out.note = "Paused — off today's and future routes until resumed (address kept)."
+  } else if (patch.paused === false) {
+    out.note = "Resumed — back on route builds for its pickup days."
+  }
+  return out
 }
 
 async function flagProperties(a: any) {
@@ -1440,6 +1663,51 @@ async function flagProperties(a: any) {
     changed += rows.length
   }
   return { matched: ids.length, changed, needs_review: want }
+}
+
+// Delete pending, never-checked-in stops for these properties from today's and
+// future routes. Past routes are history and are left alone; checked-in/done/
+// skipped stops are never touched.
+async function pullPendingStops(propIds: string[]): Promise<number> {
+  if (!propIds.length) return 0
+  const routes = await sbGet(`routes?service_date=gte.${enc(today())}&select=id`)
+  if (!routes.length) return 0
+  const routeIds = routes.map((r: any) => enc(r.id)).join(",")
+  let pulled = 0
+  for (let i = 0; i < propIds.length; i += 100) {
+    const chunk = propIds.slice(i, i + 100).map((id) => enc(id)).join(",")
+    const stops = await sbGet(`route_stops?route_id=in.(${routeIds})&property_id=in.(${chunk})&status=eq.pending&check_in=is.null&select=id`)
+    for (const s of stops) {
+      await sbDel(`route_stops?id=eq.${enc(s.id)}`)
+      pulled++
+    }
+  }
+  return pulled
+}
+
+async function pauseProperties(a: any) {
+  if (!a.by_customer && !a.by_customer_id && !a.by_tag && !a.address_contains) {
+    throw new Error("Tell me which addresses to pause/resume — by client, tag, or address.")
+  }
+  const ids = await resolvePropertyIds(a)
+  const want = a.paused !== false // default: pause
+  if (!ids.length) return { matched: 0, changed: 0, paused: want, stops_removed: 0 }
+  let changed = 0
+  for (let i = 0; i < ids.length; i += 100) {
+    const chunk = ids.slice(i, i + 100)
+    const rows = await sbPatch(`properties?id=in.(${chunk.join(",")})`, { paused: want })
+    changed += rows.length
+  }
+  const stopsRemoved = want ? await pullPendingStops(ids) : 0
+  return {
+    matched: ids.length,
+    changed,
+    paused: want,
+    stops_removed: stopsRemoved,
+    note: want
+      ? "Paused — pulled off today's/future routes and skipped by route builds until resumed (addresses kept; checked-in stops untouched)."
+      : "Resumed — they rejoin route builds on their pickup days.",
+  }
 }
 
 async function findDuplicates(a: any) {
@@ -1784,12 +2052,321 @@ async function suggestAutomation(a: any) {
       status: "suggested",
       requested_by: a.requested_by ? String(a.requested_by) : "Trashy Randy",
     })
-    return { ok: true, id: rows?.[0]?.id, name, note: "Logged as suggested — staff can approve it on the Automations tab." }
+    // Ping the admins so suggestions don't sit unseen on the Automations tab.
+    const pinged = await textAdmins(
+      `🤖 Trashy Randy suggested a new automation: "${name}"${a.description ? ` — ${String(a.description).slice(0, 220)}` : ""}. Review + approve it on the Automations tab.`,
+    )
+    return {
+      ok: true,
+      id: rows?.[0]?.id,
+      name,
+      admins_texted: pinged,
+      note: `Logged as suggested${pinged ? ` and texted ${pinged} admin${pinged === 1 ? "" : "s"}` : ""} — staff approve it on the Automations tab.`,
+    }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     if (msg.includes("duplicate") || msg.includes("23505")) return { error: "An automation like that is already on the Automations tab." }
     throw e
   }
+}
+
+// ---- SMS every admin (best-effort, mirrors the portal fn's textAdmins) ------
+async function textAdmins(body: string): Promise<number> {
+  let sent = 0
+  try {
+    const staff = await sbGet(`profiles?select=full_name,phone,role&phone=not.is.null&role=eq.admin`)
+    for (const s of staff) {
+      try {
+        const r = await fetch(`${SUPABASE_URL}/functions/v1/sms`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "send", to: s.phone, body, purpose: "manual", sentBy: "Trashy Randy" }),
+        })
+        const d = await r.json().catch(() => ({}))
+        if (d?.ok) sent++
+      } catch (_e) { /* keep going */ }
+    }
+  } catch (_e) { /* SMS is best-effort */ }
+  return sent
+}
+
+// ---- single-property add ----------------------------------------------------
+async function addProperty(a: any) {
+  const address = String(a.address || "").trim()
+  if (!address) throw new Error("An address is required.")
+  const client = await resolveClient(a)
+  if (client.error || client.needs_clarification) return client
+  // Duplicate guard: same address already under this client?
+  const dupes = await sbGet(`properties?customer_id=eq.${enc(client.id)}&address=ilike.${enc(`*${address}*`)}&select=id,address&limit=3`)
+  if (dupes.length) {
+    return { error: `${client.name} already has a property matching "${dupes[0].address}". Use edit_property to change it, or give a different address.` }
+  }
+  const loc = await geocode(address)
+  const [p] = await sbPost("properties", {
+    customer_id: client.id,
+    address,
+    name: a.name ?? address,
+    price: a.price ?? null,
+    service: a.service ?? null,
+    notes: a.notes ?? null,
+    pickup_days: Array.isArray(a.pickup_days) ? a.pickup_days.map((d: string) => String(d).toLowerCase()) : null,
+    pickup_frequency: a.pickup_freq ?? "weekly",
+    needs_review: a.needs_review ?? false,
+    created_by: "Trashy Randy",
+    lat: loc?.lat ?? null,
+    lng: loc?.lng ?? null,
+  })
+  return {
+    ok: true,
+    id: p.id,
+    client: client.name,
+    customer_id: client.id,
+    address: p.address,
+    geocoded: !!loc,
+    note: loc ? undefined : "Couldn't geocode that address — the map pin will be placed when the address is corrected or the Import screen's geocoder runs.",
+  }
+}
+
+// ---- tag management ---------------------------------------------------------
+async function resolveTag(label: string) {
+  const name = String(label || "").trim()
+  if (!name) throw new Error("Tag label required.")
+  const rows = await sbGet(`tags?name=ilike.${enc(name)}&select=id,name,color&limit=2`)
+  if (!rows.length) throw new Error(`No tag named "${name}".`)
+  return rows[0]
+}
+
+async function untagClient(a: any) {
+  const tag = await resolveTag(a.tag)
+  await sbDel(`customer_tags?customer_id=eq.${enc(a.customer_id)}&tag_id=eq.${enc(tag.id)}`)
+  return { ok: true, tag: tag.name, customer_id: a.customer_id }
+}
+
+async function listTagsTool() {
+  const tags = await sbGet(`tags?select=id,name,color&order=name.asc`)
+  const links = await sbGet(`customer_tags?select=tag_id`)
+  const counts: Record<string, number> = {}
+  for (const l of links) counts[l.tag_id] = (counts[l.tag_id] || 0) + 1
+  return { count: tags.length, tags: tags.map((t: any) => ({ name: t.name, color: t.color, clients: counts[t.id] || 0 })) }
+}
+
+async function editTag(a: any) {
+  const tag = await resolveTag(a.tag)
+  if (a.delete === true) {
+    await sbDel(`customer_tags?tag_id=eq.${enc(tag.id)}`)
+    await sbDel(`tags?id=eq.${enc(tag.id)}`)
+    return { ok: true, deleted: tag.name }
+  }
+  const patch: Record<string, unknown> = {}
+  if (a.new_name !== undefined && String(a.new_name).trim()) patch.name = String(a.new_name).trim()
+  if (a.color !== undefined) {
+    const c = String(a.color).trim()
+    if (!/^#[0-9a-fA-F]{6}$/.test(c)) throw new Error("Color must be a hex value like #1f7a4d.")
+    patch.color = c
+  }
+  if (!Object.keys(patch).length) throw new Error("Nothing to change — give a new_name, color, or delete:true.")
+  const [row] = await sbPatch(`tags?id=eq.${enc(tag.id)}`, patch)
+  return { ok: true, tag: row.name, color: row.color, was: tag.name }
+}
+
+// ---- client notes log -------------------------------------------------------
+async function addClientNote(a: any) {
+  const body = String(a.note || "").trim()
+  if (!body) throw new Error("The note text is required.")
+  const client = await resolveClient(a)
+  if (client.error || client.needs_clarification) return client
+  const [row] = await sbPost("client_notes", {
+    customer_id: client.id,
+    author_name: a.author ? String(a.author).trim() : "Trashy Randy",
+    body,
+  })
+  return { ok: true, id: row.id, client: client.name, customer_id: client.id, note: body }
+}
+
+async function listClientNotes(a: any) {
+  const client = await resolveClient(a)
+  if (client.error || client.needs_clarification) return client
+  const limit = Number(a.limit) > 0 ? Math.min(Math.floor(Number(a.limit)), 50) : 15
+  const rows = await sbGet(`client_notes?customer_id=eq.${enc(client.id)}&select=author_name,body,created_at&order=created_at.desc&limit=${limit}`)
+  return {
+    client: client.name,
+    count: rows.length,
+    notes: rows.map((n: any) => ({ date: String(n.created_at).slice(0, 10), by: n.author_name || "staff", note: n.body })),
+  }
+}
+
+// ---- settings: tone, depot, message templates -------------------------------
+const VALID_TONES = ["spicy", "funny", "friendly", "professional", "hype", "deadpan"]
+
+async function setRandyTone(a: any) {
+  const tone = String(a.tone || "").toLowerCase().trim()
+  if (!VALID_TONES.includes(tone)) throw new Error(`Tone must be one of: ${VALID_TONES.join(", ")}.`)
+  await sbPatch(`app_settings?id=eq.1`, { randy_tone: tone, updated_at: new Date().toISOString() })
+  return { ok: true, tone, note: `Tone set to ${tone} — it kicks in from my next reply. (Customer-facing text stays clean regardless.)` }
+}
+
+async function setDepot(a: any) {
+  const address = String(a.address || "").trim()
+  if (!address) throw new Error("The depot address is required.")
+  const loc = await geocode(address)
+  if (!loc) throw new Error(`Couldn't geocode "${address}" — double-check the address (street, city, zip).`)
+  await sbPatch(`app_settings?id=eq.1`, {
+    depot_name: a.name ? String(a.name).trim() : "Yard",
+    depot_address: address,
+    depot_lat: loc.lat,
+    depot_lng: loc.lng,
+    updated_at: new Date().toISOString(),
+  })
+  return { ok: true, depot: address, lat: loc.lat, lng: loc.lng, note: "Depot updated — the route map's home pin and the optimizer's start point now use this location." }
+}
+
+const TEMPLATE_COLS: Record<string, string> = {
+  checkin: "sms_checkin_template",
+  checkout: "sms_checkout_template",
+  reminder: "sms_reminder_template",
+  invoice: "sms_invoice_template",
+  company_name: "company_name",
+}
+const TEMPLATE_TOKENS: Record<string, string[]> = {
+  checkin: ["{customerName}", "{serviceType}", "{address}", "{companyName}"],
+  checkout: ["{customerName}", "{serviceType}", "{address}", "{companyName}"],
+  reminder: ["{customerName}", "{serviceType}", "{address}", "{companyName}"],
+  invoice: ["{customerName}", "{invoiceNumber}", "{total}", "{payLink}", "{companyName}"],
+}
+
+async function getMessageTemplates() {
+  const [s] = await sbGet(`app_settings?id=eq.1&select=company_name,sms_checkin_template,sms_checkout_template,sms_reminder_template,sms_invoice_template,notify_on_complete`)
+  return {
+    company_name: s?.company_name || null,
+    templates: {
+      checkin: { text: s?.sms_checkin_template || null, tokens: TEMPLATE_TOKENS.checkin, sent: "when a driver checks in (arrival text)" },
+      checkout: { text: s?.sms_checkout_template || null, tokens: TEMPLATE_TOKENS.checkout, sent: `on check-out (service complete) — currently ${s?.notify_on_complete ? "ON" : "OFF"}` },
+      reminder: { text: s?.sms_reminder_template || null, tokens: TEMPLATE_TOKENS.reminder, sent: "upcoming-service reminders" },
+      invoice: { text: s?.sms_invoice_template || null, tokens: TEMPLATE_TOKENS.invoice, sent: "when an invoice is texted (text_invoice)" },
+    },
+  }
+}
+
+async function setMessageTemplate(a: any) {
+  const which = String(a.template || "").toLowerCase().trim()
+  const col = TEMPLATE_COLS[which]
+  if (!col) throw new Error(`Template must be one of: ${Object.keys(TEMPLATE_COLS).join(", ")}.`)
+  const text = String(a.text || "").trim()
+  if (!text) throw new Error("The new text is required.")
+  if (which !== "company_name") {
+    // Reject tokens the sender won't fill (they'd go out literally).
+    const used = text.match(/\{[a-zA-Z]+\}/g) || []
+    const bad = used.filter((t) => !TEMPLATE_TOKENS[which].includes(t))
+    if (bad.length) throw new Error(`The ${which} template doesn't support ${bad.join(", ")}. Supported tokens: ${TEMPLATE_TOKENS[which].join(" ")}.`)
+  }
+  await sbPatch(`app_settings?id=eq.1`, { [col]: text, updated_at: new Date().toISOString() })
+  return { ok: true, template: which, text, note: which === "company_name" ? "Company name updated." : "Template saved — future texts use the new wording." }
+}
+
+// ---- customer portal: status + 5th-week-free invite -------------------------
+const PORTAL_ORIGIN = Deno.env.get("PORTAL_ORIGIN") || "https://valet-waste-crm.vercel.app"
+
+function randomToken(bytes = 32): string {
+  const arr = new Uint8Array(bytes)
+  crypto.getRandomValues(arr)
+  return [...arr].map((b) => b.toString(16).padStart(2, "0")).join("")
+}
+async function sha256(s: string): Promise<string> {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s))
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("")
+}
+
+async function getPortalStatus(a: any) {
+  const client = await resolveClient(a)
+  if (client.error || client.needs_clarification) return client
+  const [cust] = await sbGet(
+    `customers?id=eq.${enc(client.id)}&select=id,name,email,phone,portal_slug,autopay_consent,autopay_consented_at,run_vault_id,run_card_brand,run_card_last4`,
+  )
+  if (!cust) return { error: "Client not found." }
+  const [sessions, invoices, quotes, requests, credits] = await Promise.all([
+    sbGet(`portal_sessions?customer_id=eq.${enc(cust.id)}&select=created_at,last_seen_at&order=created_at.desc&limit=1`),
+    sbGet(`invoices?customer_id=eq.${enc(cust.id)}&status=eq.sent&select=number,total,due_date`),
+    sbGet(`quotes?customer_id=eq.${enc(cust.id)}&status=in.(sent,draft)&select=number,title,total,status&limit=10`),
+    sbGet(`portal_requests?customer_id=eq.${enc(cust.id)}&status=in.(new,seen)&select=kind,message,status,created_at&order=created_at.desc&limit=10`),
+    sbGet(`invoice_line_items?description=ilike.${enc("5th pickup week free*")}&select=amount,invoices!inner(customer_id)&invoices.customer_id=eq.${enc(cust.id)}&limit=50`),
+  ])
+  const balanceDue = round2(invoices.reduce((s: number, i: any) => s + Number(i.total || 0), 0))
+  const sess = sessions[0]
+  return {
+    client: cust.name,
+    portal_link: cust.portal_slug ? `${PORTAL_ORIGIN}/?portal=${cust.portal_slug}` : null,
+    has_logged_in: !!sess,
+    last_seen: sess?.last_seen_at || sess?.created_at || null,
+    card_on_file: cust.run_vault_id ? { brand: cust.run_card_brand, last4: cust.run_card_last4 } : null,
+    autopay: !!cust.autopay_consent,
+    autopay_since: cust.autopay_consented_at || null,
+    fifth_week_credits_applied: credits.length,
+    balance_due: balanceDue,
+    open_invoices: invoices.map((i: any) => ({ number: i.number, total: i.total, due: i.due_date })),
+    open_quotes: quotes.map((q: any) => ({ number: q.number, title: q.title, total: q.total, status: q.status })),
+    open_requests: requests.map((r: any) => ({ kind: r.kind, message: r.message, status: r.status, date: String(r.created_at).slice(0, 10) })),
+    contact: { phone: cust.phone || null, email: cust.email || null },
+  }
+}
+
+async function invitePortal(a: any) {
+  const client = await resolveClient(a)
+  if (client.error || client.needs_clarification) return client
+  const [cust] = await sbGet(`customers?id=eq.${enc(client.id)}&select=id,name,phone,email,portal_slug`)
+  if (!cust) return { error: "Client not found." }
+  if (!cust.portal_slug) return { error: `${cust.name} has no portal slug — that shouldn't happen; check the client record.` }
+
+  // One-time login link, 7-day expiry (invites live longer than the 15-min email links).
+  const codeRaw = randomToken(24)
+  await sbPost("portal_magic_links", {
+    customer_id: cust.id,
+    code_hash: await sha256(codeRaw),
+    expires_at: new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString(),
+  })
+  const link = `${PORTAL_ORIGIN}/?portal=${enc(cust.portal_slug)}&code=${codeRaw}`
+
+  const [settings] = await sbGet(`app_settings?id=eq.1&select=company_name`)
+  const company = settings?.company_name || "Valet Waste"
+  const tpl = a.custom_message
+    ? String(a.custom_message)
+    : `Hi {customerName}, it's {companyName}! Your customer portal is ready — see invoices, request service, and save a card for easy autopay. Bonus: with a card on file, any month with a 5th pickup week, the 5th week is FREE. Set up here: {link} (your link, good for 7 days)`
+  const body = externalName(
+    tpl.replace(/\{customerName\}/g, cust.name).replace(/\{companyName\}/g, company).replace(/\{link\}/g, link),
+  )
+
+  if (cust.phone) {
+    const r = await fetch(`${SUPABASE_URL}/functions/v1/sms`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "send", to: cust.phone, body, customerId: cust.id, purpose: "manual", sentBy: "Trashy Randy" }),
+    })
+    const d = await r.json().catch(() => ({}))
+    if (!d?.ok) throw new Error(`SMS failed: ${d?.error || `sms function returned ${r.status}`}`)
+    return { ok: true, client: cust.name, via: "sms", to: cust.phone, note: "Portal invite texted with the 5th-week-free pitch (login link good for 7 days)." }
+  }
+  if (cust.email) {
+    const key = Deno.env.get("SENDGRID_API_KEY")
+    if (!key) return { error: `${cust.name} has no phone and email isn't configured (SENDGRID_API_KEY missing). Add a phone number and retry.` }
+    const html = `<p>Hi ${cust.name},</p>
+<p>Your ${company} customer portal is ready — see invoices, request service, and save a card for easy autopay.</p>
+<p><b>Bonus:</b> with a card on file, any month with a 5th pickup week, the 5th week is <b>FREE</b>.</p>
+<p style="margin:14px 0"><a href="${link}" style="display:inline-block;background:#1f7a4d;color:#fff;padding:11px 22px;border-radius:8px;text-decoration:none;font-weight:600">Set up my portal</a></p>
+<p style="color:#777;font-size:12px;word-break:break-all">${link}</p>
+<p style="color:#777;font-size:13px">This link is yours and works once, within 7 days.</p>`
+    const r = await fetch("https://api.sendgrid.com/v3/mail/send", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        personalizations: [{ to: [{ email: cust.email }] }],
+        from: { email: Deno.env.get("SENDGRID_FROM") || "valetwastefl@allsynccrm.com", name: company },
+        subject: `Your ${company} portal is ready — 5th pickup week free with autopay`,
+        content: [{ type: "text/html", value: html }],
+      }),
+    })
+    if (!r.ok) throw new Error(`SendGrid ${r.status}: ${await r.text()}`)
+    return { ok: true, client: cust.name, via: "email", to: cust.email, note: "No phone on file — portal invite emailed with the 5th-week-free pitch." }
+  }
+  return { error: `${cust.name} has no phone or email on file — add one with update_client first.` }
 }
 
 async function setCompletionTexts(a: any) {
@@ -2355,6 +2932,7 @@ async function runTool(name: string, input: any): Promise<unknown> {
     case "list_needs_review": return await listNeedsReview(input)
     case "edit_property": return await editProperty(input)
     case "flag_properties": return await flagProperties(input)
+    case "pause_properties": return await pauseProperties(input)
     case "find_duplicates": return await findDuplicates(input)
     case "get_overview": return await getOverview()
     case "create_client": return await createClient(input)
@@ -2399,6 +2977,18 @@ async function runTool(name: string, input: any): Promise<unknown> {
     case "add_invoice_line": return await addInvoiceLine(input)
     case "cleanup_unconfirmed_stops": return await cleanupUnconfirmed(input)
     case "optimize_route": return await optimizeRouteTool(input)
+    case "add_property": return await addProperty(input)
+    case "untag_client": return await untagClient(input)
+    case "list_tags": return await listTagsTool()
+    case "edit_tag": return await editTag(input)
+    case "add_client_note": return await addClientNote(input)
+    case "list_client_notes": return await listClientNotes(input)
+    case "set_randy_tone": return await setRandyTone(input)
+    case "set_depot": return await setDepot(input)
+    case "get_message_templates": return await getMessageTemplates()
+    case "set_message_template": return await setMessageTemplate(input)
+    case "get_portal_status": return await getPortalStatus(input)
+    case "invite_portal": return await invitePortal(input)
     default: throw new Error(`Unknown tool: ${name}`)
   }
 }
