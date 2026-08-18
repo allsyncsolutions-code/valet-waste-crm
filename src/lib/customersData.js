@@ -268,6 +268,68 @@ export async function mergeProperties(keepId, removeIds) {
   if (error) throw error
   return data
 }
+
+// Full rows for the copies in one duplicate group (the RPC returns a trimmed set).
+export async function loadPropertiesByIds(ids) {
+  if (!ids || !ids.length) return []
+  const { data, error } = await supabase
+    .from('properties')
+    .select('id, code, name, address, service, notes, price, tech_pay, pickup_days, pickup_frequency, pickup_start_date, needs_review, paused, customer_id, created_by, created_at')
+    .in('id', ids)
+  if (error) throw error
+  return data || []
+}
+
+// How many service addresses each of these clients has (used to warn when a
+// merge would leave a client with nothing to service).
+export async function countPropertiesByCustomer(customerIds) {
+  const ids = (customerIds || []).filter(Boolean)
+  if (!ids.length) return {}
+  const { data, error } = await supabase.from('properties').select('customer_id').in('customer_id', ids)
+  if (error) throw error
+  const out = {}
+  for (const id of ids) out[id] = 0
+  for (const r of data || []) out[r.customer_id] = (out[r.customer_id] || 0) + 1
+  return out
+}
+
+// PARTIAL client update — only the fields passed. (updateCustomer writes the
+// whole record from the edit form, which would blank anything left out.)
+const CUSTOMER_COLS = {
+  name: 'name', contactName: 'contact_name', email: 'email', phone: 'phone',
+  address: 'address', status: 'status', notes: 'notes',
+  billingType: 'billing_type', notifyOnService: 'notify_on_service',
+}
+export async function patchCustomer(id, patch) {
+  const fields = {}
+  for (const [camel, col] of Object.entries(CUSTOMER_COLS)) {
+    if (patch[camel] !== undefined) fields[col] = patch[camel]
+    else if (patch[col] !== undefined) fields[col] = patch[col]
+  }
+  if (!Object.keys(fields).length) return
+  const { error } = await supabase.from('customers').update(fields).eq('id', id)
+  if (error) throw error
+  logActivity({ type: 'client_updated', summary: `Updated client (${Object.keys(fields).join(', ')})`, entityType: 'customer', entityId: id })
+}
+
+// One duplicate-address cleanup, applied in the order that survives the merge:
+//   1. merge_properties  — repoints route stops off the losing copies, deletes them
+//   2. property patch    — the fields the owner chose to carry over (incl. the final
+//                          pickup days, and needs_review:false since they just reviewed it)
+//   3. client patch      — contact details carried onto the surviving client
+//   4. optional deletes  — clients the merge left with no addresses at all
+export async function mergeDuplicateGroup({ keepId, removeIds, propertyPatch, customerId, customerPatch, deleteCustomers }) {
+  const removed = (removeIds || []).filter((id) => id && id !== keepId)
+  const res = removed.length ? await mergeProperties(keepId, removed) : null
+  if (propertyPatch && Object.keys(propertyPatch).length) await updateProperty(keepId, propertyPatch)
+  if (customerId && customerPatch && Object.keys(customerPatch).length) await patchCustomer(customerId, customerPatch)
+  for (const c of deleteCustomers || []) {
+    if (!c || !c.id || c.id === customerId) continue
+    await deleteClient(c.id, c.name)
+  }
+  logActivity({ type: 'property_merged', summary: `Merged ${removed.length + 1} copies of an address into one`, entityType: 'property', entityId: keepId })
+  return res
+}
 export async function deleteProperty(id) {
   const { data, error } = await supabase.rpc('delete_property', { p_id: id })
   if (error) throw error

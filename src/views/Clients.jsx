@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { MONO } from '../data.js'
-import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, addProperty, updateProperty, loadPropertyVisits, loadPropertyAddressIndex, countDuplicateProperties, findDuplicateProperties, mergeProperties, deleteProperty, sendPortalInvite, loadClientFieldActivity, loadClientNotes, addClientNote, deleteClientNote, loadPropertyLog } from '../lib/customersData.js'
+import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, addProperty, updateProperty, loadPropertyVisits, loadPropertyAddressIndex, countDuplicateProperties, findDuplicateProperties, mergeDuplicateGroup, loadPropertiesByIds, countPropertiesByCustomer, deleteProperty, sendPortalInvite, loadClientFieldActivity, loadClientNotes, addClientNote, deleteClientNote, loadPropertyLog } from '../lib/customersData.js'
 import { geocodeAll } from '../lib/importData.js'
 import { listTags, findOrCreateTag, subscribeTags } from '../lib/tagsData.js'
 import { paymentsStatus, invoicePaymentUrl } from '../lib/paymentsData.js'
@@ -86,6 +86,7 @@ export default function Clients({ app }) {
   const [dupOpen, setDupOpen] = useState(false)
   const [dupGroups, setDupGroups] = useState(null)
   const [dupBusy, setDupBusy] = useState(false)
+  const [mergeGrp, setMergeGrp] = useState(null) // duplicate group open in the Edit & Merge screen
   const [addrIdx, setAddrIdx] = useState({}) // customer_id → its property addresses (for search)
   const [inviteBusy, setInviteBusy] = useState(false)
   const [inviteMsg, setInviteMsg] = useState('')
@@ -209,23 +210,12 @@ export default function Clients({ app }) {
     } catch (e) { setErr(e.message || String(e)) }
     if (selId) loadProperties(selId).then(setProps).catch(() => {})
   }
-  async function mergeGroup(keepProp, group) {
-    if (dupBusy) return
-    const removeIds = group.properties.filter((p) => p.id !== keepProp.id).map((p) => p.id)
-    if (!removeIds.length) return
-    if (!window.confirm(`Merge ${removeIds.length + 1} copies of "${keepProp.address}" into one?\n\nThe kept copy gets every pickup day from all copies and is flagged "Needs review". The other ${removeIds.length} ${removeIds.length === 1 ? 'copy is' : 'copies are'} deleted.`)) return
-    setDupBusy(true)
-    try { await mergeProperties(keepProp.id, removeIds); await refreshDuplicates() }
-    catch (e) { setErr(e.message || String(e)) }
-    finally { setDupBusy(false) }
-  }
-  async function removeDup(p) {
-    if (dupBusy) return
-    if (!window.confirm(`Delete this copy?\n\n${p.customer_name || '(no client)'} — ${p.address}`)) return
-    setDupBusy(true)
-    try { await deleteProperty(p.id); await refreshDuplicates() }
-    catch (e) { setErr(e.message || String(e)) }
-    finally { setDupBusy(false) }
+  // The merge screen does the whole job (pick the survivor, choose what carries
+  // over, preview) and calls back here when it's applied.
+  async function afterMerge() {
+    setMergeGrp(null)
+    await refresh()
+    await refreshDuplicates()
   }
 
   // Only clients on the active business line (legacy rows count as waste).
@@ -575,6 +565,9 @@ export default function Clients({ app }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 13.5, color: '#9a3412', fontWeight: 600, flex: 1, minWidth: 0 }}>
             ⚠ {dupCount} duplicate {dupCount === 1 ? 'address' : 'addresses'} detected (same address under more than one client).
+            <span style={{ display: 'block', fontWeight: 400, fontSize: 12, color: '#a87154', marginTop: 2 }}>
+              Nothing is broken — Randy keeps working in the field and flags these for you. Clean them up here whenever you like.
+            </span>
           </span>
           <button onClick={toggleDuplicates} style={{ flex: 'none', background: '#fff', color: '#9a3412', border: '1px solid #e3b48f', borderRadius: 8, padding: '7px 13px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>
             {dupOpen ? 'Hide' : 'Review duplicates'}
@@ -590,19 +583,17 @@ export default function Clients({ app }) {
               <div style={{ maxHeight: 340, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {dupGroups.map((g) => (
                   <div key={g.normalized} style={{ border: '1px solid #f0d9c8', borderRadius: 9, padding: '8px 11px', background: '#fff' }}>
-                    <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 5 }}>{(g.properties[0] && g.properties[0].address) || g.normalized} <span style={{ color: '#9a3412' }}>· {g.count}×</span></div>
+                    {/* One address, one button. Everything else happens on the merge screen. */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 5 }}>
+                      <div style={{ fontSize: 12.5, fontWeight: 700, flex: 1, minWidth: 0 }}>{(g.properties[0] && g.properties[0].address) || g.normalized} <span style={{ color: '#9a3412' }}>· {g.count}×</span></div>
+                      <button onClick={() => setMergeGrp(g)} disabled={dupBusy} title="Review both copies, pick which one stays, and choose what carries over" style={{ flex: 'none', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 8, padding: '6px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' }}>Edit &amp; Merge</button>
+                    </div>
                     {g.properties.map((p) => (
-                      <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', fontSize: 12, padding: '5px 0', borderTop: '1px solid #f7f0e8' }}>
-                        <div style={{ minWidth: 0 }}>
-                          <div onClick={() => p.customer_id && setSelId(p.customer_id)} title="Open this client" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#1f7a4d', cursor: p.customer_id ? 'pointer' : 'default', fontWeight: 600 }}>
-                            {p.customer_name || '(no client)'} <span style={{ color: '#7c8a82', fontWeight: 400 }}>{p.price != null ? `· $${Number(p.price).toFixed(2)}` : ''}{p.needs_review ? ' ⚠' : ''}</span>
-                          </div>
-                          <div style={{ color: '#9aa69e', fontSize: 11 }}>{dupMeta(p)}</div>
+                      <div key={p.id} style={{ fontSize: 12, padding: '5px 0', borderTop: '1px solid #f7f0e8' }}>
+                        <div onClick={() => p.customer_id && setSelId(p.customer_id)} title="Open this client" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#1f7a4d', cursor: p.customer_id ? 'pointer' : 'default', fontWeight: 600 }}>
+                          {p.customer_name || '(no client)'} <span style={{ color: '#7c8a82', fontWeight: 400 }}>{p.price != null ? `· $${Number(p.price).toFixed(2)}` : ''}{p.needs_review ? ' ⚠' : ''}</span>
                         </div>
-                        <span style={{ flex: 'none', display: 'flex', gap: 8 }}>
-                          <button onClick={() => mergeGroup(p, g)} disabled={dupBusy} title="Keep this copy, merge the others into it (combines pickup days, flags for review)" style={dupActBtn('#1f7a4d')}>Keep &amp; merge</button>
-                          <button onClick={() => removeDup(p)} disabled={dupBusy} title="Delete just this copy" style={dupActBtn('#c0492f')}>Delete</button>
-                        </span>
+                        <div style={{ color: '#9aa69e', fontSize: 11 }}>{dupMeta(p)}</div>
                       </div>
                     ))}
                   </div>
@@ -612,6 +603,15 @@ export default function Clients({ app }) {
           </div>
         )}
       </div>
+    )}
+    {mergeGrp && (
+      <MergeDuplicates
+        group={mergeGrp}
+        customers={customers}
+        isMobile={isMobile}
+        onClose={() => setMergeGrp(null)}
+        onDone={afterMerge}
+      />
     )}
     <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1.25fr', gap: 18 }}>
       {/* list */}
@@ -1149,6 +1149,345 @@ function Field({ label, children }) {
     </label>
   )
 }
+/* ─────────────────────────────────────────────────────────────────────────────
+   Edit & Merge — one duplicate address, start to finish.
+   Column 1: which copy stays.  Column 2: what to carry over from the other(s).
+   Column 3: live preview of the record you'll end up with.
+   ───────────────────────────────────────────────────────────────────────────── */
+const isEmptyVal = (v) => v === null || v === undefined || v === '' || (Array.isArray(v) && !v.length)
+const MERGE_PROP_FIELDS = [
+  { key: 'address', label: 'Address' },
+  { key: 'service', label: 'Service' },
+  { key: 'price', label: 'Price', fmt: (v) => (isEmptyVal(v) ? '—' : `$${Number(v).toFixed(2)}`) },
+  { key: 'tech_pay', label: 'Tech pay', fmt: (v) => (isEmptyVal(v) ? '—' : `$${Number(v).toFixed(2)}`) },
+  { key: 'pickup_frequency', label: 'Frequency', fmt: (v) => (isEmptyVal(v) ? '—' : freqLabel(v)) },
+  { key: 'code', label: 'Import code' },
+  { key: 'notes', label: 'Address notes', long: true },
+]
+const MERGE_CLIENT_FIELDS = [
+  { key: 'contactName', label: 'Contact name' },
+  { key: 'phone', label: 'Phone' },
+  { key: 'email', label: 'Email' },
+  { key: 'address', label: 'Billing address' },
+  { key: 'notes', label: 'Client notes', long: true },
+]
+const BOTH = '__both'
+const joinBoth = (vals) => [...new Set(vals.filter((v) => !isEmptyVal(v)).map(String))].join('\n')
+
+function MergeDuplicates({ group, customers, isMobile, onClose, onDone }) {
+  const [rows, setRows] = useState([])
+  const [counts, setCounts] = useState({})
+  const [keepId, setKeepId] = useState(null)
+  const [sel, setSel] = useState({})
+  const [days, setDays] = useState([])
+  const [delIds, setDelIds] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState(null)
+
+  const clientOf = (p) => (p && p.customer_id ? customers.find((c) => c.id === p.customer_id) : null) || null
+  const clientName = (p) => (clientOf(p) || {}).name || '(no client)'
+
+  useEffect(() => {
+    let alive = true
+    setLoading(true)
+    const ids = (group.properties || []).map((p) => p.id)
+    const custIds = [...new Set((group.properties || []).map((p) => p.customer_id).filter(Boolean))]
+    Promise.all([loadPropertiesByIds(ids), countPropertiesByCustomer(custIds)])
+      .then(([full, cnt]) => {
+        if (!alive) return
+        const byId = {}
+        for (const r of full) byId[r.id] = r
+        const ordered = ids.map((id) => byId[id]).filter(Boolean)
+        setRows(ordered)
+        setCounts(cnt)
+        // Default survivor = the most complete record, oldest wins a tie.
+        const score = (p) => (p.customer_id ? 4 : 0) + ((p.pickup_days || []).length ? 2 : 0) + (p.price != null ? 2 : 0) +
+          (p.service ? 1 : 0) + (p.notes ? 1 : 0) + (p.code ? 1 : 0)
+        const best = [...ordered].sort((a, b) => score(b) - score(a) || String(a.created_at || '').localeCompare(String(b.created_at || '')))[0]
+        setKeepId(best ? best.id : null)
+      })
+      .catch((e) => alive && setErr(e.message || String(e)))
+      .finally(() => alive && setLoading(false))
+    return () => { alive = false }
+  }, [group])
+
+  // Picking a different survivor resets every choice to "keep its own value,
+  // pull anything it's missing from the other copy".
+  useEffect(() => {
+    if (!rows.length || !keepId) return
+    const keep = rows.find((r) => r.id === keepId)
+    if (!keep) return
+    const others = rows.filter((r) => r.id !== keepId)
+    const next = {}
+    for (const f of MERGE_PROP_FIELDS) {
+      next[`p:${f.key}`] = keepId
+      if (isEmptyVal(keep[f.key])) {
+        const donor = others.find((o) => !isEmptyVal(o[f.key]))
+        if (donor) next[`p:${f.key}`] = donor.id
+      }
+    }
+    const kc = clientOf(keep)
+    for (const f of MERGE_CLIENT_FIELDS) {
+      next[`c:${f.key}`] = keepId
+      if (isEmptyVal(kc && kc[f.key])) {
+        const donor = others.find((o) => !isEmptyVal((clientOf(o) || {})[f.key]))
+        if (donor) next[`c:${f.key}`] = donor.id
+      }
+    }
+    setSel(next)
+    setDays(orderDays([...new Set(rows.flatMap((r) => r.pickup_days || []))]))
+    setDelIds([])
+  }, [keepId, rows])
+
+  const keep = rows.find((r) => r.id === keepId) || null
+  const others = rows.filter((r) => r.id !== keepId)
+  const propOf = (id, key) => (rows.find((r) => r.id === id) || {})[key]
+  const custOf = (id, key) => (clientOf(rows.find((r) => r.id === id)) || {})[key]
+  const resolve = (kind, key) => {
+    const pick = sel[`${kind}:${key}`]
+    const read = kind === 'p' ? propOf : custOf
+    if (pick === BOTH) return joinBoth(rows.map((r) => read(r.id, key)))
+    return read(pick || keepId, key)
+  }
+
+  // Only surface a field when the copies actually disagree about it.
+  const differing = (kind, fields) => fields.filter((f) => {
+    const read = kind === 'p' ? propOf : custOf
+    const vals = rows.map((r) => (isEmptyVal(read(r.id, f.key)) ? '' : String(read(r.id, f.key))))
+    return new Set(vals).size > 1
+  })
+  const propRows = keep ? differing('p', MERGE_PROP_FIELDS) : []
+  const clientRows = keep ? differing('c', MERGE_CLIENT_FIELDS) : []
+
+  // Clients that would be left with nothing to service once the merge lands.
+  const emptied = !keep ? [] : [...new Set(others.map((o) => o.customer_id).filter(Boolean))]
+    .filter((cid) => cid !== keep.customer_id)
+    .map((cid) => ({
+      id: cid,
+      name: (customers.find((c) => c.id === cid) || {}).name || '(no client)',
+      left: (counts[cid] || 0) - others.filter((o) => o.customer_id === cid).length,
+    }))
+    .filter((c) => c.left <= 0)
+
+  async function apply() {
+    if (!keep || busy) return
+    const removeIds = others.map((o) => o.id)
+    const dels = emptied.filter((c) => delIds.includes(c.id))
+    const msg = `Merge ${rows.length} copies of "${resolve('p', 'address') || keep.address}" into one record under ${clientName(keep)}?` +
+      (dels.length ? `\n\nThis also DELETES ${dels.map((d) => d.name).join(', ')} — ${dels.length === 1 ? 'that client is' : 'those clients are'} left with no addresses.` : '')
+    if (!window.confirm(msg)) return
+    setBusy(true); setErr(null)
+    try {
+      const propertyPatch = { needs_review: false, pickup_days: days }
+      for (const f of MERGE_PROP_FIELDS) {
+        const v = resolve('p', f.key)
+        const cur = keep[f.key]
+        if (isEmptyVal(v) && isEmptyVal(cur)) continue
+        if (String(v ?? '') === String(cur ?? '')) continue
+        propertyPatch[f.key] = isEmptyVal(v) ? null : v
+      }
+      const kc = clientOf(keep) || {}
+      const customerPatch = {}
+      for (const f of MERGE_CLIENT_FIELDS) {
+        const v = resolve('c', f.key)
+        if (isEmptyVal(v) && isEmptyVal(kc[f.key])) continue
+        if (String(v ?? '') === String(kc[f.key] ?? '')) continue
+        customerPatch[f.key] = isEmptyVal(v) ? null : v
+      }
+      await mergeDuplicateGroup({
+        keepId: keep.id,
+        removeIds,
+        propertyPatch,
+        customerId: keep.customer_id,
+        customerPatch,
+        deleteCustomers: dels,
+      })
+      onDone()
+    } catch (e) {
+      setErr(e.message || String(e))
+      setBusy(false)
+    }
+  }
+
+  const col = { background: '#fff', border: '1px solid #e6eae6', borderRadius: 12, padding: 13, minWidth: 0 }
+  const colHead = { fontFamily: MONO, fontSize: 10, letterSpacing: '.1em', color: '#9aa69e', marginBottom: 10 }
+  const chip = (on) => ({
+    border: `1px solid ${on ? '#1f7a4d' : '#dde2dd'}`, background: on ? '#eaf5ef' : '#fff', color: on ? '#1f7a4d' : '#55605a',
+    borderRadius: 7, padding: '4px 9px', fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
+  })
+
+  return (
+    <div onClick={(e) => { if (e.target === e.currentTarget && !busy) onClose() }}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(24,32,28,.45)', zIndex: 90, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: isMobile ? 0 : '28px 18px', overflowY: 'auto' }}>
+      <div style={{ background: '#f7f9f7', borderRadius: isMobile ? 0 : 16, width: '100%', maxWidth: 1180, minHeight: isMobile ? '100%' : 0, boxShadow: '0 18px 60px rgba(0,0,0,.28)' }}>
+        {/* header */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '14px 18px', borderBottom: '1px solid #e6eae6', background: '#fff', borderRadius: isMobile ? 0 : '16px 16px 0 0' }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 16, fontWeight: 700 }}>Edit &amp; Merge duplicate address</div>
+            <div style={{ fontSize: 12.5, color: '#7c8a82', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {(group.properties[0] && group.properties[0].address) || group.normalized} · {group.count} copies
+            </div>
+          </div>
+          <button onClick={onClose} disabled={busy} style={{ flex: 'none', background: '#fff', border: '1px solid #dde2dd', borderRadius: 8, padding: '7px 13px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
+          <button onClick={apply} disabled={busy || loading || !keep} style={{ flex: 'none', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 15px', fontSize: 13, fontWeight: 600, cursor: busy ? 'default' : 'pointer', opacity: busy || loading || !keep ? .6 : 1 }}>
+            {busy ? 'Merging…' : 'Edit & Merge'}
+          </button>
+        </div>
+
+        {err && <div style={{ margin: '12px 18px 0', background: '#fdecea', border: '1px solid #f3c6c0', color: '#a3372a', borderRadius: 9, padding: '9px 12px', fontSize: 12.5 }}>{err}</div>}
+
+        {loading ? (
+          <div style={{ padding: 40, textAlign: 'center', color: '#9aa69e', fontSize: 13 }}>Loading both copies…</div>
+        ) : (
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1.15fr 1fr', gap: 14, padding: 18 }}>
+
+            {/* 1 — which copy stays */}
+            <div style={col}>
+              <div style={colHead}>1 · WHICH ONE STAYS</div>
+              {rows.map((p) => {
+                const on = p.id === keepId
+                return (
+                  <label key={p.id} onClick={() => !busy && setKeepId(p.id)}
+                    style={{ display: 'block', border: `1px solid ${on ? '#1f7a4d' : '#e6eae6'}`, background: on ? '#f2f9f5' : '#fff', borderRadius: 10, padding: '10px 12px', marginBottom: 9, cursor: 'pointer' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <input type="radio" readOnly checked={on} style={{ accentColor: '#1f7a4d' }} />
+                      <div style={{ fontSize: 13, fontWeight: 700, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{clientName(p)}</div>
+                      {on && <span style={{ flex: 'none', fontSize: 10, fontWeight: 700, color: '#1f7a4d', letterSpacing: '.06em' }}>KEEPING</span>}
+                    </div>
+                    <div style={{ fontSize: 12, color: '#55605a', marginTop: 5 }}>{p.address || p.name}</div>
+                    <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 3 }}>
+                      {p.price != null ? `$${Number(p.price).toFixed(2)} · ` : ''}{daysLabel(p.pickup_days) || 'no pickup day'}{p.service ? ` · ${p.service}` : ''}
+                    </div>
+                    <div style={{ fontSize: 11, color: '#9aa69e', marginTop: 2 }}>{dupMeta(p)}{p.created_by ? ` · by ${p.created_by}` : ''}</div>
+                  </label>
+                )
+              })}
+              <div style={{ fontSize: 11.5, color: '#9aa69e', lineHeight: 1.45 }}>
+                The other {others.length === 1 ? 'copy is' : 'copies are'} deleted. Any scheduled stops on {others.length === 1 ? 'it' : 'them'} move onto the copy you keep, so nothing falls off a route.
+              </div>
+            </div>
+
+            {/* 2 — what to carry over */}
+            <div style={col}>
+              <div style={colHead}>2 · BRING OVER</div>
+
+              <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>Pickup days</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 4 }}>
+                {DAYS.map((d) => {
+                  const on = days.includes(d)
+                  const from = rows.filter((r) => (r.pickup_days || []).includes(d)).map(clientName)
+                  return (
+                    <button key={d} type="button" disabled={busy}
+                      onClick={() => setDays((cur) => orderDays(cur.includes(d) ? cur.filter((x) => x !== d) : [...cur, d]))}
+                      title={from.length ? `On file from: ${from.join(', ')}` : 'Not on either copy — tick to add it'}
+                      style={chip(on)}>{DAY_ABBR[d]}</button>
+                  )
+                })}
+              </div>
+              <div style={{ fontSize: 11, color: '#9aa69e', marginBottom: 14 }}>Both copies' days are ticked by default — untick anything that shouldn't be serviced.</div>
+
+              {!propRows.length && !clientRows.length ? (
+                <div style={{ fontSize: 12.5, color: '#9aa69e' }}>The copies match on everything else — nothing to choose.</div>
+              ) : null}
+
+              {propRows.length > 0 && <Divider>this address</Divider>}
+              {propRows.map((f) => (
+                <FieldPick key={`p-${f.key}`} field={f} rows={rows} keepId={keepId} value={sel[`p:${f.key}`]}
+                  read={propOf} label={clientName} busy={busy}
+                  onPick={(v) => setSel((s) => ({ ...s, [`p:${f.key}`]: v }))} />
+              ))}
+
+              {clientRows.length > 0 && <Divider>client record ({clientName(keep)})</Divider>}
+              {clientRows.map((f) => (
+                <FieldPick key={`c-${f.key}`} field={f} rows={rows} keepId={keepId} value={sel[`c:${f.key}`]}
+                  read={custOf} label={clientName} busy={busy}
+                  onPick={(v) => setSel((s) => ({ ...s, [`c:${f.key}`]: v }))} />
+              ))}
+            </div>
+
+            {/* 3 — preview */}
+            <div style={{ ...col, background: '#fbfdfb', border: '1px solid #cfe3d6' }}>
+              <div style={colHead}>3 · YOU'LL END UP WITH</div>
+              {!keep ? null : (
+                <>
+                  <div style={{ fontSize: 15, fontWeight: 700 }}>{clientName(keep)}</div>
+                  <div style={{ fontSize: 12.5, color: '#55605a', marginTop: 2 }}>{resolve('p', 'address') || '—'}</div>
+                  <div style={{ height: 10 }} />
+                  {MERGE_CLIENT_FIELDS.map((f) => (
+                    <PreviewRow key={`pc-${f.key}`} label={f.label} value={resolve('c', f.key)} fmt={f.fmt} />
+                  ))}
+                  <div style={{ borderTop: '1px solid #e6eae6', margin: '10px 0' }} />
+                  <PreviewRow label="Pickup days" value={daysLabel(days)} />
+                  {MERGE_PROP_FIELDS.filter((f) => f.key !== 'address').map((f) => (
+                    <PreviewRow key={`pp-${f.key}`} label={f.label} value={resolve('p', f.key)} fmt={f.fmt} />
+                  ))}
+                  <PreviewRow label="Needs review" value="cleared" />
+                  <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 10, lineHeight: 1.45 }}>
+                    {others.length} {others.length === 1 ? 'copy' : 'copies'} deleted · stops moved onto this address · the duplicate warning clears.
+                  </div>
+                  {emptied.map((c) => (
+                    <div key={c.id} style={{ marginTop: 10, background: '#fdf7f2', border: '1px solid #f0d9c8', borderRadius: 9, padding: '9px 11px' }}>
+                      <div style={{ fontSize: 12, color: '#9a3412', fontWeight: 600 }}>{c.name} will have 0 addresses left.</div>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 7, marginTop: 6, fontSize: 12, color: '#55605a', cursor: 'pointer' }}>
+                        <input type="checkbox" disabled={busy} checked={delIds.includes(c.id)} style={{ accentColor: '#c0492f' }}
+                          onChange={(e) => setDelIds((cur) => (e.target.checked ? [...cur, c.id] : cur.filter((x) => x !== c.id)))} />
+                        Also delete this client
+                      </label>
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// One "which value wins" row: a button per copy, plus Both for free-text fields.
+function FieldPick({ field, rows, keepId, value, read, label, busy, onPick }) {
+  const fmt = (v) => (isEmptyVal(v) ? '—' : field.fmt ? field.fmt(v) : String(v))
+  const filled = rows.filter((r) => !isEmptyVal(read(r.id, field.key)))
+  const showBoth = field.long && new Set(filled.map((r) => String(read(r.id, field.key)))).size > 1
+  return (
+    <div style={{ marginBottom: 11 }}>
+      <div style={{ fontSize: 11.5, fontWeight: 700, color: '#55605a', marginBottom: 4 }}>{field.label}</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+        {rows.map((r) => {
+          const on = (value || keepId) === r.id
+          return (
+            <button key={r.id} type="button" disabled={busy} onClick={() => onPick(r.id)}
+              style={{ textAlign: 'left', border: `1px solid ${on ? '#1f7a4d' : '#e6eae6'}`, background: on ? '#f2f9f5' : '#fff', borderRadius: 8, padding: '6px 9px', cursor: 'pointer' }}>
+              <div style={{ fontSize: 12.5, color: '#22302a', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{fmt(read(r.id, field.key))}</div>
+              <div style={{ fontSize: 10.5, color: '#9aa69e', marginTop: 1 }}>
+                from {label(r)}{r.id === keepId ? ' · keeping' : ''}
+              </div>
+            </button>
+          )
+        })}
+        {showBoth && (
+          <button type="button" disabled={busy} onClick={() => onPick(BOTH)}
+            style={{ textAlign: 'left', border: `1px solid ${value === BOTH ? '#1f7a4d' : '#e6eae6'}`, background: value === BOTH ? '#f2f9f5' : '#fff', borderRadius: 8, padding: '6px 9px', cursor: 'pointer', fontSize: 12, color: '#55605a' }}>
+            Keep both (combined)
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function PreviewRow({ label, value, fmt }) {
+  const shown = isEmptyVal(value) ? '—' : fmt ? fmt(value) : String(value)
+  return (
+    <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '3px 0' }}>
+      <div style={{ flex: 'none', width: 96, fontSize: 11.5, color: '#9aa69e' }}>{label}</div>
+      <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, color: shown === '—' ? '#c2cbc5' : '#22302a', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{shown}</div>
+    </div>
+  )
+}
+
 function Divider({ children }) {
   return <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.1em', color: '#9aa69e', margin: '6px 0 12px', paddingTop: 12, borderTop: '1px solid #eef0ed' }}>{String(children).toUpperCase()}</div>
 }

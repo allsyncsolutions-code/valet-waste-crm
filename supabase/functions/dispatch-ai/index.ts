@@ -44,7 +44,7 @@ Guidelines:
 - When the user gives you MORE THAN ONE property/address for the same client (a pasted list, a vendor sheet, etc.), use bulk_add_properties ONCE with all of them — do not call add_stop_to_route in a loop. Pass every row in the properties array and report how many were added.
 - Staff flag uncertain imported properties as "Needs review" (e.g. unclear pricing or pickup frequency). Use list_needs_review to report what's flagged ("what needs review?"). Use edit_property to fix ONE property the owner is reviewing — set price/service/pickup_days/notes — and pass mark_reviewed:true to clear the flag once it's right. Find the property by address (add client_name if the address is ambiguous); if edit_property returns needs_clarification, ask the user which match they mean.
 - Use flag_properties to flag or unflag MANY properties at once by client, tag, or address (e.g. "flag everything for Staylah for review" → by_customer:"Staylah"; "clear review on all Palm Coast properties" → address_contains:"Palm Coast", needs_review:false). It defaults to flagging; pass needs_review:false to clear.
-- Use find_duplicates when the user asks about duplicate stops/addresses/properties. It returns groups of the same address used under more than one client; summarize the count and call out a few examples (address + the clients involved). To then flag those for cleanup, use flag_properties.
+- DUPLICATE ADDRESSES ARE NORMAL AND NOT A BLOCKER. When the CRM was set up, the owner and the office assistant both entered the same customers, so plenty of addresses sit on file twice under different clients. Never treat that as an error, never stall a task over it, and never make the user pick a client just to get something done — do the work on the copy you're already on and mention the duplicate once, in passing. Use find_duplicates when they ask about them: it returns groups of the same address used under more than one client; summarize the count and call out a few examples (address + the clients involved). You canNOT merge duplicates yourself — the owner does it on the Clients tab, where the orange duplicate banner has one "Edit & Merge" button per address that opens a screen to pick which copy stays and tick what to carry over from the other. Point them there for end-of-day cleanup. flag_properties can still flag a group for review.
 - Use list_skipped_stops to report addresses that were NOT checked in (skipped) on a day — e.g. "what got skipped yesterday?" or "which stops weren't picked up on June 24?". It defaults to today; pass a date or a route_code to narrow it.
 - Use add_property_photo to log a dated photo/missed-pickup entry onto an ADDRESS's file (e.g. "log that 123 Main wasn't picked up June 24, bin not out"). You can't take a picture yourself, so unless the user gives you an image_url this logs a dated note the owner attaches the real photo to in Clients › property › Photos. Always set the date to the day it applies to. Resolve the property by address (add client_name if ambiguous); if it returns needs_clarification, ask which match.
 - Use text_invoice to text a client their invoice with a Stripe payment link (by invoice number, or client name for their newest unpaid). Pass preview_to with a staff member's name to send them a preview first — the invoice isn't marked sent until you call it for real. You still cannot charge cards directly.
@@ -85,11 +85,12 @@ const DEFAULT_TONE = "spicy"
 const FIELD_OPS = `FIELD MODE — "Check My Location" (route/data cleanup):
 Drivers tap Check My Location at each stop and you receive their GPS. They are DRIVING — ask ONE short question per turn. The flow:
 1) find_nearby_properties with the GPS. Confirm the closest match by FULL address, always saying the zip when two candidates are similar ("1711 Main St in 32277 — is that where you are?"). Never assume between lookalike streets in different zips.
+   DUPLICATES: the SAME address on file twice (under two different clients) is expected and harmless — find_nearby_properties already collapses those into one match for you. NEVER ask the driver which client it belongs to, never list both, never stop the flow. Work the copy you were handed, and once — at the end of that stop's reply — say something like "heads up, that address is on file twice; review it in Clients at the end of the day." Then move on. Lookalike-but-different addresses (different street or zip) are a real question; identical addresses are not.
 2) If they say no and give a different address, or nothing on file is close: ask who the client is. find_clients to match; create_client if new (name alone is fine for now).
 3) Ask: one-time stop, or every <today's weekday>? If recurring, edit_property to add that weekday to pickup_days.
 4) Ask the price. Save it on the property (edit_property price) AND add_invoice_line to that client's current-month draft (description like "Valet trash — <address> — <date>"). Every confirmed visit gets a line; the draft goes out at month end.
 5) Ensure it's on today's route (add_stop_to_route if it isn't), then set_stop_status check_in — confirming the location counts as arriving.
-End of day: run cleanup_unconfirmed_stops WITHOUT confirm, read the list back, and only call again with confirm=true after an explicit yes. Skipped stops are left alone.
+End of day: run cleanup_unconfirmed_stops WITHOUT confirm, read the list back, and only call again with confirm=true after an explicit yes. Skipped stops are left alone. If any duplicate addresses came up during the day, close with a one-line reminder to run find_duplicates / clean them up on the Clients tab with Edit & Merge.
 Also in your toolbox now: move_stop (up/down/position), remove_stop, set_stop_status (on_my_way / check_in / check_out / reset), optimize_route (nearest-neighbor reorder that keeps done stops in place), add_invoice_line. For last-minute add-ons, use find_nearby_properties or list_route_stops to recommend WHERE the new stop fits best, then move_stop it into position.`
 
 function buildSystem(tone?: string | null): string {
@@ -714,7 +715,7 @@ const tools = [
   {
     name: "find_nearby_properties",
     description:
-      "Rank EVERY address on file (any client, subscription or not, paused or not) by straight-line distance from a GPS point. Used by the drivers' Check My Location button. Returns the closest matches with client, price, pickup days, distance in feet/miles, and whether each is already on today's route (with stop id + check-in state). Confirm the match with the driver — say the zip out loud when two candidates are similar.",
+      "Rank EVERY address on file (any client, subscription or not, paused or not) by straight-line distance from a GPS point. Used by the drivers' Check My Location button. Returns the closest matches with client, price, pickup days, distance in feet/miles, and whether each is already on today's route (with stop id + check-in state). The SAME address entered under more than one client is collapsed into ONE match (the best copy — already on today's route, then unpaused, then scheduled today, then oldest), with the extras listed under other_copies for information only: never ask the driver to choose between them, just work the primary copy. Confirm the match with the driver — say the zip out loud when two genuinely different candidates are similar.",
     input_schema: {
       type: "object",
       properties: {
@@ -2711,16 +2712,46 @@ async function sbDel(path: string) {
   if (!r.ok) throw new Error(`DELETE ${path}: ${r.status} ${await r.text()}`)
 }
 
+// JS port of the DB's norm_address(): a case/punctuation/suffix-insensitive key
+// so the same address entered under two clients collapses to one match.
+const ADDR_ABBR: Record<string, string> = {
+  street: "st", saint: "st", avenue: "ave", drive: "dr", road: "rd", boulevard: "blvd",
+  lane: "ln", court: "ct", circle: "cir", highway: "hwy", place: "pl", terrace: "ter",
+  parkway: "pkwy", north: "n", south: "s", east: "e", west: "w", apartment: "apt",
+}
+function normAddress(a: string | null | undefined): string {
+  return String(a ?? "")
+    .toLowerCase()
+    .replace(/\b(united states of america|united states|usa|us)\b/g, " ")
+    .replace(/[.,#]/g, " ")
+    .replace(/[a-z]+/g, (w) => ADDR_ABBR[w] ?? w)
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
 async function findNearbyProperties(a: any) {
   const lat = Number(a.lat), lng = Number(a.lng)
   if (!isFinite(lat) || !isFinite(lng)) throw new Error("lat and lng are required.")
   const limit = Math.min(Number(a.limit ?? 5) || 5, 10)
   const date = a.date ? String(a.date) : today()
-  const props = await sbGet(`properties?select=id,name,address,service,price,paused,pickup_days,lat,lng,customer_id,customers(name)&lat=not.is.null&lng=not.is.null`)
+  const props = await sbGet(`properties?select=id,name,address,service,price,paused,pickup_days,lat,lng,customer_id,created_at,customers(name)&lat=not.is.null&lng=not.is.null`)
   const ranked = (props as any[])
     .map((p: any) => ({ ...p, miles: milesBetween(lat, lng, p.lat, p.lng) }))
     .sort((x: any, y: any) => x.miles - y.miles)
-    .slice(0, limit)
+
+  // Group by normalized address FIRST: the same address under two clients is a
+  // known data-entry duplicate, not two candidate stops. The driver never picks.
+  const groups: { key: string; copies: any[] }[] = []
+  const byKey: Record<string, { key: string; copies: any[] }> = {}
+  for (const p of ranked) {
+    const key = normAddress(p.address || p.name) || `id:${p.id}`
+    if (byKey[key]) { byKey[key].copies.push(p); continue }
+    const g = { key, copies: [p] }
+    byKey[key] = g
+    groups.push(g)
+  }
+  const chosen = groups.slice(0, limit)
+
   const routes = await sbGet(`routes?service_date=eq.${enc(date)}&select=id,code`)
   let stopsToday: any[] = []
   if (routes.length) {
@@ -2728,28 +2759,70 @@ async function findNearbyProperties(a: any) {
   }
   const byProp: Record<string, any> = {}
   for (const s of stopsToday) byProp[s.property_id] = s
+  const onRoute = (p: any) =>
+    byProp[p.id]
+      ? {
+          stop_id: byProp[p.id].id,
+          route_code: routes.find((r: any) => r.id === byProp[p.id].route_id)?.code ?? null,
+          status: byProp[p.id].status,
+          checked_in: !!byProp[p.id].check_in,
+        }
+      : null
+
+  // Which copy of a duplicated address to work: the one already on today's route
+  // (checked in beats pending), then unpaused, then scheduled for today, then priced,
+  // then the oldest record. Deterministic so repeat lookups land on the same copy.
+  const weekday = DAYS[(new Date(`${date}T12:00:00Z`).getUTCDay() + 6) % 7]
+  const score = (p: any) => {
+    const st = byProp[p.id]
+    return (st ? (st.check_in ? 16 : 8) : 0) +
+      (p.paused ? 0 : 4) +
+      ((p.pickup_days || []).includes(weekday) ? 2 : 0) +
+      (p.price != null ? 1 : 0)
+  }
+  const shape = (p: any) => ({
+    property_id: p.id,
+    address: p.address || p.name,
+    client: p.customers?.name ?? null,
+    customer_id: p.customer_id ?? null,
+    service: p.service ?? null,
+    price: p.price ?? null,
+    paused: !!p.paused,
+    pickup_days: p.pickup_days ?? [],
+    distance_feet: Math.round(p.miles * 5280),
+    distance_miles: Math.round(p.miles * 100) / 100,
+    on_route_today: onRoute(p),
+  })
+
+  let dupes = 0
+  const matches = chosen.map((g) => {
+    const sorted = [...g.copies].sort(
+      (x, y) => score(y) - score(x) || String(x.created_at ?? "").localeCompare(String(y.created_at ?? "")),
+    )
+    const [primary, ...others] = sorted
+    if (others.length) dupes++
+    return {
+      ...shape(primary),
+      ...(others.length
+        ? {
+            same_address_on_file: sorted.length,
+            other_copies: others.map(shape),
+            duplicate_note:
+              "Known data-entry duplicate — the same address under more than one client. Use this copy, do NOT ask the driver which client, and mention once that it needs an end-of-day Edit & Merge on the Clients tab.",
+          }
+        : {}),
+    }
+  })
+
   return {
     date,
-    matches: ranked.map((p: any) => ({
-      property_id: p.id,
-      address: p.address || p.name,
-      client: p.customers?.name ?? null,
-      customer_id: p.customer_id ?? null,
-      service: p.service ?? null,
-      price: p.price ?? null,
-      paused: !!p.paused,
-      pickup_days: p.pickup_days ?? [],
-      distance_feet: Math.round(p.miles * 5280),
-      distance_miles: Math.round(p.miles * 100) / 100,
-      on_route_today: byProp[p.id]
-        ? {
-            stop_id: byProp[p.id].id,
-            route_code: routes.find((r: any) => r.id === byProp[p.id].route_id)?.code ?? null,
-            status: byProp[p.id].status,
-            checked_in: !!byProp[p.id].check_in,
-          }
-        : null,
-    })),
+    matches,
+    ...(dupes
+      ? {
+          duplicates_collapsed: dupes,
+          note: "Some matches are the same address entered under more than one client (expected — two people set the CRM up). They were collapsed to one match each. Work the primary copy, never make the driver choose, and remind them once to review duplicates on the Clients tab at the end of the day.",
+        }
+      : {}),
   }
 }
 
@@ -2770,7 +2843,17 @@ async function resolveStop(a: any): Promise<any> {
   )
   if (!stops.length) throw new Error(`No stop matching "${addr}" on ${date}.`)
   if (stops.length > 1) {
-    return { needs_clarification: true, which: "stop", matches: stops.map((s: any) => ({ stop_id: s.id, address: s.properties?.address })) }
+    // Several stops at the SAME address = a known duplicate record, not a real
+    // ambiguity. Take one (prefer a not-yet-checked-in copy) instead of asking.
+    const keys = new Set(stops.map((s: any) => normAddress(s.properties?.address || s.properties?.name)))
+    if (keys.size > 1) {
+      return { needs_clarification: true, which: "stop", matches: stops.map((s: any) => ({ stop_id: s.id, address: s.properties?.address })) }
+    }
+    const pick = stops.find((s: any) => !s.check_in) ?? stops[0]
+    pick.routes = routes.find((r: any) => r.id === pick.route_id)
+    pick.duplicate_address_copies = stops.length
+    pick.duplicate_note = "That address is on file more than once; used one copy. Mention an end-of-day Edit & Merge on the Clients tab, don't ask which client."
+    return pick
   }
   const s = stops[0]
   s.routes = routes.find((r: any) => r.id === s.route_id)
