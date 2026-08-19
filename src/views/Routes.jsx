@@ -599,6 +599,21 @@ export default function RoutesView({ app }) {
     }
   }
 
+  // ---- one-off stop (e.g. CSV import): make it a recurring weekly pickup ----
+  async function handleMakeWeekly(st) {
+    const day = weekdayName(routeSel)
+    if (!window.confirm(`Make ${st.name} a weekly ${day[0].toUpperCase()}${day.slice(1)} pickup?\n\nFrom now on it's picked up every ${day} — route builds will include it automatically.`)) return
+    setErr(null)
+    try {
+      await updateProperty(st.propertyId, { pickup_days: [day] })
+      logActivity({ type: 'property_schedule_changed', summary: `Made ${st.address || st.name} a weekly ${day} pickup`, entityType: 'property', entityId: st.propertyId })
+      await refresh()
+      setNotice(`${st.name} is now a weekly ${day} pickup — future ${day} route builds will include it automatically.`)
+    } catch (e) {
+      setErr(e.message || String(e))
+    }
+  }
+
   // ---- unrouted leftovers: pause / skip today / move to another day ----
   async function handleUnroutedPause(st) {
     if (!window.confirm(`Pause ${st.name}?\n\nIt stays a client address but drops off every route and unrouted list until un-paused in the client record.`)) return
@@ -1010,6 +1025,7 @@ export default function RoutesView({ app }) {
                         <button onClick={() => handleMove(st.id, 1)} style={miniBtn} title="Move down">↓</button>
                         <button onClick={() => startEditAddress(st)} style={miniBtn} title="Edit this address">✎ Address</button>
                         {st.needsReview && <button onClick={() => handleMarkReviewed(st)} style={{ ...miniBtn, color: '#1f7a4d' }} title="Clear this stop's ⚠ REVIEW flag">✓ Reviewed</button>}
+                        {!(st.pickupDays || []).length && <button onClick={() => handleMakeWeekly(st)} style={{ ...miniBtn, color: '#1f7a4d' }} title={`No recurring schedule — make this a weekly ${weekdayName(routeSel)} pickup`}>↻ Weekly</button>}
                         <button onClick={() => openDayModal(st)} style={miniBtn} title="Move this stop to a different day — one-time or permanently">⇄ Day</button>
                         {st.status === 'skipped' ? (
                           <button onClick={() => handleUnskip(st)} style={{ ...miniBtn, color: '#1f7a4d' }} title="Put this stop back to pending">Un-skip</button>
