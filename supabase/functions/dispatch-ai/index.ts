@@ -3132,6 +3132,13 @@ Deno.serve(async (req) => {
     let tone: string | null = null
     try { tone = (await sbGet(`app_settings?id=eq.1&select=randy_tone`))?.[0]?.randy_tone ?? null } catch (_) { /* fall back to default */ }
     let system = buildSystem(tone)
+    // Anchor the model to the real current date (business timezone — the edge
+    // runtime is UTC, which would roll over a day early every ET evening).
+    // Without this, "Aug 24" gets resolved against the model's training-era
+    // year and every future-dated lookup comes back empty.
+    const nowEt = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", dateStyle: "short" }).format(new Date())
+    const dowEt = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", weekday: "long" }).format(new Date())
+    system += `\n\nCURRENT DATE: ${nowEt} (a ${dowEt}). Resolve EVERY date the user gives you — including month + day like "Aug 24" or "March 3", and relatives like "today", "tomorrow", "next Monday" — against THIS date and year, then pass tools the exact YYYY-MM-DD. Never assume a different year.`
     if (isSystemCaller && sms?.staff_name) {
       system += `\n\nSMS MODE: You are replying by TEXT MESSAGE to ${sms.staff_name}, a staff member texting the company's business number from their phone. Rules: reply in plain conversational text only (no markdown, no bullet lists, no headers); keep it under 450 characters; keep the language clean and professional regardless of your tone setting — this is a real SMS from the business number. Your reply text is automatically delivered back to them as a text, so do NOT use the send_sms tool to answer them; only use send_sms if they ask you to text someone ELSE.`
     }
