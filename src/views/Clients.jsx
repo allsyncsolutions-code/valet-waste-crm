@@ -87,6 +87,8 @@ export default function Clients({ app }) {
   const [dupGroups, setDupGroups] = useState(null)
   const [dupBusy, setDupBusy] = useState(false)
   const [mergeGrp, setMergeGrp] = useState(null) // duplicate group open in the Edit & Merge screen
+  const [pickMerge, setPickMerge] = useState(false) // multi-select mode for a manual merge
+  const [picked, setPicked] = useState(() => new Set()) // client ids picked for a manual merge
   const [addrIdx, setAddrIdx] = useState({}) // customer_id → its property addresses (for search)
   const [inviteBusy, setInviteBusy] = useState(false)
   const [inviteMsg, setInviteMsg] = useState('')
@@ -214,8 +216,35 @@ export default function Clients({ app }) {
   // over, preview) and calls back here when it's applied.
   async function afterMerge() {
     setMergeGrp(null)
+    setPickMerge(false)
+    setPicked(new Set())
     await refresh()
     await refreshDuplicates()
+  }
+
+  // Manual merge: pick 2+ clients in the list, then Edit & Merge — the same
+  // screen as the duplicate cleanup, for pairs the detector never flagged.
+  function togglePick(id) {
+    setPicked((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
+  }
+  async function openManualMerge() {
+    const chosen = customers.filter((c) => picked.has(c.id))
+    if (chosen.length < 2) return
+    setErr(null)
+    try {
+      const lists = await Promise.all(chosen.map((c) => loadProperties(c.id)))
+      const norm = (a) => String(a || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim()
+      const all = lists.flat()
+      // One property per client: prefer an address shared with another picked
+      // client (the classic missed duplicate), else their first address.
+      const sel = lists.map((list) => (!list.length
+        ? null
+        : (list.find((p) => all.filter((q) => norm(q.address) === norm(p.address)).length > 1) || list[0])))
+      if (sel.some((p) => !p)) { setErr('Every selected client needs at least one service address before they can be merged.'); return }
+      setMergeGrp({ normalized: 'manual', count: sel.length, manual: true, properties: sel.map((p) => ({ id: p.id, address: p.address, customer_id: p.customer_id })) })
+    } catch (e) {
+      setErr(e.message || String(e))
+    }
   }
 
   // Only clients on the active business line (legacy rows count as waste).
@@ -623,6 +652,17 @@ export default function Clients({ app }) {
           </div>
           <button onClick={() => { setForm(BLANK); setEditingId(null); setShowForm(true) }} style={{ flex: 'none', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '0 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' }}>+ Add client</button>
         </div>
+        {/* manual merge picker: toggle it on, tick 2+ clients, Edit & Merge */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '0 6px 8px', flexWrap: 'wrap' }}>
+          <button onClick={() => { setPickMerge((v) => !v); setPicked(new Set()) }} title="Merge two clients that aren't flagged as duplicates" style={{ flex: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 600, padding: '5px 11px', borderRadius: 20, border: `1px solid ${pickMerge ? '#1f7a4d' : '#dde2dd'}`, background: pickMerge ? '#e7f1eb' : '#fff', color: pickMerge ? '#1f7a4d' : '#7c8a82' }}>⇄ Merge clients</button>
+          {pickMerge && (
+            <>
+              <span style={{ fontSize: 11.5, color: '#9aa69e' }}>{picked.size ? `${picked.size} selected${picked.size < 2 ? ' — pick at least one more' : ''}` : 'Tick two or more clients to merge them'}</span>
+              <div style={{ flex: 1 }} />
+              <button onClick={openManualMerge} disabled={picked.size < 2} style={{ flex: 'none', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 8, padding: '6px 12px', fontSize: 12, fontWeight: 600, cursor: picked.size >= 2 ? 'pointer' : 'default', opacity: picked.size < 2 ? 0.5 : 1 }}>Edit &amp; Merge{picked.size >= 2 ? ` (${picked.size})` : ''}</button>
+            </>
+          )}
+        </div>
         {/* billing-type filter: subscription vs single-payment clients */}
         <div style={{ display: 'flex', gap: 6, margin: '0 6px 8px', alignItems: 'center' }}>
           {[['all', 'All'], ['subscription', 'Subscription'], ['one_time', 'Single payment']].map(([v, l]) => {
@@ -641,7 +681,10 @@ export default function Clients({ app }) {
         {list.map((c) => {
           const on = c.id === selId
           return (
-            <div key={c.id} onClick={() => { setSelId(c.id); setConfirmDelete(false); setTagInput(''); setPayLink(null); setPayErr(null); setAddingAddr(false); setNewP(BLANK_PROP); setEditPid(null); setInviteMsg('') }} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '11px 10px', borderRadius: 10, cursor: 'pointer', marginBottom: 2, background: on ? '#f3faf5' : '#fff', border: `1px solid ${on ? '#cfe0d5' : 'transparent'}` }}>
+            <div key={c.id} onClick={() => { setSelId(c.id); setConfirmDelete(false); setTagInput(''); setPayLink(null); setPayErr(null); setAddingAddr(false); setNewP(BLANK_PROP); setEditPid(null); setInviteMsg('') }} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '11px 10px', borderRadius: 10, cursor: 'pointer', marginBottom: 2, background: picked.has(c.id) ? '#f2f9f5' : on ? '#f3faf5' : '#fff', border: `1px solid ${picked.has(c.id) ? '#1f7a4d' : on ? '#cfe0d5' : 'transparent'}` }}>
+              {pickMerge && (
+                <input type="checkbox" checked={picked.has(c.id)} onClick={(e) => e.stopPropagation()} onChange={() => togglePick(c.id)} title="Pick this client for the merge" style={{ width: 17, height: 17, accentColor: '#1f7a4d', flex: 'none', cursor: 'pointer' }} />
+              )}
               <div style={{ width: 36, height: 36, borderRadius: 9, background: '#e7f1eb', color: '#1f7a4d', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontWeight: 600, fontSize: 12, flex: 'none' }}>{initialsOf(c.name)}</div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.name}</div>
@@ -1324,9 +1367,11 @@ function MergeDuplicates({ group, customers, isMobile, onClose, onDone }) {
         {/* header */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '14px 18px', borderBottom: '1px solid #e6eae6', background: '#fff', borderRadius: isMobile ? 0 : '16px 16px 0 0' }}>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 16, fontWeight: 700 }}>Edit &amp; Merge duplicate address</div>
+            <div style={{ fontSize: 16, fontWeight: 700 }}>{group.manual ? 'Edit & Merge clients' : 'Edit & Merge duplicate address'}</div>
             <div style={{ fontSize: 12.5, color: '#7c8a82', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {(group.properties[0] && group.properties[0].address) || group.normalized} · {group.count} copies
+              {group.manual
+                ? `Manual merge · ${group.count} clients — pick what stays, the rest is cleaned up`
+                : `${(group.properties[0] && group.properties[0].address) || group.normalized} · ${group.count} copies`}
             </div>
           </div>
           <button onClick={onClose} disabled={busy} style={{ flex: 'none', background: '#fff', border: '1px solid #dde2dd', borderRadius: 8, padding: '7px 13px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
