@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { MONO } from '../data.js'
-import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, addProperty, updateProperty, loadPropertyVisits, loadPropertyAddressIndex, countDuplicateProperties, findDuplicateProperties, mergeDuplicateGroup, loadPropertiesByIds, countPropertiesByCustomer, deleteProperty, sendPortalInvite, loadClientFieldActivity, loadClientNotes, addClientNote, deleteClientNote, loadPropertyLog } from '../lib/customersData.js'
+import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, addProperty, updateProperty, savePin, loadPropertyVisits, loadPropertyAddressIndex, countDuplicateProperties, findDuplicateProperties, mergeDuplicateGroup, loadPropertiesByIds, countPropertiesByCustomer, deleteProperty, sendPortalInvite, loadClientFieldActivity, loadClientNotes, addClientNote, deleteClientNote, loadPropertyLog } from '../lib/customersData.js'
+import PinPicker from '../components/PinPicker.jsx'
 import { geocodeAll } from '../lib/importData.js'
 import { listTags, findOrCreateTag, subscribeTags } from '../lib/tagsData.js'
 import { paymentsStatus, invoicePaymentUrl } from '../lib/paymentsData.js'
@@ -103,6 +104,7 @@ export default function Clients({ app }) {
   const [logRows, setLogRows] = useState([])
   const [logBusy, setLogBusy] = useState(false)
   const [focusPropId, setFocusPropId] = useState(null) // property briefly highlighted when jumped to from Routes/Field
+  const [pinProp, setPinProp] = useState(null) // property whose pin is being set manually
   const [propSearch, setPropSearch] = useState('') // filter within a client's addresses
   const propRowRefs = useRef({}) // propertyId → DOM node (for scroll-to-address)
 
@@ -175,6 +177,13 @@ export default function Clients({ app }) {
     return props.filter((p) =>
       `${p.address || p.name || ''} ${p.service || ''} ${p.notes || ''} ${(p.pickup_days || []).map(daysLabel).join(' ')}`.toLowerCase().includes(q))
   }, [props, propSearch])
+
+  // Save a manually dropped pin (PinPicker) and refresh the address list.
+  async function savePropPin(pt) {
+    if (!pinProp) return
+    await savePin(pinProp.id, pt.lat, pt.lng)
+    if (selId) loadProperties(selId).then(setProps).catch(() => {})
+  }
 
   async function refresh() {
     const rows = await loadCustomers()
@@ -642,6 +651,19 @@ export default function Clients({ app }) {
         onDone={afterMerge}
       />
     )}
+    {pinProp && (() => {
+      const near = props.find((p) => p.lat != null && p.lng != null && p.id !== pinProp.id)
+      return (
+        <PinPicker
+          address={pinProp.address || pinProp.name || ''}
+          lat={pinProp.lat}
+          lng={pinProp.lng}
+          defaultCenter={near ? [near.lat, near.lng] : null}
+          onClose={() => setPinProp(null)}
+          onSave={savePropPin}
+        />
+      )
+    })()}
     <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1.25fr', gap: 18 }}>
       {/* list */}
       <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: 8 }}>
@@ -942,6 +964,7 @@ export default function Clients({ app }) {
                           <button onClick={() => toggleHistory(p)} disabled={histBusy && histPid === p.id} style={{ flex: 'none', background: 'none', border: 'none', color: '#5d6b63', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>{histPid === p.id ? 'Hide' : 'History'}</button>
                           <button onClick={() => toggleLog(p)} disabled={logBusy && logPid === p.id} title="Who added and changed this address" style={{ flex: 'none', background: 'none', border: 'none', color: '#5d6b63', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>{logPid === p.id ? 'Hide log' : 'Log'}</button>
                           <button onClick={() => togglePhotos(p)} disabled={photoBusy && photoPid === p.id} style={{ flex: 'none', background: 'none', border: 'none', color: '#5d6b63', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>{photoPid === p.id ? 'Hide' : 'Photos'}</button>
+                          <button onClick={() => setPinProp(p)} title={p.lat != null ? 'Move this address\'s map pin manually' : 'No map pin — set it manually by clicking the map'} style={{ flex: 'none', background: 'none', border: 'none', color: p.lat != null ? '#5d6b63' : '#c08a2e', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>{p.lat != null ? 'Pin' : 'Set pin'}</button>
                           <button onClick={() => startEditProp(p)} style={{ flex: 'none', background: 'none', border: 'none', color: '#1f7a4d', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>Edit</button>
                           <button onClick={() => togglePause(p)} disabled={pBusy} title={p.paused ? 'Resume — put this address back on routes' : 'Pause — keep the address but skip it on all routes'} style={{ flex: 'none', background: 'none', border: 'none', color: p.paused ? '#1f7a4d' : '#8a6d1e', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px', opacity: pBusy ? 0.6 : 1 }}>{p.paused ? 'Resume' : 'Pause'}</button>
                           <button onClick={() => delProp(p)} disabled={pBusy} title="Delete this address permanently" style={{ flex: 'none', background: 'none', border: 'none', color: '#c0492f', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px', opacity: pBusy ? 0.6 : 1 }}>Delete</button>

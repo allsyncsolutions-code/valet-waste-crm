@@ -366,6 +366,18 @@ export async function loadPropertyVisits(propertyId, limit = 20) {
 
 // Update a property. Editing the address clears its coordinates and resets the
 // geocode-attempt counter so it gets re-geocoded on the next pass.
+// Manually set a property's map coordinates (pin-drop) — for addresses the
+// geocoders can't resolve. Does NOT touch the address text or reset the
+// geocode counters; this is the authoritative position from here on.
+export async function savePin(id, lat, lng) {
+  const { error } = await supabase
+    .from('properties')
+    .update({ lat, lng })
+    .eq('id', id)
+  if (error) throw error
+  logActivity({ type: 'property_pin_set', summary: `Map pin set manually (${Number(lat).toFixed(5)}, ${Number(lng).toFixed(5)})`, entityType: 'property', entityId: id })
+}
+
 export async function updateProperty(id, patch) {
   const fields = {}
   for (const k of ['code', 'name', 'address', 'service', 'notes', 'price', 'tech_pay', 'pickup_days', 'pickup_frequency', 'needs_review', 'paused']) {
