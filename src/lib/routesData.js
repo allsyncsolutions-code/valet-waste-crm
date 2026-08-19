@@ -3,6 +3,7 @@
 // dispatch and the driver view.
 import { supabase } from './supabaseClient.js'
 import { loadSettings, settingsDepot, geocodeAddress } from './settingsData.js'
+import { createClient } from './customersData.js'
 
 const DEFAULT_DEPOT = { name: 'AllSync Yard', lat: 44.804, lng: -93.278 }
 
@@ -125,7 +126,7 @@ export async function loadRouteSlice(code = 'B', date = null, line = null) {
 
   let pq = supabase
     .from('properties')
-    .select('id, name, service, lat, lng, pickup_days, pickup_frequency, pickup_start_date, needs_review')
+    .select('id, name, address, service, lat, lng, pickup_days, pickup_frequency, pickup_start_date, needs_review')
     .eq('paused', false) // paused addresses never show up as unrouted/due
   if (line) pq = pq.eq('business_line', line) // only this line's properties can be "unrouted" here
   const { data: props, error: pErr } = await pq
@@ -150,6 +151,7 @@ export async function loadRouteSlice(code = 'B', date = null, line = null) {
       id: `prop:${p.id}`,
       propertyId: p.id,
       name: p.name,
+      address: p.address || '',
       service: p.service || '',
       window: '',
       lat: p.lat,
@@ -744,6 +746,107 @@ export async function addOneOffStop(code, date, { name, address, service, custom
   if (sErr) throw sErr
 
   return { route, property: prop, geocoded: !!loc }
+}
+
+// Loose address normalization for CSV matching: lowercase, drop punctuation,
+// collapse whitespace. Zips fall away naturally when one side omits them only
+// if the shorter string is a prefix of the longer (handled by the matcher).
+export function normAddress(a) {
+  return String(a || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
+// Find the best property for a CSV address: exact normalized match first, then
+// prefix containment (so "123 Main St" matches "123 Main St, St Augustine FL").
+export function matchPropertyByAddress(addr, byAddr) {
+  const n = normAddress(addr)
+  if (!n) return null
+  if (byAddr.has(n)) return byAddr.get(n)
+  if (n.length >= 6) {
+    for (const [k, v] of byAddr) {
+      if (k.length >= 6 && (k.startsWith(n) || n.startsWith(k))) return v
+    }
+  }
+  return null
+}
+
+// Import an ordered CSV address list as this date's route. Matched addresses
+// are added (if missing) and the route is re-sequenced to the CSV's order —
+// stops already on the route that the CSV doesn't mention keep their relative
+// order AFTER the imported ones. Unmatched addresses are added anyway as NEW
+// review-flagged properties under a new contact named after the address, so
+// routing can proceed before the real customer + price exist.
+export async function importRouteCsv(code, date, rows, line) {
+  if (!date) throw new Error('A date is required.')
+  const list = (rows || [])
+    .map((r) => ({ address: String(r.address || '').trim(), name: String(r.name || '').trim() }))
+    .filter((r) => r.address)
+  if (!list.length) throw new Error('No addresses found in the file.')
+
+  const props = await loadAllProperties(line)
+  const byAddr = new Map()
+  for (const p of props) {
+    const n = normAddress(p.address)
+    if (n && !byAddr.has(n)) byAddr.set(n, p)
+  }
+
+  const resolved = []
+  let created = 0
+  for (const r of list) {
+    let p = matchPropertyByAddress(r.address, byAddr)
+    if (!p) {
+      // Unknown address: create the contact (named after the address) + a
+      // review-flagged property so it still lands on the route.
+      let loc = null
+      try { loc = await geocodeAddress(r.address) } catch (e) { loc = null }
+      const custId = await createClient({ name: r.name || r.address, address: r.address, businessLine: line || 'waste' })
+      const { data: np, error } = await supabase
+        .from('properties')
+        .insert({
+          customer_id: custId,
+          name: r.name || r.address,
+          address: r.address,
+          needs_review: true,
+          business_line: line || 'waste',
+          lat: loc ? loc.lat : null,
+          lng: loc ? loc.lng : null,
+        })
+        .select('id, name, address, service, lat, lng').single()
+      if (error) throw error
+      p = { id: np.id, name: np.name, address: np.address, service: np.service, lat: np.lat, lng: np.lng }
+      created++
+    }
+    if (!resolved.some((x) => x.id === p.id)) resolved.push(p) // dedupe repeats in the file
+  }
+
+  const route = await ensureRoute(code, date)
+  const { data: existing, error: eErr } = await supabase
+    .from('route_stops')
+    .select('id, property_id, seq, service, lat, lng')
+    .eq('route_id', route.id)
+  if (eErr) throw eErr
+  const have = new Map((existing || []).map((s) => [s.property_id, s]))
+
+  const importedIds = new Set(resolved.map((p) => p.id))
+  const orderedProps = [
+    ...resolved,
+    ...(existing || []).filter((s) => !importedIds.has(s.property_id)).map((s) => ({ id: s.property_id })),
+  ]
+  let seq = 0
+  const updates = []
+  for (const p of orderedProps) {
+    seq++
+    if (!have.has(p.id)) {
+      const { error } = await supabase.from('route_stops').insert({
+        route_id: route.id, property_id: p.id, seq, status: 'pending',
+        service: p.service || null, lat: p.lat ?? null, lng: p.lng ?? null,
+      })
+      if (error) throw error
+    } else {
+      updates.push({ id: have.get(p.id).id, seq })
+    }
+  }
+  await Promise.all(updates.map((u) => supabase.from('route_stops').update({ seq: u.seq }).eq('id', u.id)))
+  return { matched: resolved.length - created, created, total: resolved.length, route }
 }
 
 // Live updates: fire cb whenever any stop on this route changes.

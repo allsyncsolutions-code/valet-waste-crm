@@ -43,6 +43,9 @@ import {
   ensureRoute,
   loadAllProperties,
   addPropertiesToRoute,
+  importRouteCsv,
+  normAddress,
+  matchPropertyByAddress,
 } from '../lib/routesData.js'
 import { loadDrivers } from '../lib/teamData.js'
 import { loadCustomers, updateProperty } from '../lib/customersData.js'
@@ -572,6 +575,159 @@ export default function RoutesView({ app }) {
     }
   }
 
+  // ---- mark an address reviewed (clears the ⚠ REVIEW flag) ----
+  async function handleMarkReviewed(st) {
+    setErr(null)
+    setNotice(null)
+    try {
+      await updateProperty(st.propertyId, { needs_review: false })
+      logActivity({ type: 'property_reviewed', summary: `Marked reviewed: ${st.address || st.name}`, entityType: 'property', entityId: st.propertyId })
+      await refresh()
+    } catch (e) {
+      setErr(e.message || String(e))
+    }
+  }
+  async function handleMarkAllReviewed() {
+    const ids = [...stops, ...unrouted].filter((s) => s.needsReview && s.propertyId).map((s) => s.propertyId)
+    if (!ids.length) return
+    setErr(null)
+    try {
+      await Promise.all([...new Set(ids)].map((id) => updateProperty(id, { needs_review: false })))
+      await refresh()
+    } catch (e) {
+      setErr(e.message || String(e))
+    }
+  }
+
+  // ---- unrouted leftovers: pause / skip today / move to another day ----
+  async function handleUnroutedPause(st) {
+    if (!window.confirm(`Pause ${st.name}?\n\nIt stays a client address but drops off every route and unrouted list until un-paused in the client record.`)) return
+    setErr(null)
+    try {
+      await updateProperty(st.propertyId, { paused: true })
+      logActivity({ type: 'property_paused', summary: `Paused ${st.address || st.name} (off all routes)`, entityType: 'property', entityId: st.propertyId })
+      await refresh()
+    } catch (e) {
+      setErr(e.message || String(e))
+    }
+  }
+  async function handleUnroutedSkipDay(st) {
+    setErr(null)
+    try {
+      const who = await currentActorName().catch(() => null)
+      await createDayOverride({ propertyId: st.propertyId, skipDate: routeSel, note: 'Skipped from Plan Routes (unrouted list)', createdBy: who })
+      logActivity({ type: 'day_skipped_once', summary: `Skipped ${st.address || st.name} for ${prettyDate(routeSel)} only`, entityType: 'property', entityId: st.propertyId })
+      await refresh()
+    } catch (e) {
+      setErr(e.message || String(e))
+    }
+  }
+  async function handleUnroutedMoveDay(st) {
+    const input = window.prompt(`Move ${st.name} to which date? (YYYY-MM-DD)\n\nIt will be added to Route ${routeCode} on that day instead of ${prettyDate(routeSel)}. This is a one-time move — the regular ${weekdayName(routeSel)} schedule doesn't change.`, '')
+    if (input == null) return
+    const target = input.trim()
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(target)) { setErr('Enter the date as YYYY-MM-DD (e.g. 2026-08-25).'); return }
+    if (target === routeSel) { setErr('That is already this day — pick a different date.'); return }
+    setErr(null)
+    try {
+      const who = await currentActorName().catch(() => null)
+      await createDayOverride({ propertyId: st.propertyId, skipDate: routeSel, serviceDate: target, note: 'One-time day change from Plan Routes (unrouted list)', createdBy: who })
+      await addPropertiesToRoute(routeCode, target, [{ id: st.propertyId, service: st.service, lat: st.lat, lng: st.lng }])
+      logActivity({ type: 'day_changed_once', summary: `One-time move: ${st.address || st.name} → ${prettyDate(target)} (was ${prettyDate(routeSel)})`, entityType: 'property', entityId: st.propertyId })
+      await refresh()
+    } catch (e) {
+      setErr(e.message || String(e))
+    }
+  }
+
+  // ---- CSV import: ordered address list becomes this date's route ----
+  const [showCsv, setShowCsv] = useState(false)
+  const [csvRows, setCsvRows] = useState(null) // parsed + preview-matched rows
+  const [csvBusy, setCsvBusy] = useState(false)
+  const [csvErr, setCsvErr] = useState(null)
+  const [notice, setNotice] = useState(null)
+
+  function openCsv() {
+    setShowCsv(true)
+    setCsvRows(null)
+    setCsvErr(null)
+  }
+
+  // Minimal CSV parser (handles quoted fields with commas/quotes/newlines).
+  function parseCsv(text) {
+    const rows = []
+    let cur = [''], inQ = false, c = 0
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i]
+      if (inQ) {
+        if (ch === '"') { if (text[i + 1] === '"') { cur[c] += '"'; i++ } else inQ = false }
+        else cur[c] += ch
+      } else if (ch === '"') inQ = true
+      else if (ch === ',') { cur.push(''); c++ }
+      else if (ch === '\n' || ch === '\r') {
+        if (ch === '\r' && text[i + 1] === '\n') i++
+        rows.push(cur); cur = ['']; c = 0
+      } else cur[c] += ch
+    }
+    if (cur.length > 1 || cur[0].trim()) rows.push(cur)
+    return rows
+  }
+
+  async function handleCsvFile(e) {
+    const f = e.target.files && e.target.files[0]
+    e.target.value = ''
+    if (!f) return
+    setCsvErr(null)
+    const reader = new FileReader()
+    reader.onload = async () => {
+      const parsed = parseCsv(String(reader.result || ''))
+      if (!parsed.length) { setCsvErr('That file looks empty.'); return }
+      // Header detection: an "address" (or "name") column wins; else column 0.
+      const head = parsed[0].map((h) => h.trim().toLowerCase())
+      const hasHeader = head.some((h) => /address|street|location/.test(h)) || head.includes('name')
+      let addrIdx = 0
+      let nameIdx = -1
+      if (hasHeader) {
+        addrIdx = head.findIndex((h) => /address|street|location/.test(h))
+        if (addrIdx === -1) addrIdx = 0
+        nameIdx = head.findIndex((h) => h === 'name' || /customer|label/.test(h))
+      }
+      const body = hasHeader ? parsed.slice(1) : parsed
+      const rows = body
+        .map((cells) => ({ address: (cells[addrIdx] || '').trim(), name: nameIdx >= 0 ? (cells[nameIdx] || '').trim() : '' }))
+        .filter((r) => r.address)
+      if (!rows.length) { setCsvErr('No addresses found — the file needs a column with the street address.'); return }
+
+      // Preview match against existing properties on this business line.
+      let byAddr = new Map()
+      try {
+        const props = await loadAllProperties(app.activeLine)
+        for (const p of props) {
+          const n = normAddress(p.address)
+          if (n && !byAddr.has(n)) byAddr.set(n, p)
+        }
+      } catch (e2) { /* preview-only; import re-matches anyway */ }
+      setCsvRows(rows.map((r) => ({ ...r, match: matchPropertyByAddress(r.address, byAddr) })))
+    }
+    reader.readAsText(f)
+  }
+
+  async function submitCsv() {
+    if (csvBusy || !csvRows || !csvRows.length) return
+    setCsvBusy(true)
+    setCsvErr(null)
+    try {
+      const res = await importRouteCsv(routeCode, routeSel, csvRows, app.activeLine)
+      setShowCsv(false)
+      setCsvRows(null)
+      await refresh(routeSel)
+      setNotice(`Imported ${res.total} stop${res.total === 1 ? '' : 's'} in CSV order — ${res.matched} matched existing addresses, ${res.created} added as new review-flagged stops.`)
+    } catch (e) {
+      setCsvErr(e.message || String(e))
+    }
+    setCsvBusy(false)
+  }
+
   async function addRoute() {
     const name = window.prompt('New route name (e.g. "Route C" or "North Side")')
     if (name == null || !name.trim()) return
@@ -735,6 +891,10 @@ export default function RoutesView({ app }) {
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
           <button onClick={openNewStop} style={ghostBtn}>+ New pickup</button>
           <button onClick={openMass} style={ghostBtn}>+ Add stops</button>
+          <button onClick={openCsv} style={ghostBtn}>⇪ Import CSV</button>
+          {[...stops, ...unrouted].some((s) => s.needsReview) && (
+            <button onClick={handleMarkAllReviewed} style={{ ...ghostBtn, color: '#1f7a4d', borderColor: '#cfe0d5' }} title="Clear every ⚠ REVIEW flag on this route">✓ Mark reviewed</button>
+          )}
           <button onClick={handleCopyPrevious} disabled={copying} style={{ ...ghostBtn, opacity: copying ? 0.6 : 1 }}>{copying ? 'Copying…' : `Copy last ${selDow}`}</button>
           <button onClick={handleBuildFromSchedules} disabled={building} style={{ ...ghostBtn, opacity: building ? 0.6 : 1 }}>{building ? 'Building…' : 'Build from schedules'}</button>
           <button onClick={handleOptimize} disabled={loading || !stops.length} style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'linear-gradient(135deg,#1f7a4d,#155e3a)', color: '#fff', border: 'none', borderRadius: 10, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: loading ? 'default' : 'pointer', opacity: loading || !stops.length ? 0.6 : 1 }}>
@@ -766,6 +926,12 @@ export default function RoutesView({ app }) {
       {err && (
         <div style={{ marginBottom: 14, background: '#fdecea', border: '1px solid #f3b7b0', color: '#9a2c1e', borderRadius: 11, padding: '10px 14px', fontSize: 12.5 }}>
           {err}
+        </div>
+      )}
+      {notice && (
+        <div style={{ marginBottom: 14, background: '#f3faf5', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 11, padding: '10px 14px', fontSize: 12.5, display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ flex: 1 }}>{notice}</span>
+          <span onClick={() => setNotice(null)} style={{ cursor: 'pointer', fontWeight: 700 }}>✕</span>
         </div>
       )}
 
@@ -843,6 +1009,7 @@ export default function RoutesView({ app }) {
                         <button onClick={() => handleMove(st.id, -1)} style={miniBtn} title="Move up">↑</button>
                         <button onClick={() => handleMove(st.id, 1)} style={miniBtn} title="Move down">↓</button>
                         <button onClick={() => startEditAddress(st)} style={miniBtn} title="Edit this address">✎ Address</button>
+                        {st.needsReview && <button onClick={() => handleMarkReviewed(st)} style={{ ...miniBtn, color: '#1f7a4d' }} title="Clear this stop's ⚠ REVIEW flag">✓ Reviewed</button>}
                         <button onClick={() => openDayModal(st)} style={miniBtn} title="Move this stop to a different day — one-time or permanently">⇄ Day</button>
                         {st.status === 'skipped' ? (
                           <button onClick={() => handleUnskip(st)} style={{ ...miniBtn, color: '#1f7a4d' }} title="Put this stop back to pending">Un-skip</button>
@@ -881,7 +1048,13 @@ export default function RoutesView({ app }) {
                       <span style={{ fontWeight: 600, fontSize: 12.5 }}>{st.name}</span>
                       {st.needsReview && <span title="Flagged for review" style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#c0492f', background: '#fbeae6', padding: '1px 5px', borderRadius: 4, letterSpacing: '.03em' }}>⚠ REVIEW</span>}
                     </div>
-                    <div style={{ fontSize: 11, color: '#9a7b3e' }}>{st.service}{st.window ? ` · ${st.window}` : ''}</div>
+                    <div style={{ fontSize: 11, color: '#9a7b3e' }}>{st.address && st.address !== st.name ? `${st.address} · ` : ''}{st.service}{st.window ? ` · ${st.window}` : ''}</div>
+                    <div style={{ marginTop: 5, display: 'flex', gap: 5, alignItems: 'center' }}>
+                      {st.needsReview && <button onClick={() => handleMarkReviewed(st)} style={{ ...miniBtn, color: '#1f7a4d' }} title="Clear this address's ⚠ REVIEW flag">✓ Reviewed</button>}
+                      <button onClick={() => handleUnroutedSkipDay(st)} style={miniBtn} title={`Take it off ${prettyDate(routeSel)} only — next ${selDow} it comes back`}>✕ Skip today</button>
+                      <button onClick={() => handleUnroutedMoveDay(st)} style={miniBtn} title="Run it on a different day this week instead">⇄ Day</button>
+                      <button onClick={() => handleUnroutedPause(st)} style={{ ...miniBtn, color: '#8a6d1e' }} title="Pause this address — off all routes until un-paused">⏸ Pause</button>
+                    </div>
                   </div>
                   <button onClick={() => handleAdd(st)} style={{ flex: 'none', background: '#c08a2e', color: '#fff', border: 'none', borderRadius: 7, padding: '6px 11px', fontSize: 11.5, fontWeight: 600, cursor: 'pointer' }}>+ Add</button>
                 </div>
@@ -1072,6 +1245,57 @@ export default function RoutesView({ app }) {
               <button type="submit" disabled={savingStop} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 10, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: savingStop ? 0.7 : 1 }}>{savingStop ? 'Adding…' : 'Add to route'}</button>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* CSV import modal */}
+      {showCsv && (
+        <div onClick={() => !csvBusy && setShowCsv(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(15,30,20,.42)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 500, padding: 16 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: '#fff', borderRadius: 14, width: 560, maxWidth: '100%', maxHeight: '86vh', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 60px rgba(15,30,20,.28)' }}>
+            <div style={{ padding: '18px 20px 12px', borderBottom: '1px solid #eef0ed' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+                <div style={{ fontWeight: 700, fontSize: 16, flex: 1 }}>Import CSV — {currentDef.name}</div>
+                <div onClick={() => !csvBusy && setShowCsv(false)} style={{ cursor: 'pointer', color: '#7c8a82', fontSize: 18 }}>✕</div>
+              </div>
+              <div style={{ fontSize: 12.5, color: '#7c8a82', lineHeight: 1.5, marginBottom: 12 }}>
+                Upload a list of addresses for <b>{prettyDate(routeSel)}</b>. The route is re-sequenced to match the CSV's order. Addresses that match your clients are linked to them; unknown ones are added anyway, flagged <b>⚠ REVIEW</b> with a contact named after the address, so you can attach the customer and price later.
+              </div>
+              <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, border: '1px dashed #cdd6cf', borderRadius: 10, padding: '14px 10px', cursor: 'pointer', color: '#5d6b63', fontSize: 13, fontWeight: 600 }}>
+                ⇪ Choose a CSV file
+                <input type="file" accept=".csv,text/csv" onChange={handleCsvFile} disabled={csvBusy} style={{ display: 'none' }} />
+              </label>
+              {csvErr && <div style={{ marginTop: 10, fontSize: 12.5, color: '#9a2c1e' }}>{csvErr}</div>}
+              {csvRows && (
+                <div style={{ marginTop: 10, fontSize: 12, color: '#5d6b63' }}>
+                  {csvRows.filter((r) => r.match).length} matched · {csvRows.filter((r) => !r.match).length} new (review-flagged)
+                </div>
+              )}
+            </div>
+
+            {csvRows && (
+              <div style={{ flex: 1, overflowY: 'auto', padding: '6px 12px' }}>
+                {csvRows.map((r, i) => (
+                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 8px', borderBottom: '1px solid #f1f3f0' }}>
+                    <div style={{ fontFamily: MONO, fontSize: 11, color: '#9aa69e', width: 22, flex: 'none' }}>{i + 1}</div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.address}</div>
+                      <div style={{ fontSize: 11, color: r.match ? '#1f7a4d' : '#c08a2e' }}>
+                        {r.match ? `✓ ${r.match.name}${r.match.customerName ? ` · ${r.match.customerName}` : ''}` : 'new — will be added flagged for review'}
+                      </div>
+                    </div>
+                    {!r.match && <span style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#c0492f', background: '#fbeae6', padding: '1px 5px', borderRadius: 4 }}>⚠ REVIEW</span>}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {csvRows && (
+              <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', padding: '12px 20px', borderTop: '1px solid #eef0ed' }}>
+                <button type="button" onClick={() => setShowCsv(false)} disabled={csvBusy} style={ghostBtn}>Cancel</button>
+                <button type="button" onClick={submitCsv} disabled={csvBusy || !csvRows.length} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 10, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: csvBusy ? 0.6 : 1 }}>{csvBusy ? 'Importing…' : `Import ${csvRows.length} stop${csvRows.length === 1 ? '' : 's'} in this order`}</button>
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>
