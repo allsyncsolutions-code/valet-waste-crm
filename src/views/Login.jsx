@@ -11,6 +11,7 @@ export default function Login({ pending, onSignOut, email: initialEmail }) {
   const clientOnly = new URLSearchParams(window.location.search).get('app') === 'client'
   const [email, setEmail] = useState(initialEmail || '')
   const [password, setPassword] = useState('')
+  const [showPw, setShowPw] = useState(false)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
 
@@ -26,6 +27,8 @@ export default function Login({ pending, onSignOut, email: initialEmail }) {
   const [fpCode, setFpCode] = useState('')
   const [fpPw, setFpPw] = useState('')
   const [fpPw2, setFpPw2] = useState('')
+  const [showFpPw, setShowFpPw] = useState(false)
+  const [showFpPw2, setShowFpPw2] = useState(false)
   const [fpBusy, setFpBusy] = useState(false)
   const [fpErr, setFpErr] = useState('')
 
@@ -179,10 +182,11 @@ export default function Login({ pending, onSignOut, email: initialEmail }) {
                 style={inp} placeholder="you@allsynccrm.com"
               />
               <label style={{ ...lbl, marginTop: 14 }}>Password</label>
-              <input
-                type="password" autoComplete="current-password" value={password}
+              <PwInput
+                autoComplete="current-password" value={password}
                 onChange={(e) => setPassword(e.target.value)} required
-                style={inp} placeholder="••••••••"
+                placeholder="••••••••"
+                show={showPw} onToggle={() => setShowPw((v) => !v)}
               />
               <div style={{ textAlign: 'right', marginTop: 8 }}>
                 <button type="button" onClick={openForgot} style={linkBtn}>Forgot password?</button>
@@ -227,16 +231,18 @@ export default function Login({ pending, onSignOut, email: initialEmail }) {
                     style={{ ...inp, letterSpacing: '.3em', fontWeight: 700 }} placeholder="••••••"
                   />
                   <label style={{ ...lbl, marginTop: 14 }}>New password</label>
-                  <input
-                    type="password" autoComplete="new-password" value={fpPw} required
+                  <PwInput
+                    autoComplete="new-password" value={fpPw} required
                     onChange={(e) => setFpPw(e.target.value)}
-                    style={inp} placeholder="At least 8 characters"
+                    placeholder="At least 8 characters"
+                    show={showFpPw} onToggle={() => setShowFpPw((v) => !v)}
                   />
                   <label style={{ ...lbl, marginTop: 14 }}>New password again</label>
-                  <input
-                    type="password" autoComplete="new-password" value={fpPw2} required
+                  <PwInput
+                    autoComplete="new-password" value={fpPw2} required
                     onChange={(e) => setFpPw2(e.target.value)}
-                    style={inp} placeholder="••••••••"
+                    placeholder="••••••••"
+                    show={showFpPw2} onToggle={() => setShowFpPw2((v) => !v)}
                   />
                   {fpErr && <div style={{ color: '#c0492f', fontSize: 12.5, marginTop: 10 }}>{fpErr}</div>}
                   <button type="submit" disabled={fpBusy} style={{ ...btnPrimary, opacity: fpBusy ? 0.7 : 1, marginTop: 14 }}>
@@ -266,6 +272,43 @@ export default function Login({ pending, onSignOut, email: initialEmail }) {
         </div>
       </div>
     </div>
+  )
+}
+
+// Password input with a show/hide eye toggle so users can see what they typed.
+function PwInput({ show, onToggle, ...props }) {
+  return (
+    <div style={{ position: 'relative' }}>
+      <input {...props} type={show ? 'text' : 'password'} style={{ ...inp, paddingRight: 44 }} />
+      <button
+        type="button" onClick={onToggle} tabIndex={-1}
+        aria-label={show ? 'Hide password' : 'Show password'}
+        title={show ? 'Hide password' : 'Show password'}
+        style={{ position: 'absolute', top: 0, right: 0, bottom: 0, width: 42, background: 'none', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#7c8a82', padding: 0 }}
+      >
+        <EyeIcon open={show} />
+      </button>
+    </div>
+  )
+}
+
+function EyeIcon({ open }) {
+  return (
+    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      {open ? (
+        <>
+          <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" />
+          <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" />
+          <path d="M14.12 14.12a3 3 0 1 1-4.24-4.24" />
+          <line x1="1" y1="1" x2="23" y2="23" />
+        </>
+      ) : (
+        <>
+          <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+          <circle cx="12" cy="12" r="3" />
+        </>
+      )}
+    </svg>
   )
 }
 
