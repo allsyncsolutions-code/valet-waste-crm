@@ -37,7 +37,7 @@ Guidelines:
 - When the user refers to a client by name, business, phone or email, call find_clients FIRST to resolve the exact customer_id before acting. If multiple match, ask which one. If none match and the action needs an existing client, say so. find_clients also resolves a SERVICE ADDRESS to its owning client (it falls back to matching properties), so use it to answer "who is the client for <address>?".
 - Infer sensible defaults: weekly pickup on Monday, monthly invoicing. Invoices are created as drafts unless told otherwise.
 - You can create_client, update_client, create_schedule (pickup), tag_client, create_invoice, mark_invoice_paid, add_stop_to_route, assemble_route, move_stops, assign_driver, list_routes, and create_route. Use get_overview for balances/counts and list_routes to see which routes exist.
-- Routes are per DAY and there can be several (e.g. Route A, B). Every route op defaults to TODAY and to the first route unless the user names a date or a route. If more than one route exists and it's ambiguous which they mean, call list_routes and ask.
+- Routes are per DAY and there can be several (e.g. Route A, B). Every route op defaults to TODAY and to the first route unless the user names a date or a route. If more than one route exists and it's ambiguous which they mean, call list_routes and ask. When staff say "stop 57" they mean the VISIT NUMBER shown in route lists and in list_route_stops (seq) — pass it as stop_number; stop_id is an internal UUID and plain numbers are never stop_ids.
 - assemble_route adds EXISTING properties to a route by selector: by_customer (name), by_tag, or address_contains — e.g. "build Route B today from everything tagged North Side" or "add all of Acme's stops to Route A". add_stop_to_route is for ONE brand-new address (it creates the property). bulk_add_properties imports many NEW addresses for one client.
 - move_stops moves matching stops from one route to another on a date (from_route_code → to_route_code), which hands them to the other route's driver. Pick which stops by_customer or address_contains.
 - assign_driver assigns (or unassigns) a driver for a route on a date; the driver must be flagged in the Team tab. set_default:true makes them the route's default. create_route adds a new route (code + name).
@@ -730,14 +730,16 @@ const tools = [
   {
     name: "set_stop_status",
     description:
-      "Field status for one route stop: on_my_way (stamps + the app texts the client separately), check_in (arrived — starts service), check_out (done), or reset (back to pending, clears times). Identify the stop by stop_id, or by address + date. Use check_in after the driver confirms a Check My Location match.",
+      "Field status for one route stop: on_my_way (stamps + the app texts the client separately), check_in (arrived — starts service), check_out (done), or reset (back to pending, clears times). Identify the stop by stop_number (the visit number the user sees), stop_id, or address + date. Use check_in after the driver confirms a Check My Location match.",
     input_schema: {
       type: "object",
       properties: {
         status: { type: "string", description: "on_my_way | check_in | check_out | reset" },
         stop_id: { type: "string", description: "route_stops id, when known." },
+        stop_number: { type: "number", description: "The visit number shown in route lists (e.g. 'stop 8'). NOT a UUID." },
         address: { type: "string", description: "Match the stop by property address instead." },
-        date: { type: "string", description: "YYYY-MM-DD (default today) when matching by address." },
+        date: { type: "string", description: "YYYY-MM-DD (default today) when matching by address or stop_number." },
+        route_code: { type: "string", description: "Optional — which route, when several run that day." },
       },
       required: ["status"],
     },
@@ -745,13 +747,15 @@ const tools = [
   {
     name: "move_stop",
     description:
-      "Reorder a stop within its route: direction 'up'/'down' one slot, or position N to drop it at a specific visit number. Renumbers the whole route. Identify by stop_id or address + date.",
+      "Reorder a stop within its route: direction 'up'/'down' one slot, or position N to drop it at a specific visit number. Renumbers the whole route. Identify the stop by stop_number (the visit number the user sees, e.g. 'stop 57'), address + date, or stop_id.",
     input_schema: {
       type: "object",
       properties: {
-        stop_id: { type: "string" },
+        stop_id: { type: "string", description: "route_stops UUID, when known." },
+        stop_number: { type: "number", description: "The visit number shown in route lists / list_route_stops seq (e.g. 'move stop 57'). NOT a UUID." },
         address: { type: "string" },
         date: { type: "string", description: "YYYY-MM-DD (default today)." },
+        route_code: { type: "string", description: "Optional — which route, when several run that day." },
         direction: { type: "string", description: "'up' or 'down' (one slot)." },
         position: { type: "number", description: "Target visit number (1-based) — overrides direction." },
       },
@@ -760,13 +764,15 @@ const tools = [
   {
     name: "remove_stop",
     description:
-      "Take one stop OFF its route (the address/property itself is kept). Identify by stop_id or address + date. For skipping with a reason use skip_stop instead; for wholesale end-of-day cleanup use cleanup_unconfirmed_stops.",
+      "Take one stop OFF its route (the address/property itself is kept). Identify by stop_number (the visit number the user sees), stop_id, or address + date. For skipping with a reason use skip_stop instead; for wholesale end-of-day cleanup use cleanup_unconfirmed_stops.",
     input_schema: {
       type: "object",
       properties: {
-        stop_id: { type: "string" },
+        stop_id: { type: "string", description: "route_stops UUID, when known." },
+        stop_number: { type: "number", description: "The visit number shown in route lists (e.g. 'remove stop 12'). NOT a UUID." },
         address: { type: "string" },
         date: { type: "string", description: "YYYY-MM-DD (default today)." },
+        route_code: { type: "string", description: "Optional — which route, when several run that day." },
       },
     },
   },
@@ -2834,6 +2840,27 @@ async function resolveStop(a: any): Promise<any> {
     return s[0]
   }
   const date = a.date ? String(a.date) : today()
+  // "Stop 57" — the visit NUMBER shown in route lists (seq), not a UUID.
+  if (a.stop_number != null) {
+    const n = Number(a.stop_number)
+    if (!Number.isInteger(n) || n < 1) throw new Error("stop_number must be a positive whole number.")
+    let rq = `routes?service_date=eq.${enc(date)}&select=id,code,service_date`
+    if (a.route_code) rq += `&code=eq.${enc(String(a.route_code).trim().toUpperCase())}`
+    const routes = await sbGet(rq)
+    if (!routes.length) throw new Error(`No routes on ${date}.`)
+    const stops = await sbGet(
+      `route_stops?route_id=in.(${routes.map((r: any) => enc(r.id)).join(",")})&select=id,route_id,seq,status,check_in,check_out,property_id,properties(address,name)&order=seq.asc`,
+    )
+    const bySeq = stops.filter((x: any) => x.seq === n)
+    let s = bySeq.length === 1 ? bySeq[0] : undefined
+    if (!s && bySeq.length > 1) {
+      return { needs_clarification: true, which: "stop", matches: bySeq.map((x: any) => ({ stop_id: x.id, address: x.properties?.address, route: (routes.find((r: any) => r.id === x.route_id) || {}).code })) }
+    }
+    if (!s) s = stops[n - 1] // no exact seq — fall back to nth stop in order
+    if (!s) throw new Error(`Stop #${n} doesn't exist on ${date} — there ${stops.length === 1 ? "is 1 stop" : `are ${stops.length} stops`}.`)
+    s.routes = routes.find((r: any) => r.id === s.route_id)
+    return s
+  }
   const addr = String(a.address ?? "").trim()
   if (!addr) throw new Error("Give a stop_id or an address.")
   const routes = await sbGet(`routes?service_date=eq.${enc(date)}&select=id,code,service_date`)
