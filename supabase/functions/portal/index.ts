@@ -22,6 +22,9 @@
 //                                  texts admins
 //   admin_data {customer_id}     → staff-JWT-authorized copy of `data` for the
 //                                  CRM's Client Portal preview tab
+//   admin_invite {customer_id}   → staff-JWT-authorized: email the client their
+//                                  7-day portal invite (save-a-card / 5th-week-
+//                                  free pitch); also texts when a phone exists
 //
 // Secrets: SENDGRID_API_KEY (required), SENDGRID_FROM. Run Merchant credentials
 // live in app_settings (set via the `payments` function's save_credentials).
@@ -431,6 +434,51 @@ Deno.serve(async (req) => {
           env: settings.run_env || "production",
         },
       })
+    }
+
+    if (action === "admin_invite") {
+      // CRM "✉ 5th-week-free invite" button (Clients detail). Mirrors the
+      // dispatch-ai invite_portal tool: 7-day one-time link (invites live
+      // longer than the 15-min email-login links) + the save-a-card pitch.
+      if (!(await staffFromAuthHeader(req))) return json({ error: "Staff only." }, 403)
+      if (!body.customer_id) return json({ error: "Missing customer_id." }, 400)
+      const cust = (await sbGet(`customers?id=eq.${enc(String(body.customer_id))}&select=id,name,phone,email,portal_slug`))[0]
+      if (!cust) return json({ error: "Client not found." }, 404)
+      if (!cust.portal_slug) return json({ error: `${cust.name} has no portal slug — check the client record.` }, 400)
+      if (!cust.email) return json({ error: `${cust.name} has no email on file — add one first.` }, 400)
+
+      const codeRaw = randomToken(24)
+      await sbPost("portal_magic_links", {
+        customer_id: cust.id,
+        code_hash: await sha256(codeRaw),
+        expires_at: new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString(),
+      })
+      const link = `${PORTAL_ORIGIN}/?portal=${enc(cust.portal_slug)}&code=${codeRaw}`
+      const settings = await getSettings()
+      const company = settings.company_name || "Valet Waste FL"
+
+      const html = `<p>Hi ${cust.name},</p>
+<p>Your ${company} customer portal is ready — see invoices, request service, and save a card for easy autopay.</p>
+<p><b>Bonus:</b> with a card on file, any month with a 5th pickup week, the 5th week is <b>FREE</b>.</p>
+<p style="margin:14px 0"><a href="${link}" style="display:inline-block;background:#1f7a4d;color:#fff;padding:11px 22px;border-radius:8px;text-decoration:none;font-weight:600">Set up my portal</a></p>
+<p style="color:#777;font-size:12px;word-break:break-all">${link}</p>
+<p style="color:#777;font-size:13px">This link is yours and works once, within 7 days.</p>`
+      await sendEmail(cust.email, `Your ${company} portal is ready — 5th pickup week free with autopay`, html, company)
+
+      // Also text when there's a phone (best-effort, same as Randy's invite).
+      let sms = false
+      if (cust.phone) {
+        try {
+          const txt = `Hi ${cust.name}, it's ${company}! Your customer portal is ready — see invoices, request service, and save a card for easy autopay. Bonus: with a card on file, any month with a 5th pickup week, the 5th week is FREE. Set up here: ${link} (your link, good for 7 days)`
+          const r = await fetch(`${SUPABASE_URL}/functions/v1/sms`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "send", to: cust.phone, body: txt, customerId: cust.id, purpose: "manual", sentBy: "Trashy Randy" }),
+          })
+          sms = !!(await r.json().catch(() => ({})))?.ok
+        } catch (_e) { /* email already sent */ }
+      }
+      return json({ ok: true, via: sms ? "email+sms" : "email", to: cust.email })
     }
 
     if (action === "data") {
