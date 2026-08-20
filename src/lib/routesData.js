@@ -134,6 +134,17 @@ export async function loadRouteSlice(code = 'B', date = null, line = null) {
   if (pErr) throw pErr
 
   const onRoute = new Set(stops.map((s) => s.propertyId))
+  // Properties already placed on ANOTHER route this date are not "unrouted" —
+  // a stop only needs to be on one route for the day, so don't flag it while
+  // planning a different route.
+  let placedElsewhere = new Set()
+  if (date) {
+    const { data: dayRoutes } = await supabase.from('routes').select('id').eq('service_date', date).neq('id', route.id)
+    if (dayRoutes && dayRoutes.length) {
+      const { data: dayStops } = await supabase.from('route_stops').select('property_id').in('route_id', dayRoutes.map((r) => r.id))
+      placedElsewhere = new Set((dayStops || []).map((s) => s.property_id))
+    }
+  }
   // "Unrouted" means due on THIS date but not yet placed on the route — not the
   // whole customer base. Properties scheduled for other days are added on demand
   // via "+ Add stops". After a clean build this list is empty.
@@ -147,7 +158,7 @@ export async function loadRouteSlice(code = 'B', date = null, line = null) {
       scheduleHitsDate({ day_of_week: d, frequency: p.pickup_frequency || 'weekly', start_date: p.pickup_start_date || null, active: true }, date))
   }
   const unrouted = props
-    .filter((p) => date && !onRoute.has(p.id) && isDue(p))
+    .filter((p) => date && !onRoute.has(p.id) && !placedElsewhere.has(p.id) && isDue(p))
     .map((p) => ({
       id: `prop:${p.id}`,
       propertyId: p.id,
@@ -166,7 +177,7 @@ export async function loadRouteSlice(code = 'B', date = null, line = null) {
   const depot = route.depot_lat != null
     ? { name: route.depot_name || homeDepot.name, lat: route.depot_lat, lng: route.depot_lng }
     : homeDepot
-  return { route, depot, stops, unrouted }
+  return { route, depot, stops, unrouted, placedElsewhereIds: [...placedElsewhere] }
 }
 
 // Persist a new visit order (writes seq for every stop).
@@ -260,10 +271,17 @@ export async function buildRouteFromSchedules(code = 'B', date = null) {
     if (error) throw error
   }
 
-  // Add due properties not already on the route.
+  // Add due properties not already on the route — and not already placed on
+  // ANOTHER route this date (a stop only needs one route for the day).
   const kept = existingRows.filter((r) => !removeRows.includes(r))
   const have = new Set(kept.map((r) => r.property_id))
-  const addIds = [...dueIds].filter((id) => !have.has(id))
+  let placedElsewhere = new Set()
+  const { data: dayRoutes } = await supabase.from('routes').select('id').eq('service_date', date).neq('id', route.id)
+  if (dayRoutes && dayRoutes.length) {
+    const { data: dayStops } = await supabase.from('route_stops').select('property_id').in('route_id', dayRoutes.map((r) => r.id))
+    placedElsewhere = new Set((dayStops || []).map((s) => s.property_id))
+  }
+  const addIds = [...dueIds].filter((id) => !have.has(id) && !placedElsewhere.has(id))
   let added = 0
   if (addIds.length) {
     const { data: props, error: pErr } = await supabase

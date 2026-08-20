@@ -110,6 +110,7 @@ export default function RoutesView({ app }) {
     setDepot(slice.depot)
     setStops(slice.stops)
     setUnrouted(slice.unrouted)
+    setElsewhereIds(slice.placedElsewhereIds || [])
     baselineRef.current = routeMetrics(slice.stops, slice.depot)
     return slice
   }
@@ -374,8 +375,11 @@ export default function RoutesView({ app }) {
   const [massSel, setMassSel] = useState(() => new Set())
   const [massLoading, setMassLoading] = useState(false)
   const [massBusy, setMassBusy] = useState(false)
+  // Properties already on ANOTHER route this date — hidden from the Add-stops
+  // picker so the same stop can't end up on two routes for one day.
+  const [elsewhereIds, setElsewhereIds] = useState([])
 
-  const onRouteIds = useMemo(() => new Set(stops.map((s) => s.propertyId)), [stops])
+  const onRouteIds = useMemo(() => new Set([...stops.map((s) => s.propertyId), ...elsewhereIds]), [stops, elsewhereIds])
   const massFiltered = useMemo(() => {
     const q = massQuery.trim().toLowerCase()
     return allProps.filter((p) =>
