@@ -1,5 +1,6 @@
 // Run Merchant webhook receiver — marks invoices paid when a transaction
-// settles. Closes the gap left by the old Stripe Flow A (which had no webhook
+// settles, and texts the team (Trashy Randy) when money moves: paid, declined,
+// refunded. Closes the gap left by the old Stripe Flow A (which had no webhook
 // and relied on staff manually clicking "Mark paid").
 //
 // Run Payments POSTs signed events here. Verify with the shared HMAC secret
@@ -46,6 +47,38 @@ async function verifySig(raw: string, sigHeader: string, secret: string): Promis
   let diff = 0
   for (let i = 0; i < hex.length; i++) diff |= hex.charCodeAt(i) ^ expected.charCodeAt(i)
   return diff === 0
+}
+
+// ---- SMS to admins (Trashy Randy) — best-effort, never blocks the webhook ---
+async function textAdmins(body: string) {
+  try {
+    const staff = await sbGet(`profiles?select=full_name,phone,role&phone=not.is.null&role=eq.admin`)
+    for (const s of staff) {
+      try {
+        const r = await fetch(`${SUPABASE_URL}/functions/v1/sms`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "send", to: s.phone, body, purpose: "payments", sentBy: "Trashy Randy" }),
+        })
+        await r.json().catch(() => ({}))
+      } catch (_e) { /* keep going */ }
+    }
+  } catch (_e) { /* SMS is best-effort */ }
+}
+
+// Invoice display info for texts: "INV-1024 · $1.00 · David Miller"
+async function invoiceLabel(invoiceId: string): Promise<string> {
+  try {
+    const rows = await sbGet(
+      `invoices?id=eq.${invoiceId}&select=number,total,customers(name)&limit=1`,
+    )
+    const inv = rows[0]
+    if (!inv) return `invoice ${invoiceId}`
+    const who = inv.customers?.name ? ` · ${inv.customers.name}` : ""
+    return `invoice ${inv.number} · $${Number(inv.total || 0).toFixed(2)}${who}`
+  } catch (_e) {
+    return `invoice ${invoiceId}`
+  }
 }
 
 Deno.serve(async (req) => {
@@ -100,15 +133,22 @@ Deno.serve(async (req) => {
           run_paid_at: new Date().toISOString(),
           run_trans_id: String(transId || ""),
         })
+        // Only text on the transition — dedupe/replays stay quiet.
+        const label = await invoiceLabel(String(invoiceId))
+        await textAdmins(`💵 PAID: ${label}${p.resp_text ? ` (${p.resp_text})` : ""} — Trashy Randy`)
       }
     } else if (type === "transaction.decline" && invoiceId) {
       // Declines don't change invoice status (it stays 'sent' for retry/manual),
-      // but we record the transaction id for support. Randy texts admins below.
+      // but the team should know a payment attempt bounced.
+      const label = await invoiceLabel(String(invoiceId))
+      await textAdmins(`⚠️ Payment DECLINED for ${label}${p.resp_text ? ` — ${p.resp_text}` : ""} — Trashy Randy`)
     } else if ((type === "transaction.refund" || type === "transaction.partialrefund") && invoiceId) {
       // A full refund reopens the invoice; partial refunds leave it paid.
       if (type === "transaction.refund") {
         await sbPatch(`invoices?id=eq.${invoiceId}`, { status: "sent", paid_at: null })
       }
+      const label = await invoiceLabel(String(invoiceId))
+      await textAdmins(`↩️ ${type === "transaction.refund" ? "REFUND" : "PARTIAL REFUND"} issued for ${label} — invoice ${type === "transaction.refund" ? "reopened" : "stays paid"} — Trashy Randy`)
     }
   } catch (_e) {
     // Swallow — we still return 200 so Run stops retrying. Errors here are
