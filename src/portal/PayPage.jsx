@@ -6,7 +6,7 @@
 // client portal for people who want the whole hub.
 import { useEffect, useRef, useState } from 'react'
 import { supabase } from '../lib/supabaseClient.js'
-import { loadRunner } from '../lib/runnerJs.js'
+import { loadRunner, tokenizeCard } from '../lib/runnerJs.js'
 
 const GREEN = '#1f7a4d'
 const money = (v) => `$${Number(v || 0).toFixed(2)}`
@@ -72,32 +72,24 @@ export default function PayPage({ slug, invoiceId }) {
     setBusy(true)
     setErr('')
     try {
-      const res = await new Promise((resolve, reject) => {
-        runnerRef.current.tokenize(async (t) => {
-          if (!t || (!t.account_token && !t.token)) { reject(new Error(`Card entry incomplete.${t ? ` Card form said: ${JSON.stringify(t).slice(0, 300)}` : ' No response from the card form — hard-refresh the page and try again.'}`)); return }
-          try {
-            const { data, error } = await supabase.functions.invoke('payments', {
-              body: {
-                action: 'charge_invoice',
-                invoice_id: String(inv.id),
-                account_token: t.account_token || t.token,
-                expiration: t.expiry,
-                cvn: t.cvv,
-                save_card: saveCard,
-              },
-            })
-            if (error) {
-              let msg = error.message || String(error)
-              try { const j = await error.context?.json?.(); if (j?.error) msg = j.error } catch (_e) { /* keep msg */ }
-              reject(new Error(msg))
-            } else if (data && data.error) {
-              reject(new Error(data.error))
-            } else {
-              resolve(data)
-            }
-          } catch (e) { reject(e) }
-        })
+      const t = await tokenizeCard(runnerRef.current)
+      if (!t || (!t.account_token && !t.token)) { throw new Error(`Card entry incomplete.${t ? ` Card form said: ${JSON.stringify(t).slice(0, 300)}` : ' No response from the card form — hard-refresh the page and try again.'}`) }
+      const { data, error } = await supabase.functions.invoke('payments', {
+        body: {
+          action: 'charge_invoice',
+          invoice_id: String(inv.id),
+          account_token: t.account_token || t.token,
+          expiration: t.expiry,
+          cvn: t.cvv,
+          save_card: saveCard,
+        },
       })
+      if (error) {
+        let msg = error.message || String(error)
+        try { const j = await error.context?.json?.(); if (j?.error) msg = j.error } catch (_e) { /* keep msg */ }
+        throw new Error(msg)
+      }
+      const res = data
       if (res && res.ok) {
         setPaid({ saved: !!res.saved })
       } else if (res && res.declined) {

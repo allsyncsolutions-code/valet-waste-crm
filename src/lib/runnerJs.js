@@ -20,3 +20,18 @@ export function loadRunner() {
   })
   return loader
 }
+
+// Tokenize with the CardPointe iframe quirk handled: Runner debounces its
+// field state, so a tokenize() fired the instant our button is clicked (which
+// blurs the iframe) can read the fields as empty. Wait for the debounce to
+// settle, and retry once — only then is an empty result a real "incomplete".
+export async function tokenizeCard(runner, { settleMs = 800, retryMs = 1200 } = {}) {
+  const once = () => new Promise((resolve) => runner.tokenize(resolve))
+  await new Promise((r) => setTimeout(r, settleMs))
+  let res = await once()
+  if (!res || (!res.account_token && !res.token)) {
+    await new Promise((r) => setTimeout(r, retryMs))
+    res = await once()
+  }
+  return res
+}

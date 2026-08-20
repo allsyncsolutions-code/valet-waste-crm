@@ -8,7 +8,7 @@
 // portal fn's admin_data action, and all client actions are disabled.
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '../lib/supabaseClient.js'
-import { loadRunner } from '../lib/runnerJs.js'
+import { loadRunner, tokenizeCard } from '../lib/runnerJs.js'
 
 const GREEN = '#1f7a4d'
 const tokenKey = (slug) => `vw_portal_${slug}`
@@ -617,20 +617,14 @@ function PaymentsTab({ data, token, preview, onChanged, setNotice }) {
     setBusy(true)
     setErr('')
     try {
-      await new Promise((resolve, reject) => {
-        runnerRef.current.tokenize(async (res) => {
-          if (!res || (!res.account_token && !res.token)) { reject(new Error(`Card entry incomplete.${res ? ` Card form said: ${JSON.stringify(res).slice(0, 300)}` : ' No response from the card form — hard-refresh the page and try again.'}`)); return }
-          try {
-            const r = await portalApi({
-              action: 'save_card', token,
-              account_token: res.account_token || res.token,
-              expiration: res.expiry,
-              cvn: res.cvv,
-              consent,
-            })
-            resolve(r)
-          } catch (e) { reject(e) }
-        })
+      const res = await tokenizeCard(runnerRef.current)
+      if (!res || (!res.account_token && !res.token)) { throw new Error(`Card entry incomplete.${res ? ` Card form said: ${JSON.stringify(res).slice(0, 300)}` : ' No response from the card form — hard-refresh the page and try again.'}`) }
+      await portalApi({
+        action: 'save_card', token,
+        account_token: res.account_token || res.token,
+        expiration: res.expiry,
+        cvn: res.cvv,
+        consent,
       })
       setNotice(`✓ Your card is saved — autopay is on and your 5th pickup week is free.`)
       await onChanged()
@@ -772,33 +766,25 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
     setBusy(true)
     setErr('')
     try {
-      const res = await new Promise((resolve, reject) => {
-        runnerRef.current.tokenize(async (t) => {
-          if (!t || (!t.account_token && !t.token)) { reject(new Error(`Card entry incomplete.${t ? ` Card form said: ${JSON.stringify(t).slice(0, 300)}` : ' No response from the card form — hard-refresh the page and try again.'}`)); return }
-          try {
-            // charge_invoice lives in the `payments` edge function (not portal).
-            const { data, error } = await supabase.functions.invoke('payments', {
-              body: {
-                action: 'charge_invoice',
-                invoice_id: String(inv.id),
-                account_token: t.account_token || t.token,
-                expiration: t.expiry,
-                cvn: t.cvv,
-                save_card: saveCard,
-              },
-            })
-            if (error) {
-              let msg = error.message || String(error)
-              try { const j = await error.context?.json?.(); if (j?.error) msg = j.error } catch (_e) { /* keep msg */ }
-              reject(new Error(msg))
-            } else if (data && data.error) {
-              reject(new Error(data.error))
-            } else {
-              resolve(data)
-            }
-          } catch (e) { reject(e) }
-        })
+      const t = await tokenizeCard(runnerRef.current)
+      if (!t || (!t.account_token && !t.token)) { throw new Error(`Card entry incomplete.${t ? ` Card form said: ${JSON.stringify(t).slice(0, 300)}` : ' No response from the card form — hard-refresh the page and try again.'}`) }
+      // charge_invoice lives in the `payments` edge function (not portal).
+      const { data, error } = await supabase.functions.invoke('payments', {
+        body: {
+          action: 'charge_invoice',
+          invoice_id: String(inv.id),
+          account_token: t.account_token || t.token,
+          expiration: t.expiry,
+          cvn: t.cvv,
+          save_card: saveCard,
+        },
       })
+      if (error) {
+        let msg = error.message || String(error)
+        try { const j = await error.context?.json?.(); if (j?.error) msg = j.error } catch (_e) { /* keep msg */ }
+        throw new Error(msg)
+      }
+      const res = data
       if (res && res.ok) {
         setNotice(`✓ Payment of ${money(inv.total)} received — thank you!${res.saved ? ' Your card is saved for autopay.' : ''}`)
         await onChanged()
