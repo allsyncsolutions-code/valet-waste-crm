@@ -92,6 +92,7 @@ function mapStop(row) {
     customerId: row.properties?.customer_id || null,
     clientName: row.properties?.customers?.name || null,
     pickupDays: row.properties?.pickup_days || [],
+    pickupFrequency: row.properties?.pickup_frequency || null,
     skipReason: row.skip_reason || '',
     skippedBy: row.skipped_by || null,
   }
@@ -118,7 +119,7 @@ export async function loadRouteSlice(code = 'B', date = null, line = null) {
 
   const { data: stopRows, error: sErr } = await supabase
     .from('route_stops')
-    .select('id, property_id, seq, status, service, time_window, lat, lng, skip_reason, skipped_by, properties(name, address, service, lat, lng, needs_review, customer_id, pickup_days, customers(name))')
+    .select('id, property_id, seq, status, service, time_window, lat, lng, skip_reason, skipped_by, properties(name, address, service, lat, lng, needs_review, customer_id, pickup_days, pickup_frequency, customers(name))')
     .eq('route_id', route.id)
     .order('seq', { ascending: true })
   if (sErr) throw sErr
@@ -158,6 +159,8 @@ export async function loadRouteSlice(code = 'B', date = null, line = null) {
       lng: p.lng,
       status: 'pending',
       needsReview: !!p.needs_review,
+      pickupDays: p.pickup_days || [],
+      pickupFrequency: p.pickup_frequency || null,
     }))
 
   const depot = route.depot_lat != null

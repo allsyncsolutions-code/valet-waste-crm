@@ -271,8 +271,16 @@ export default function Clients({ app }) {
   const cur = lineCustomers.find((c) => c.id === selId) || null
 
   // Switching business line: drop any selection from the previous line.
+  // If the selected client isn't in the (loaded) customers list, leave the
+  // selection alone — it may be a cross-view focus (Routes stop click) that
+  // landed before the list finished loading.
   useEffect(() => {
-    setSelId((cur) => (customers.find((c) => c.id === cur && (c.business_line || 'waste') === (app.activeLine || 'waste')) ? cur : (customers.find((c) => (c.business_line || 'waste') === (app.activeLine || 'waste'))?.id ?? null)))
+    setSelId((cur) => {
+      if (!cur) return cur
+      const found = customers.find((c) => c.id === cur)
+      if (!found) return cur
+      return (found.business_line || 'waste') === (app.activeLine || 'waste') ? cur : (customers.find((c) => (c.business_line || 'waste') === (app.activeLine || 'waste'))?.id ?? null)
+    })
   }, [app.activeLine, customers])
   const set = (patch) => setForm((f) => ({ ...f, ...patch }))
 
