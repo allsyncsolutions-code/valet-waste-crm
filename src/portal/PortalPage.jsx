@@ -619,7 +619,7 @@ function PaymentsTab({ data, token, preview, onChanged, setNotice }) {
     try {
       await new Promise((resolve, reject) => {
         runnerRef.current.tokenize(async (res) => {
-          if (!res || (!res.account_token && !res.token)) { reject(new Error('Card entry incomplete.')); return }
+          if (!res || (!res.account_token && !res.token)) { reject(new Error(`Card entry incomplete.${res ? ` Card form said: ${JSON.stringify(res).slice(0, 300)}` : ' No response from the card form — hard-refresh the page and try again.'}`)); return }
           try {
             const r = await portalApi({
               action: 'save_card', token,
@@ -774,7 +774,7 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
     try {
       const res = await new Promise((resolve, reject) => {
         runnerRef.current.tokenize(async (t) => {
-          if (!t || (!t.account_token && !t.token)) { reject(new Error('Card entry incomplete.')); return }
+          if (!t || (!t.account_token && !t.token)) { reject(new Error(`Card entry incomplete.${t ? ` Card form said: ${JSON.stringify(t).slice(0, 300)}` : ' No response from the card form — hard-refresh the page and try again.'}`)); return }
           try {
             // charge_invoice lives in the `payments` edge function (not portal).
             const { data, error } = await supabase.functions.invoke('payments', {
