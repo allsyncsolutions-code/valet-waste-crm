@@ -599,16 +599,18 @@ export default function RoutesView({ app }) {
     }
   }
 
-  // ---- one-off stop (e.g. CSV import): make it a recurring weekly pickup ----
-  async function handleMakeWeekly(st) {
+  // ---- one-off stop (e.g. CSV import): make it a recurring pickup ----
+  async function handleMakeRecurring(st, frequency) {
     const day = weekdayName(routeSel)
-    if (!window.confirm(`Make ${st.name} a weekly ${day[0].toUpperCase()}${day.slice(1)} pickup?\n\nFrom now on it's picked up every ${day} — route builds will include it automatically.`)) return
+    const labels = { weekly: 'weekly', biweekly: 'every-2-weeks', monthly: 'monthly (1st ' + day + ' of the month)' }
+    const label = labels[frequency]
+    if (!window.confirm(`Make ${st.name} a ${label} ${day[0].toUpperCase()}${day.slice(1)} pickup?\n\nRoute builds will include it automatically on its schedule.`)) return
     setErr(null)
     try {
-      await updateProperty(st.propertyId, { pickup_days: [day] })
-      logActivity({ type: 'property_schedule_changed', summary: `Made ${st.address || st.name} a weekly ${day} pickup`, entityType: 'property', entityId: st.propertyId })
+      await updateProperty(st.propertyId, { pickup_days: [day], pickup_frequency: frequency, pickup_start_date: routeSel })
+      logActivity({ type: 'property_schedule_changed', summary: `Made ${st.address || st.name} a ${label} ${day} pickup`, entityType: 'property', entityId: st.propertyId })
       await refresh()
-      setNotice(`${st.name} is now a weekly ${day} pickup — future ${day} route builds will include it automatically.`)
+      setNotice(`${st.name} is now a ${label} ${day} pickup — future ${day} route builds will include it automatically.`)
     } catch (e) {
       setErr(e.message || String(e))
     }
@@ -1025,7 +1027,14 @@ export default function RoutesView({ app }) {
                         <button onClick={() => handleMove(st.id, 1)} style={miniBtn} title="Move down">↓</button>
                         <button onClick={() => startEditAddress(st)} style={miniBtn} title="Edit this address">✎ Address</button>
                         {st.needsReview && <button onClick={() => handleMarkReviewed(st)} style={{ ...miniBtn, color: '#1f7a4d' }} title="Clear this stop's ⚠ REVIEW flag">✓ Reviewed</button>}
-                        {!(st.pickupDays || []).length && <button onClick={() => handleMakeWeekly(st)} style={{ ...miniBtn, color: '#1f7a4d' }} title={`No recurring schedule — make this a weekly ${weekdayName(routeSel)} pickup`}>↻ Weekly</button>}
+                        {!(st.pickupDays || []).length && (
+                          <select value="" onChange={(e) => e.target.value && handleMakeRecurring(st, e.target.value)} title={`No recurring schedule — make this a recurring ${weekdayName(routeSel)} pickup`} style={{ ...miniBtn, color: '#1f7a4d', paddingRight: 4, cursor: 'pointer' }}>
+                            <option value="">↻ Schedule…</option>
+                            <option value="weekly">↻ Weekly</option>
+                            <option value="biweekly">↻ Every 2 weeks</option>
+                            <option value="monthly">↻ Monthly</option>
+                          </select>
+                        )}
                         <button onClick={() => openDayModal(st)} style={miniBtn} title="Move this stop to a different day — one-time or permanently">⇄ Day</button>
                         {st.status === 'skipped' ? (
                           <button onClick={() => handleUnskip(st)} style={{ ...miniBtn, color: '#1f7a4d' }} title="Put this stop back to pending">Un-skip</button>
