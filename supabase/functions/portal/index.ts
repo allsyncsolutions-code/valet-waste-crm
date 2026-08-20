@@ -521,10 +521,12 @@ Deno.serve(async (req) => {
       if (!body.account_token || !body.expiration) return json({ error: "Missing tokenized card details." }, 400)
       const settings = await getSettings()
       if (!settings.run_mid) return json({ error: "Payments aren't set up yet — please contact us." }, 400)
-      const { token, mid, env } = await runAccessToken(settings)
+      // NB: name this runToken — a bare `token` here shadows the session token
+      // destructured above and TDZ-crashes every earlier `token` use in this block.
+      const { token: runToken, mid, env } = await runAccessToken(settings)
 
       const alreadySaved = !!cust.run_vault_id
-      const res = await runApi(env, token, "charge", {
+      const res = await runApi(env, runToken, "charge", {
         method: "POST",
         body: {
           mid,
@@ -569,8 +571,8 @@ Deno.serve(async (req) => {
       if (cust.run_vault_id) {
         const settings = await getSettings()
         try {
-          const { token, env } = await runAccessToken(settings)
-          await runApi(env, token, `vault_payment_accounts/${cust.run_vault_id}`, { method: "DELETE" })
+          const { token: runToken, env } = await runAccessToken(settings)
+          await runApi(env, runToken, `vault_payment_accounts/${cust.run_vault_id}`, { method: "DELETE" })
         } catch (_e) { /* already gone */ }
       }
       await sbPatch(`customers?id=eq.${cust.id}`, {
