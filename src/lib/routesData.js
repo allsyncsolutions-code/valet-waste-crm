@@ -73,6 +73,12 @@ export async function loadActiveSchedules(line) {
 }
 
 // DB row (with joined property) -> the shape the UI uses.
+// Client tags (customer_tags → tags) flattened to [{id,name,color}] — shown on
+// stop cards in both Plan and Field so drivers see e.g. "gate code" / "VIP".
+export function tagsOf(customer) {
+  return ((customer && customer.customer_tags) || []).map((ct) => ct.tag).filter(Boolean)
+}
+
 function mapStop(row) {
   return {
     id: row.id,
@@ -91,6 +97,7 @@ function mapStop(row) {
     needsReview: !!row.properties?.needs_review,
     customerId: row.properties?.customer_id || null,
     clientName: row.properties?.customers?.name || null,
+    tags: tagsOf(row.properties?.customers),
     pickupDays: row.properties?.pickup_days || [],
     pickupFrequency: row.properties?.pickup_frequency || null,
     skipReason: row.skip_reason || '',
@@ -119,7 +126,7 @@ export async function loadRouteSlice(code = 'B', date = null, line = null) {
 
   const { data: stopRows, error: sErr } = await supabase
     .from('route_stops')
-    .select('id, property_id, seq, status, service, time_window, lat, lng, skip_reason, skipped_by, properties(name, address, service, lat, lng, needs_review, customer_id, pickup_days, pickup_frequency, customers(name))')
+    .select('id, property_id, seq, status, service, time_window, lat, lng, skip_reason, skipped_by, properties(name, address, service, lat, lng, needs_review, customer_id, pickup_days, pickup_frequency, customers(name, customer_tags(tag:tags(id,name,color))))')
     .eq('route_id', route.id)
     .order('seq', { ascending: true })
   if (sErr) throw sErr
@@ -539,7 +546,7 @@ export async function loadDayDispatch(date, line) {
   if (!date) throw new Error('A date is required.')
   let q = supabase
     .from('routes')
-    .select('id, code, name, driver_id, business_line, route_stops(id, seq, status, service, time_window, lat, lng, check_in, check_out, on_my_way_at, excess_flagged, excess_note, tech_pay, nudge_sent, skip_reason, skipped_by, property_id, properties(name, address, notes, lat, lng, price, tech_pay, customer_id, customers(name, phone)), stop_photos(id))')
+    .select('id, code, name, driver_id, business_line, route_stops(id, seq, status, service, time_window, lat, lng, check_in, check_out, on_my_way_at, excess_flagged, excess_note, tech_pay, nudge_sent, skip_reason, skipped_by, property_id, properties(name, address, notes, lat, lng, price, tech_pay, customer_id, customers(name, phone, customer_tags(tag:tags(id,name,color)))), stop_photos(id))')
     .eq('service_date', date)
   if (line) q = q.eq('business_line', line)
   const { data, error } = await q.order('code', { ascending: true })
@@ -560,6 +567,7 @@ export async function loadDayDispatch(date, line) {
         notes: s.properties?.notes || '',
         clientName: s.properties?.customers?.name || null,
         clientPhone: s.properties?.customers?.phone || null,
+        tags: tagsOf(s.properties?.customers),
         customerId: s.properties?.customer_id || null,
         propertyId: s.property_id || null,
         skipReason: s.skip_reason || '',
@@ -881,4 +889,62 @@ export function subscribeRouteStops(routeId, cb) {
     )
     .subscribe()
   return () => supabase.removeChannel(channel)
+}
+
+
+// ---- Day-scoped route combinations ------------------------------------------
+// One driver (or two riding together) running two routes: the routes stay
+// exactly as planned; a combo row just tells the dispatch board to present
+// them as ONE run for that date, with the listed drivers.
+export async function loadRouteCombos(date) {
+  if (!date) return []
+  const { data, error } = await supabase.from('route_combos')
+    .select('id, service_date, codes, driver_ids, created_by, created_at')
+    .eq('service_date', date).order('created_at', { ascending: true })
+  if (error) throw error
+  return (data || []).map((c) => ({ id: c.id, date: c.service_date, codes: c.codes || [], driverIds: c.driver_ids || [], createdBy: c.created_by }))
+}
+export async function createRouteCombo(date, codes, driverIds, createdBy = null) {
+  const cs = [...new Set((codes || []).map((c) => String(c).toUpperCase()))]
+  if (cs.length < 2) throw new Error('Pick at least two routes to combine.')
+  // A route can only be in one combo per day — fold into an existing one if overlapping.
+  const existing = await loadRouteCombos(date)
+  const hit = existing.find((c) => c.codes.some((x) => cs.includes(x)))
+  if (hit) {
+    const merged = [...new Set([...hit.codes, ...cs])]
+    const drivers = [...new Set([...(hit.driverIds || []), ...(driverIds || [])].filter(Boolean))]
+    const { error } = await supabase.from('route_combos').update({ codes: merged, driver_ids: drivers }).eq('id', hit.id)
+    if (error) throw error
+    return { ...hit, codes: merged, driverIds: drivers }
+  }
+  const { data, error } = await supabase.from('route_combos')
+    .insert({ service_date: date, codes: cs, driver_ids: (driverIds || []).filter(Boolean), created_by: createdBy })
+    .select('id').single()
+  if (error) throw error
+  return { id: data.id, date, codes: cs, driverIds: (driverIds || []).filter(Boolean) }
+}
+export async function updateRouteComboDrivers(id, driverIds) {
+  const { error } = await supabase.from('route_combos').update({ driver_ids: (driverIds || []).filter(Boolean) }).eq('id', id)
+  if (error) throw error
+}
+export async function deleteRouteCombo(id) {
+  const { error } = await supabase.from('route_combos').delete().eq('id', id)
+  if (error) throw error
+}
+// Group a day's routes by combo: [{ key, combo|null, routes:[...] , driverIds:[...] }].
+// Routes not in any combo come back as single-route groups.
+export function groupRoutesByCombo(routes, combos) {
+  const used = new Set()
+  const groups = []
+  for (const c of combos || []) {
+    const rts = (c.codes || []).map((code) => routes.find((r) => r.code === code)).filter(Boolean)
+    rts.forEach((r) => used.add(r.id))
+    const driverIds = (c.driverIds && c.driverIds.length) ? c.driverIds : [...new Set(rts.map((r) => r.driverId).filter(Boolean))]
+    groups.push({ key: 'combo:' + c.id, combo: c, routes: rts, driverIds, codes: c.codes || [] })
+  }
+  for (const r of routes) {
+    if (used.has(r.id)) continue
+    groups.push({ key: 'route:' + r.id, combo: null, routes: [r], driverIds: r.driverId ? [r.driverId] : [], codes: [r.code] })
+  }
+  return groups
 }

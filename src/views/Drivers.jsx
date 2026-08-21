@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { MONO } from '../data.js'
 import { STATUS_META } from '../lib/routeModel.js'
-import { loadDayDispatch, checkInStop, checkOutStop, resetStopStatus, flagStopExcess, unflagStopExcess, markStopNudged, skipStop, unskipStop } from '../lib/routesData.js'
+import { loadDayDispatch, checkInStop, checkOutStop, resetStopStatus, flagStopExcess, unflagStopExcess, markStopNudged, skipStop, unskipStop, loadRouteDefs, buildRouteFromSchedules, loadRouteCombos, createRouteCombo, updateRouteComboDrivers, deleteRouteCombo, groupRoutesByCombo } from '../lib/routesData.js'
 import { loadStopPhotos, deleteStopPhoto } from '../lib/photosData.js'
 import { loadDrivers } from '../lib/teamData.js'
 import { logActivity, currentActorName } from '../lib/activityData.js'
@@ -56,6 +56,14 @@ export default function Drivers({ app, date: dateProp, onDateChange, embedded })
   }
   const [drivers, setDrivers] = useState([])
   const [routes, setRoutes] = useState([])
+  const [routeDefs, setRouteDefs] = useState([]) // this line's route catalog (A/B/C…) — drives the route picker
+  const [routeFilter, setRouteFilter] = useState('all') // 'all' | route code
+  const [combos, setCombos] = useState([]) // day-scoped route combinations
+  const [comboOpen, setComboOpen] = useState(false)
+  const [comboCodes, setComboCodes] = useState({}) // code -> bool
+  const [comboDrivers, setComboDrivers] = useState({}) // driverId -> bool
+  const [comboBusy, setComboBusy] = useState(false)
+  const [building, setBuilding] = useState(false)
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState(null)
   const [expanded, setExpanded] = useState({}) // driverId/route key -> bool
@@ -211,10 +219,86 @@ export default function Drivers({ app, date: dateProp, onDateChange, embedded })
   }
 
   async function refresh(d = date) {
-    const [drv, rts] = await Promise.all([loadDrivers(), loadDayDispatch(d, app.activeLine)])
+    const [drv, rts, defs, cmb] = await Promise.all([
+      loadDrivers(), loadDayDispatch(d, app.activeLine),
+      loadRouteDefs(app.activeLine).catch(() => []), loadRouteCombos(d).catch(() => []),
+    ])
     setDrivers(drv)
     setRoutes(rts)
+    setRouteDefs(defs)
+    setCombos(cmb)
     refreshPhotos(rts)
+  }
+
+  // Route B/C may not have a row for this date yet (only built routes exist per
+  // day) — let the driver build it from schedules right here instead of
+  // bouncing to Plan.
+  async function buildMissing(code) {
+    setBuilding(true)
+    setErr(null)
+    try {
+      const r = await buildRouteFromSchedules(code, date)
+      if (r && r.noSchedules) setErr(`Nothing is scheduled on Route ${code} for ${pretty(date)}.`)
+      await refresh()
+    } catch (e) { setErr(e.message || String(e)) }
+    setBuilding(false)
+  }
+
+  // ---- combine routes (this date only) ----
+  function openCombo() {
+    const first = routes.filter((r) => !combos.some((c) => c.codes.includes(r.code)))
+    const pre = {}
+    first.slice(0, 2).forEach((r) => { pre[r.code] = true })
+    setComboCodes(pre)
+    const drv = {}
+    first.slice(0, 2).forEach((r) => { if (r.driverId) drv[r.driverId] = true })
+    setComboDrivers(drv)
+    setComboOpen(true)
+  }
+  // Keep the driver pre-selection in sync with the routes ticked (union of their drivers).
+  function toggleComboCode(code) {
+    setComboCodes((prev) => {
+      const next = { ...prev, [code]: !prev[code] }
+      const chosen = routes.filter((r) => next[r.code])
+      setComboDrivers((d) => {
+        const nd = { ...d }
+        chosen.forEach((r) => { if (r.driverId && nd[r.driverId] === undefined) nd[r.driverId] = true })
+        return nd
+      })
+      return next
+    })
+  }
+  async function submitCombo() {
+    const codes = Object.keys(comboCodes).filter((c) => comboCodes[c])
+    if (codes.length < 2) { setErr('Pick at least two routes to combine.'); return }
+    setComboBusy(true)
+    setErr(null)
+    try {
+      const who = await currentActorName().catch(() => null)
+      const driverIds = Object.keys(comboDrivers).filter((id) => comboDrivers[id])
+      await createRouteCombo(date, codes, driverIds, who)
+      const names = driverIds.map((id) => { const d = drivers.find((x) => x.id === id); return d ? driverName(d) : null }).filter(Boolean)
+      logActivity({ type: 'routes_combined', summary: `Combined Route ${codes.join(' + ')} for ${pretty(date)}${names.length ? ` — ${names.join(' & ')}` : ''}`, entityType: 'route', entityId: null })
+      setComboOpen(false)
+      await refresh()
+    } catch (e) { setErr(e.message || String(e)) }
+    setComboBusy(false)
+  }
+  async function splitCombo(c) {
+    if (!window.confirm(`Split Route ${c.codes.join(' + ')} back into separate routes for ${pretty(date)}?`)) return
+    setComboBusy(true)
+    try {
+      await deleteRouteCombo(c.id)
+      logActivity({ type: 'routes_split', summary: `Split Route ${c.codes.join(' + ')} back apart for ${pretty(date)}`, entityType: 'route', entityId: null })
+      await refresh()
+    } catch (e) { setErr(e.message || String(e)) }
+    setComboBusy(false)
+  }
+  async function toggleComboDriver(c, driverId) {
+    const has = (c.driverIds || []).includes(driverId)
+    const next = has ? c.driverIds.filter((x) => x !== driverId) : [...(c.driverIds || []), driverId]
+    try { await updateRouteComboDrivers(c.id, next); await refresh() }
+    catch (e) { setErr(e.message || String(e)) }
   }
 
   useEffect(() => {
@@ -229,25 +313,38 @@ export default function Drivers({ app, date: dateProp, onDateChange, embedded })
       .channel('dispatch-' + date)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'route_stops' }, () => refresh(date).catch(() => {}))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'routes' }, () => refresh(date).catch(() => {}))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'route_combos' }, () => refresh(date).catch(() => {}))
       .subscribe()
     return () => { try { supabase.removeChannel(ch) } catch (e) {} }
   }, [date])
 
-  // Group routes by driver.
+  // Route picker: 'all' shows the whole board; a code narrows it to that route
+  // (or the combined run that route is part of today).
+  const groups = useMemo(() => groupRoutesByCombo(routes, combos), [routes, combos])
+  const visibleGroups = useMemo(() => (
+    routeFilter === 'all' ? groups : groups.filter((g) => g.codes.includes(routeFilter))
+  ), [groups, routeFilter])
+  const comboGroups = visibleGroups.filter((g) => g.combo)
+  const soloRoutes = visibleGroups.filter((g) => !g.combo).map((g) => g.routes[0])
+  const filterMissing = routeFilter !== 'all' && !routes.some((r) => r.code === routeFilter)
+  const comboCandidates = routes.filter((r) => !combos.some((c) => c.codes.includes(r.code)))
+
+  // Group the (non-combined) routes by driver.
   const byDriver = useMemo(() => {
     const m = new Map()
-    for (const r of routes) {
+    for (const r of soloRoutes) {
       const k = r.driverId || '__none__'
       if (!m.has(k)) m.set(k, [])
       m.get(k).push(r)
     }
     return m
-  }, [routes])
+  }, [soloRoutes])
 
   const driverName = (d) => d.full_name || d.email
   const unassigned = byDriver.get('__none__') || []
   const activeDrivers = drivers.filter((d) => (byDriver.get(d.id) || []).length)
-  const idleDrivers = drivers.filter((d) => !(byDriver.get(d.id) || []).length)
+  const onCombo = new Set(comboGroups.flatMap((g) => g.driverIds))
+  const idleDrivers = drivers.filter((d) => !(byDriver.get(d.id) || []).length && !onCombo.has(d.id))
 
   function routeStats(rts) {
     const stops = rts.reduce((n, r) => n + r.stops.length, 0)
@@ -271,6 +368,57 @@ export default function Drivers({ app, date: dateProp, onDateChange, embedded })
 
       {err && <div style={banner('#c0492f', '#fbeae6')}>{err}</div>}
 
+      {/* route picker — every route on this line, not just the ones built today */}
+      {routeDefs.length > 0 && (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
+          {[{ code: 'all', name: 'All routes' }, ...routeDefs].map((rd) => {
+            const sel = routeFilter === rd.code
+            const built = rd.code === 'all' || routes.some((r) => r.code === rd.code)
+            const inCombo = combos.find((c) => c.codes.includes(rd.code))
+            return (
+              <div key={rd.code} onClick={() => setRouteFilter(rd.code)} title={rd.code === 'all' ? 'Show every route' : built ? `Show Route ${rd.code}` : `Route ${rd.code} isn't built for this day yet`} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 12px', borderRadius: 10, cursor: 'pointer', border: `1px solid ${sel ? '#1f7a4d' : '#e6eae6'}`, background: sel ? '#e7f1eb' : '#fff', opacity: built ? 1 : 0.6 }}>
+                {rd.code !== 'all' && <div style={{ width: 24, height: 24, borderRadius: 7, background: sel ? '#1f7a4d' : '#7c8a82', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontWeight: 600, fontSize: 11.5 }}>{rd.code}</div>}
+                <div style={{ fontSize: 13, fontWeight: 600, color: sel ? '#15281d' : '#3a463f' }}>{rd.name}{inCombo ? <span style={{ marginLeft: 6, fontSize: 10, color: '#7a4ba0', fontFamily: MONO }}>⧉ {inCombo.codes.join('+')}</span> : null}</div>
+              </div>
+            )
+          })}
+          {comboCandidates.length >= 2 && !comboOpen && (
+            <button onClick={openCombo} title="Run two routes as one today — e.g. one driver covering both. Routes themselves stay as planned." style={{ marginLeft: 'auto', background: '#fff', color: '#7a4ba0', border: '1px solid #d9c8ea', borderRadius: 10, padding: '8px 13px', fontSize: 12.5, fontWeight: 700, cursor: 'pointer' }}>⧉ Combine routes today</button>
+          )}
+        </div>
+      )}
+
+      {/* combine panel */}
+      {comboOpen && (
+        <div style={{ ...card, borderColor: '#d9c8ea', background: '#faf7fd' }}>
+          <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 2 }}>Combine routes for {pretty(date)} only</div>
+          <div style={{ fontSize: 12, color: '#7c8a82', marginBottom: 10 }}>The routes stay exactly as planned — the board just shows them as one run today. Split them again any time.</div>
+          <div style={{ fontSize: 11, fontWeight: 700, color: '#7c8a82', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 6 }}>Routes</div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+            {comboCandidates.map((r) => (
+              <label key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 7, border: `1px solid ${comboCodes[r.code] ? '#7a4ba0' : '#e6eae6'}`, background: comboCodes[r.code] ? '#f1e9f8' : '#fff', borderRadius: 9, padding: '7px 11px', cursor: 'pointer', fontSize: 13 }}>
+                <input type="checkbox" checked={!!comboCodes[r.code]} onChange={() => toggleComboCode(r.code)} />
+                <span style={{ fontFamily: MONO, fontWeight: 700 }}>{r.code}</span> {r.name} <span style={{ color: '#9aa69e', fontSize: 11.5 }}>· {r.stops.length} stops{r.driverId ? ` · ${driverName(drivers.find((d) => d.id === r.driverId) || {}) || ''}` : ''}</span>
+              </label>
+            ))}
+          </div>
+          <div style={{ fontSize: 11, fontWeight: 700, color: '#7c8a82', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 6 }}>Who's running it (one driver, or both riding together)</div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+            {drivers.map((d) => (
+              <label key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 7, border: `1px solid ${comboDrivers[d.id] ? '#1f7a4d' : '#e6eae6'}`, background: comboDrivers[d.id] ? '#e7f1eb' : '#fff', borderRadius: 20, padding: '5px 11px 5px 8px', cursor: 'pointer', fontSize: 12.5 }}>
+                <input type="checkbox" checked={!!comboDrivers[d.id]} onChange={() => setComboDrivers((p) => ({ ...p, [d.id]: !p[d.id] }))} />
+                {driverName(d)}
+              </label>
+            ))}
+            {drivers.length === 0 && <span style={{ fontSize: 12, color: '#9aa69e' }}>No drivers flagged yet (Team tab).</span>}
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={submitCombo} disabled={comboBusy} style={{ ...primaryBtn, background: '#7a4ba0' }}>{comboBusy ? 'Combining…' : `Combine for ${pretty(date)}`}</button>
+            <button onClick={() => setComboOpen(false)} disabled={comboBusy} style={{ background: '#fff', color: '#5d6b63', border: '1px solid #e6eae6', borderRadius: 9, padding: '9px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
+          </div>
+        </div>
+      )}
+
       {outbox.pending > 0 && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 9, background: '#fbf3e2', border: '1px solid #ecd9ad', color: '#8a6d1e', borderRadius: 11, padding: '10px 14px', fontSize: 12.5, marginBottom: 14 }}>
           <span style={{ fontSize: 14 }}>📤</span>
@@ -282,8 +430,66 @@ export default function Drivers({ app, date: dateProp, onDateChange, embedded })
         <div style={{ color: '#7c8a82', fontSize: 13, padding: 28, textAlign: 'center' }}>Loading dispatch…</div>
       ) : (
         <>
+          {/* picked a route that hasn't been built for this day */}
+          {filterMissing && (
+            <div style={{ background: '#fff', border: '1px dashed #d8ddd6', borderRadius: 14, padding: '30px 22px', textAlign: 'center', marginBottom: 12 }}>
+              <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6 }}>Route {routeFilter} isn't built for {pretty(date)} yet</div>
+              <div style={{ fontSize: 13, color: '#7c8a82', marginBottom: 14 }}>Build it from the schedules now, or set it up in route planning.</div>
+              <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
+                <button onClick={() => buildMissing(routeFilter)} disabled={building} style={primaryBtn}>{building ? 'Building…' : `⟳ Build Route ${routeFilter} from schedules`}</button>
+                <button onClick={() => { app.setRoutesMode && app.setRoutesMode('plan'); go && go('routes') }} style={{ background: '#fff', color: '#1f7a4d', border: '1px solid #cfe0d5', borderRadius: 9, padding: '9px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Open planning</button>
+              </div>
+            </div>
+          )}
+
+          {/* combined runs (this date only) */}
+          {comboGroups.map((g) => {
+            const { stops, done } = routeStats(g.routes)
+            const open = expanded[g.key] !== false
+            const ds = g.driverIds.map((id) => drivers.find((d) => d.id === id)).filter(Boolean)
+            return (
+              <div key={g.key} style={{ ...card, borderColor: '#d9c8ea', boxShadow: '0 0 0 3px #f1e9f8' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 13 }}>
+                  <div onClick={() => setExpanded((e) => ({ ...e, [g.key]: !(e[g.key] !== false) }))} style={{ display: 'flex', alignItems: 'center', gap: 13, flex: 1, minWidth: 0, cursor: 'pointer' }}>
+                    <div style={{ display: 'flex', flex: 'none' }}>
+                      {ds.length === 0 && <div style={{ ...avatar, background: '#c08a2e' }}>?</div>}
+                      {ds.map((d, i) => <div key={d.id} style={{ ...avatar, marginLeft: i ? -12 : 0, border: '2px solid #fff', background: i ? '#5a3e78' : '#7a4ba0' }}>{initialsOf(driverName(d))}</div>)}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 700, fontSize: 15 }}>{ds.length ? ds.map(driverName).join(' + ') : 'No driver picked'}</div>
+                      <div style={{ fontSize: 12, color: '#7a4ba0', fontWeight: 600 }}>⧉ {g.routes.map((r) => `${r.code} · ${r.name}`).join('  +  ')} <span style={{ color: '#9aa69e', fontWeight: 500 }}>· combined for {date === TODAY ? 'today' : pretty(date)} only</span></div>
+                    </div>
+                    <div style={{ textAlign: 'right', flex: 'none' }}>
+                      <div style={{ fontFamily: MONO, fontSize: 14, fontWeight: 700 }}>{done}/{stops}</div>
+                      <div style={{ fontSize: 10.5, color: '#9aa69e' }}>stops done</div>
+                    </div>
+                    <div style={{ color: '#9aa69e', fontSize: 13, width: 16, textAlign: 'center' }}>{open ? '▾' : '▸'}</div>
+                  </div>
+                  <button onClick={() => splitCombo(g.combo)} disabled={comboBusy} title="Go back to separate routes for this day" style={{ flex: 'none', background: '#fff', color: '#7a4ba0', border: '1px solid #d9c8ea', borderRadius: 8, padding: '6px 11px', fontSize: 11.5, fontWeight: 700, cursor: 'pointer' }}>Split</button>
+                </div>
+                {open && (
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginTop: 10 }}>
+                    <span style={{ fontSize: 11, color: '#9aa69e' }}>Drivers:</span>
+                    {drivers.map((d) => {
+                      const on = g.driverIds.includes(d.id)
+                      return <button key={d.id} onClick={() => toggleComboDriver(g.combo, d.id)} style={{ border: `1px solid ${on ? '#7a4ba0' : '#e6eae6'}`, background: on ? '#f1e9f8' : '#fff', color: on ? '#5a3e78' : '#7c8a82', borderRadius: 20, padding: '3px 10px', fontSize: 11.5, fontWeight: 600, cursor: 'pointer' }}>{on ? '✓ ' : ''}{driverName(d)}</button>
+                    })}
+                  </div>
+                )}
+                {open && g.routes.map((r) => (
+                  <div key={r.id} style={{ marginTop: 12 }}>
+                    <div style={{ fontFamily: MONO, fontSize: 11, color: '#7c8a82', margin: '6px 2px' }}>{r.code} · {r.name}</div>
+                    {r.stops.length === 0 ? (
+                      <div style={{ fontSize: 12, color: '#9aa69e', padding: '6px 2px' }}>No stops on this route.</div>
+                    ) : r.stops.map((s) => <StopRow key={s.id} s={s} busy={busyStop === s.id} photos={photos[s.id] || []} pending={pendingShots[s.id] || []} syncing={outbox.byStop[s.id] || 0} uploading={uploadingStop === s.id} onCheckIn={() => doCheckIn(s)} onCheckOut={() => doCheckOut(s)} onUndo={() => doUndo(s)} onSkip={() => doSkip(s)} onUnskip={() => doUnskip(s)} onOpenClient={s.customerId && app.openClient ? () => app.openClient(s.customerId, s.propertyId) : null} onFlagExcess={() => doFlagExcess(s)} onAddPhoto={(f) => addPhoto(s, f)} onDeletePhoto={removePhoto} />)}
+                  </div>
+                ))}
+              </div>
+            )
+          })}
+
           {/* on the road */}
-          {activeDrivers.length === 0 && unassigned.length === 0 && (
+          {!filterMissing && comboGroups.length === 0 && activeDrivers.length === 0 && unassigned.length === 0 && (
             <div style={{ background: '#fff', border: '1px dashed #d8ddd6', borderRadius: 14, padding: '34px 22px', textAlign: 'center' }}>
               <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6 }}>No routes for {pretty(date)} yet</div>
               <div style={{ fontSize: 13, color: '#7c8a82', marginBottom: 14 }}>Build a route and assign a driver to see the day's dispatch here.</div>
@@ -378,6 +584,11 @@ function StopRow({ s, busy, photos = [], pending = [], syncing = 0, uploading, o
         <div style={{ flex: 1, minWidth: 0 }}>
           <div onClick={onOpenClient || undefined} title={onOpenClient ? `Open ${s.clientName || 'client'}'s record` : undefined} style={{ fontWeight: 600, fontSize: 13, cursor: onOpenClient ? 'pointer' : 'default', color: onOpenClient ? '#1f7a4d' : '#1a2420' }}>{s.name}</div>
           <div onClick={onOpenClient || undefined} style={{ fontSize: 11.5, color: '#7c8a82', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', cursor: onOpenClient ? 'pointer' : 'default' }}>{s.address || s.service}</div>
+          {(s.tags || []).length > 0 && (
+            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 3 }}>
+              {s.tags.map((t) => <span key={t.id} style={{ fontSize: 10, fontWeight: 700, color: t.color || '#1f7a4d', background: (t.color || '#1f7a4d') + '1a', border: `1px solid ${(t.color || '#1f7a4d')}55`, borderRadius: 5, padding: '1px 6px' }}>{t.name}</span>)}
+            </div>
+          )}
           {s.status === 'skipped' && (
             <div style={{ fontSize: 11, color: '#8a6d1e', marginTop: 2 }}>⤼ Skipped{s.skippedBy ? ` by ${s.skippedBy}` : ''}{s.skipReason ? ` — ${s.skipReason}` : ''}</div>
           )}

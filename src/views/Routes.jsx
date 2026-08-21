@@ -46,6 +46,7 @@ import {
   importRouteCsv,
   normAddress,
   matchPropertyByAddress,
+  loadRouteCombos,
 } from '../lib/routesData.js'
 import { loadDrivers } from '../lib/teamData.js'
 import { loadCustomers, updateProperty } from '../lib/customersData.js'
@@ -99,6 +100,7 @@ export default function RoutesView({ app }) {
   const [schedules, setSchedules] = useState([]) // active schedules, for the day dots
   const [drivers, setDrivers] = useState([]) // staff flagged is_driver
   const [defaultDriverId, setDefaultDriverId] = useState(null) // carry-forward default
+  const [dayCombos, setDayCombos] = useState([]) // day-scoped route combinations (set on the Field board)
 
   const baselineRef = useRef(null) // metrics of the first-loaded order
   const writingRef = useRef(false) // suppress realtime reload during our own writes
@@ -106,6 +108,7 @@ export default function RoutesView({ app }) {
   async function refresh(date = routeSel) {
     if (!routeCode) { setRoute(null); setStops([]); setUnrouted([]); return null }
     const slice = await loadRouteSlice(routeCode, date, app.activeLine)
+    loadRouteCombos(date).then(setDayCombos).catch(() => {})
     setRoute(slice.route)
     setDepot(slice.depot)
     setStops(slice.stops)
@@ -917,6 +920,17 @@ export default function RoutesView({ app }) {
               <div style={{ fontSize: 10.5, color: '#7c8a82' }}>{prettyDate(routeSel)} · {stops.length} stop{stops.length === 1 ? '' : 's'}</div>
             </div>
           </div>
+          {(() => {
+            const c = dayCombos.find((x) => (x.codes || []).includes(routeCode))
+            if (!c) return null
+            const others = c.codes.filter((x) => x !== routeCode)
+            const names = (c.driverIds || []).map((id) => drivers.find((d) => d.id === id)).filter(Boolean).map((d) => d.full_name || d.email)
+            return (
+              <div onClick={() => setMode('field')} title="Open the Field board to split or change drivers" style={{ marginTop: 9, fontSize: 11.5, color: '#5a3e78', background: '#f1e9f8', border: '1px solid #d9c8ea', borderRadius: 8, padding: '6px 9px', cursor: 'pointer' }}>
+                ⧉ Combined with Route {others.join(' + ')} for {prettyDate(routeSel)} only{names.length ? ` — ${names.join(' & ')}` : ''}. The route itself is unchanged.
+              </div>
+            )
+          })()}
           {drivers.length > 0 ? (
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 11, flexWrap: 'wrap' }}>
               <span style={{ fontSize: 12, fontFamily: MONO, color: '#7c8a82' }}>🚛</span>
@@ -1050,6 +1064,11 @@ export default function RoutesView({ app }) {
                           {st.lat == null && <span title="No map pin — address likely needs a city/ZIP" style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#c08a2e', background: '#fbf3e2', padding: '1px 5px', borderRadius: 4 }}>NO PIN</span>}
                         </div>
                         <div style={{ fontSize: 11.5, color: '#7c8a82' }}>{st.address && st.address !== st.name ? st.address : st.service}{st.clientName && st.clientName !== st.name ? ` · ${st.clientName}` : ''}</div>
+                        {(st.tags || []).length > 0 && (
+                          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 3 }}>
+                            {st.tags.map((t) => <span key={t.id} style={{ fontSize: 10, fontWeight: 700, color: t.color || '#1f7a4d', background: (t.color || '#1f7a4d') + '1a', border: `1px solid ${(t.color || '#1f7a4d')}55`, borderRadius: 5, padding: '1px 6px' }}>{t.name}</span>)}
+                          </div>
+                        )}
                         {st.status === 'skipped' && (
                           <div style={{ fontSize: 11, color: '#8a6d1e', marginTop: 2 }}>⤼ Skipped{st.skippedBy ? ` by ${st.skippedBy}` : ''}{st.skipReason ? ` — ${st.skipReason}` : ''}</div>
                         )}
