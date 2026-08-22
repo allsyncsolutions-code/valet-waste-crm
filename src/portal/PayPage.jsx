@@ -7,6 +7,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { supabase } from '../lib/supabaseClient.js'
 import { loadRunner, tokenizeCard } from '../lib/runnerJs.js'
+import { RichText } from '../components/RichText.jsx'
 
 const GREEN = '#1f7a4d'
 const money = (v) => `$${Number(v || 0).toFixed(2)}`
@@ -106,19 +107,6 @@ export default function PayPage({ slug, invoiceId }) {
   const shell = (inner) => (
     <div style={{ minHeight: '100vh', background: '#f2f5f1', fontFamily: 'system-ui, -apple-system, sans-serif', color: '#1a2420' }}>
       <div style={{ maxWidth: 480, margin: '0 auto', padding: '28px 14px 60px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 18 }}>
-          {info?.company?.logo_url ? (
-            <img src={info.company.logo_url} alt="logo" style={{ width: 38, height: 38, borderRadius: 9, objectFit: 'cover', background: '#fff' }} />
-          ) : (
-            <div style={{ width: 38, height: 38, borderRadius: 9, background: GREEN, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: 17 }}>
-              {(info?.company?.name || 'V')[0]}
-            </div>
-          )}
-          <div>
-            <div style={{ fontWeight: 800, fontSize: 16 }}>{info?.company?.name || 'Pay invoice'}</div>
-            <div style={{ fontSize: 12, color: '#7c8a82' }}>Secure invoice payment</div>
-          </div>
-        </div>
         {inner}
         <div style={{ textAlign: 'center', marginTop: 22 }}>
           <a href={`/?portal=${encodeURIComponent(slug)}`} style={{ color: '#7c8a82', fontSize: 12.5, textDecoration: 'none' }}>
@@ -152,31 +140,94 @@ export default function PayPage({ slug, invoiceId }) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       {err && <div style={{ background: '#fbeae6', color: '#c0492f', borderRadius: 9, padding: '9px 12px', fontSize: 13 }}>{err}</div>}
 
-      {/* invoice summary */}
-      <div style={card}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <div>
-            <div style={{ fontWeight: 700, fontSize: 15 }}>Invoice {inv.number}</div>
-            <div style={{ fontSize: 12, color: '#7c8a82' }}>
-              {info.customer_name}{inv.due_date ? ` · Due ${fmtD(inv.due_date)}` : inv.issue_date ? ` · ${fmtD(inv.issue_date)}` : ''}
+      {/* invoice document */}
+      <div style={{ ...card, padding: 0, overflow: 'hidden' }}>
+        {/* masthead: logo + business name (left) · contact info (right) */}
+        <div style={{ padding: '16px 18px 12px', display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, minWidth: 0 }}>
+            {info?.company?.logo_url ? (
+              <img src={info.company.logo_url} alt="logo" style={{ width: 46, height: 46, borderRadius: 10, objectFit: 'cover', border: '1px solid #e6eae6' }} />
+            ) : (
+              <div style={{ width: 46, height: 46, borderRadius: 10, background: GREEN, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: 20, flex: 'none' }}>
+                {(info?.company?.name || 'V')[0]}
+              </div>
+            )}
+            <div style={{ fontWeight: 800, fontSize: 15.5, minWidth: 0 }}>{info?.company?.name || 'Valet Waste FL'}</div>
+          </div>
+          {(info?.company?.phone || info?.company?.email || info?.company?.address) && (
+            <div style={{ textAlign: 'right', fontSize: 11, color: '#7c8a82', lineHeight: 1.55, flex: 'none' }}>
+              {info.company.phone && <div>{info.company.phone}</div>}
+              {info.company.email && <div>{info.company.email}</div>}
+              {info.company.address && <div>{info.company.address}</div>}
+            </div>
+          )}
+        </div>
+        <div style={{ height: 4, background: `linear-gradient(90deg, ${GREEN}, #2ea56b)` }} />
+
+        {/* title + number · bill to */}
+        <div style={{ padding: '14px 18px 4px', display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+          <div style={{ flex: 1, minWidth: 140 }}>
+            <div style={{ fontSize: 20, fontWeight: 800, letterSpacing: '.04em', color: '#15281d' }}>INVOICE</div>
+            <div style={{ fontSize: 12.5, color: '#5d6b63', marginTop: 2 }}>{inv.number}</div>
+            <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 5 }}>
+              {inv.issue_date ? `Issued ${fmtD(inv.issue_date)}` : ''}{inv.due_date ? ` · Due ${fmtD(inv.due_date)}` : ''}
             </div>
           </div>
-          <span style={{ flex: 1 }} />
-          <div style={{ fontWeight: 800, fontSize: 20 }}>{money(inv.total)}</div>
+          <div style={{ minWidth: 150 }}>
+            <div style={{ fontSize: 9.5, letterSpacing: '.1em', color: '#9aa69e', marginBottom: 3, fontWeight: 600 }}>BILL TO</div>
+            <div style={{ fontWeight: 700, fontSize: 13.5 }}>{info.customer_name}</div>
+            {info.customer_email && <div style={{ fontSize: 11.5, color: '#5d6b63', marginTop: 2 }}>{info.customer_email}</div>}
+            {info.customer_phone && <div style={{ fontSize: 11.5, color: '#5d6b63', marginTop: 2 }}>{info.customer_phone}</div>}
+          </div>
         </div>
+
+        {/* line items */}
         {(inv.items || []).length > 0 && (
-          <div style={{ marginTop: 12, borderTop: '1px solid #f0f2ef', paddingTop: 8 }}>
+          <div style={{ padding: '12px 18px 0' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 34px 62px 68px', gap: 6, padding: '7px 8px', fontSize: 9.5, letterSpacing: '.08em', color: '#fff', background: GREEN, borderRadius: 8, fontWeight: 600 }}>
+              <div>DESCRIPTION</div><div style={{ textAlign: 'center' }}>QTY</div><div style={{ textAlign: 'right' }}>PRICE</div><div style={{ textAlign: 'right' }}>AMOUNT</div>
+            </div>
             {inv.items.map((it, i) => (
-              <div key={i} style={{ display: 'flex', gap: 10, padding: '5px 0', fontSize: 12.5 }}>
-                <div style={{ flex: 1, color: '#3c4a42' }}>{it.description || '—'}{it.quantity > 1 ? ` × ${it.quantity}` : ''}</div>
-                <div style={{ color: '#5d6b63' }}>{money(it.amount)}</div>
+              <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 34px 62px 68px', gap: 6, padding: '8px 8px', borderBottom: '1px solid #f5f6f4', alignItems: 'start' }}>
+                <div style={{ fontSize: 12, color: '#1a2420' }}>
+                  {it.description ? <RichText text={it.description} style={{ fontSize: 12, color: '#1a2420' }} /> : '—'}
+                </div>
+                <div style={{ textAlign: 'center', fontSize: 12, color: '#5d6b63', paddingTop: 1 }}>{it.quantity}</div>
+                <div style={{ textAlign: 'right', fontSize: 12, color: '#5d6b63', paddingTop: 1 }}>{money(it.unit_price)}</div>
+                <div style={{ textAlign: 'right', fontSize: 12, fontWeight: 600, paddingTop: 1 }}>{money(it.amount)}</div>
               </div>
             ))}
             {Number(inv.discount) > 0 && (
-              <div style={{ display: 'flex', gap: 10, padding: '5px 0', fontSize: 12.5 }}>
+              <div style={{ display: 'flex', gap: 10, padding: '6px 8px', fontSize: 12 }}>
                 <div style={{ flex: 1, color: GREEN }}>Discount</div>
                 <div style={{ color: GREEN }}>– {money(inv.discount)}</div>
               </div>
+            )}
+          </div>
+        )}
+
+        {/* total */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 18px 14px' }}>
+          <div style={{ fontSize: 11, color: '#9aa69e' }}>Subtotal {money(inv.subtotal)}</div>
+          <span style={{ flex: 1 }} />
+          <div style={{ fontSize: 12.5, color: '#5d6b63' }}>Total due</div>
+          <div style={{ fontWeight: 800, fontSize: 21 }}>{money(inv.total)}</div>
+        </div>
+
+        {/* notes + terms */}
+        {(inv.notes || info.terms) && (
+          <div style={{ margin: '0 18px', padding: '0 0 14px', borderTop: '1px solid #f0f2ef' }}>
+            {inv.notes && (
+              <>
+                <div style={{ fontSize: 9.5, letterSpacing: '.1em', color: '#9aa69e', margin: '12px 0 4px', fontWeight: 600 }}>NOTES</div>
+                <RichText text={inv.notes} style={{ fontSize: 12, color: '#5d6b63' }} />
+              </>
+            )}
+            {info.terms && (
+              <>
+                <div style={{ fontSize: 9.5, letterSpacing: '.1em', color: '#9aa69e', margin: '12px 0 4px', fontWeight: 600 }}>TERMS &amp; CONDITIONS</div>
+                <RichText text={info.terms} style={{ fontSize: 11, color: '#7c8a82' }} />
+              </>
             )}
           </div>
         )}

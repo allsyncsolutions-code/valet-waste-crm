@@ -3,7 +3,9 @@ import { MONO } from '../data.js'
 import { hasSupabase } from '../lib/supabaseClient.js'
 import { loadCustomers, createClient, loadProperties } from '../lib/customersData.js'
 import { paymentsStatus, chargeInvoice } from '../lib/paymentsData.js'
+import { loadSettings } from '../lib/settingsData.js'
 import { loadRunner } from '../lib/runnerJs.js'
+import { RichText, RichTextEditor } from '../components/RichText.jsx'
 import {
   loadInvoices,
   createInvoice,
@@ -65,6 +67,7 @@ export default function Invoices({ app }) {
   const [weeks, setWeeks] = useState('4')
 
   const [busy, setBusy] = useState(false) // detail-pane action in flight
+  const [settings, setSettings] = useState(null) // logo/terms/contact for the invoice preview
 
   async function refresh() {
     const rows = await loadInvoices(app.activeLine)
@@ -80,6 +83,7 @@ export default function Invoices({ app }) {
     }
     refresh().catch((e) => setErr(e.message || String(e))).finally(() => setLoading(false))
     loadCustomers().then(setCustomers).catch(() => {})
+    loadSettings().then(setSettings).catch(() => {})
     paymentsStatus().then((d) => { setPaymentsOk(!!(d && d.connected)); setPayCfg(d?.runner || null) }).catch(() => {})
     const unsub = subscribeInvoices(() => refresh().catch(() => {}))
     return () => unsub && unsub()
@@ -319,7 +323,7 @@ export default function Invoices({ app }) {
               Select an invoice, or create a new one.
             </div>
           )}
-          {cur && <InvoiceDetail inv={cur} paymentsOk={paymentsOk} busy={busy} onEdit={() => openEdit(cur)} onMarkPaid={onMarkPaid} onSend={onSend} onText={onText} onDelete={onDelete} onTakePayment={payCfg ? () => setTakePay(true) : null} />}
+          {cur && <InvoiceDetail inv={cur} settings={settings} paymentsOk={paymentsOk} busy={busy} onEdit={() => openEdit(cur)} onMarkPaid={onMarkPaid} onSend={onSend} onText={onText} onDelete={onDelete} onTakePayment={payCfg ? () => setTakePay(true) : null} />}
         </div>
       </div>
 
@@ -345,14 +349,31 @@ export default function Invoices({ app }) {
                   value={form.customerId}
                   disabled={!!editId}
                   onChange={(id) => setF({ customerId: id })}
-                  onAddNew={() => setAddingClient(true)}
+                  onAddNew={(name) => { setNewClient((c) => ({ ...blankClient(), name: name || '' })); setAddingClient(true) }}
                 />
               </Field>
               <div style={twoCol}>
                 <Field label="Issue date"><input value={form.issueDate || ''} onChange={(e) => setF({ issueDate: e.target.value })} style={inp} type="date" /></Field>
                 <Field label="Due date"><input value={form.dueDate || ''} onChange={(e) => setF({ dueDate: e.target.value })} style={inp} type="date" /></Field>
+                </div>
               </div>
-            </div>
+
+              {(() => {
+                const c = customers.find((x) => x.id === form.customerId)
+                if (!c) return null
+                return (
+                  <div style={{ background: '#f7f9f7', border: '1px solid #e6eae6', borderRadius: 11, padding: '10px 14px', marginBottom: 12 }}>
+                    <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.1em', color: '#9aa69e', marginBottom: 4 }}>BILL TO</div>
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>{c.name}</div>
+                    {(c.email || c.phone || c.address) && (
+                      <div style={{ fontSize: 12, color: '#7c8a82', marginTop: 2 }}>
+                        {[c.email, c.phone, c.address].filter(Boolean).join(' · ')}
+                      </div>
+                    )}
+                    {!c.email && !c.phone && <div style={{ fontSize: 11.5, color: '#c08a2e', marginTop: 3 }}>No email or phone on file — add them on the client record so the invoice shows contact info.</div>}
+                  </div>
+                )
+              })()}
 
             {addingClient && (
               <div style={{ background: '#f7f9f7', border: '1px solid #e6eae6', borderRadius: 11, padding: 14, marginBottom: 4 }}>
@@ -415,12 +436,17 @@ export default function Invoices({ app }) {
             <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.1em', color: '#9aa69e', margin: '8px 0 8px', paddingTop: 10, borderTop: '1px solid #eef0ed' }}>LINE ITEMS</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {form.items.map((it, idx) => (
-                <div key={idx} style={{ display: 'grid', gridTemplateColumns: '1fr 56px 80px 64px 24px', gap: 7, alignItems: 'center' }}>
-                  <input value={it.description} onChange={(e) => setItem(idx, { description: e.target.value })} style={{ ...inp, fontSize: 13 }} placeholder="Description" />
+                <div key={idx} style={{ display: 'grid', gridTemplateColumns: '1fr 56px 80px 64px 24px', gap: 7, alignItems: 'start' }}>
+                  <RichTextEditor
+                    value={it.description}
+                    onChange={(v) => setItem(idx, { description: v })}
+                    placeholder="Description — B, I, U, bullets supported"
+                    rows={2}
+                  />
                   <input value={it.quantity} onChange={(e) => setItem(idx, { quantity: e.target.value })} style={{ ...inp, fontSize: 13, textAlign: 'center' }} type="number" step="any" placeholder="Qty" />
                   <input value={it.unitPrice} onChange={(e) => setItem(idx, { unitPrice: e.target.value })} style={{ ...inp, fontSize: 13, textAlign: 'right' }} type="number" step="0.01" placeholder="Price" />
-                  <div style={{ fontFamily: MONO, fontSize: 12.5, textAlign: 'right', color: '#5d6b63' }}>{money(lineAmount(it))}</div>
-                  <button type="button" onClick={() => removeLine(idx)} style={{ background: 'none', border: 'none', color: '#c0492f', fontSize: 16, cursor: 'pointer', padding: 0 }} title="Remove line">×</button>
+                  <div style={{ fontFamily: MONO, fontSize: 12.5, textAlign: 'right', color: '#5d6b63', paddingTop: 30 }}>{money(lineAmount(it))}</div>
+                  <button type="button" onClick={() => removeLine(idx)} style={{ background: 'none', border: 'none', color: '#c0492f', fontSize: 16, cursor: 'pointer', padding: 0, paddingTop: 8 }} title="Remove line">×</button>
                 </div>
               ))}
             </div>
@@ -450,40 +476,65 @@ export default function Invoices({ app }) {
   )
 }
 
-function InvoiceDetail({ inv, paymentsOk, busy, onEdit, onMarkPaid, onSend, onText, onDelete, onTakePayment }) {
+function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, onSend, onText, onDelete, onTakePayment }) {
   const meta = STATUS_META[inv.status] || STATUS_META.draft
+  const company = settings || {}
+  const contactBits = [company.company_phone, company.company_email, company.company_address].filter(Boolean)
   return (
     <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, overflow: 'hidden' }}>
-      {/* header */}
-      <div style={{ padding: '20px 22px', borderBottom: '1px solid #f0f2ef', display: 'flex', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap' }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontFamily: MONO, fontSize: 12, color: '#9aa69e' }}>{inv.number}</div>
-          <div style={{ fontWeight: 700, fontSize: 19, marginTop: 2 }}>{inv.customerName || 'Unknown customer'}</div>
-          {inv.customerAddress && <div style={{ fontSize: 12.5, color: '#7c8a82' }}>{inv.customerAddress}</div>}
+      {/* masthead: logo + business name (left) · contact info (right) */}
+      <div style={{ padding: '22px 22px 16px', display: 'flex', alignItems: 'flex-start', gap: 14, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 1, minWidth: 200 }}>
+          {company.logo_url ? (
+            <img src={company.logo_url} alt="logo" style={{ width: 52, height: 52, borderRadius: 11, objectFit: 'cover', border: '1px solid #e6eae6' }} />
+          ) : (
+            <div style={{ width: 52, height: 52, borderRadius: 11, background: '#1f7a4d', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: 22 }}>
+              {(company.company_name || 'V')[0]}
+            </div>
+          )}
+          <div style={{ fontWeight: 800, fontSize: 17 }}>{company.company_name || 'Valet Waste FL'}</div>
         </div>
+        {contactBits.length > 0 && (
+          <div style={{ textAlign: 'right', fontSize: 12, color: '#5d6b63', lineHeight: 1.6 }}>
+            {company.company_phone && <div>{company.company_phone}</div>}
+            {company.company_email && <div>{company.company_email}</div>}
+            {company.company_address && <div>{company.company_address}</div>}
+          </div>
+        )}
         <span style={{ flex: 'none', fontFamily: MONO, fontSize: 11, color: meta.color, background: meta.bg, padding: '4px 11px', borderRadius: 7, fontWeight: 600 }}>{meta.label.toUpperCase()}</span>
       </div>
+      <div style={{ height: 4, background: 'linear-gradient(90deg, #1f7a4d, #2ea56b)' }} />
 
-      {/* meta row */}
-      <div style={{ display: 'flex', gap: 22, padding: '12px 22px', borderBottom: '1px solid #f0f2ef', flexWrap: 'wrap' }}>
-        <MetaItem label="Issued" value={fmtDate(inv.issueDate)} />
-        <MetaItem label="Due" value={fmtDate(inv.dueDate)} />
-        {inv.customerEmail && <MetaItem label="Email" value={inv.customerEmail} />}
-        {inv.paidAt && <MetaItem label="Paid" value={new Date(inv.paidAt).toLocaleDateString()} />}
+      {/* title + number + bill-to */}
+      <div style={{ display: 'flex', gap: 22, padding: '16px 22px 4px', flexWrap: 'wrap', alignItems: 'flex-start' }}>
+        <div style={{ flex: 1, minWidth: 180 }}>
+          <div style={{ fontSize: 22, fontWeight: 800, letterSpacing: '.04em', color: '#15281d' }}>INVOICE</div>
+          <div style={{ fontFamily: MONO, fontSize: 13, color: '#5d6b63', marginTop: 2 }}>{inv.number}</div>
+          <div style={{ fontSize: 12, color: '#9aa69e', marginTop: 6 }}>
+            Issued {fmtDate(inv.issueDate)}{inv.dueDate ? ` · Due ${fmtDate(inv.dueDate)}` : ''}{inv.paidAt ? ` · Paid ${new Date(inv.paidAt).toLocaleDateString()}` : ''}
+          </div>
+        </div>
+        <div style={{ minWidth: 200 }}>
+          <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.1em', color: '#9aa69e', marginBottom: 4 }}>BILL TO</div>
+          <div style={{ fontWeight: 700, fontSize: 14 }}>{inv.customerName || 'Unknown customer'}</div>
+          {inv.customerEmail && <div style={{ fontSize: 12.5, color: '#5d6b63', marginTop: 2 }}>{inv.customerEmail}</div>}
+          {inv.customerPhone && <div style={{ fontSize: 12.5, color: '#5d6b63', marginTop: 2 }}>{inv.customerPhone}</div>}
+          {inv.customerAddress && <div style={{ fontSize: 12.5, color: '#5d6b63', marginTop: 2 }}>{inv.customerAddress}</div>}
+        </div>
       </div>
 
       {/* line items */}
       <div style={{ padding: '14px 22px' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 50px 90px 90px', gap: 8, padding: '0 0 8px', fontFamily: MONO, fontSize: 10, letterSpacing: '.08em', color: '#9aa69e', borderBottom: '1px solid #f0f2ef' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 50px 90px 90px', gap: 8, padding: '8px 10px', fontFamily: MONO, fontSize: 10, letterSpacing: '.08em', color: '#fff', background: '#1f7a4d', borderRadius: 8 }}>
           <div>DESCRIPTION</div><div style={{ textAlign: 'center' }}>QTY</div><div style={{ textAlign: 'right' }}>PRICE</div><div style={{ textAlign: 'right' }}>AMOUNT</div>
         </div>
         {inv.items.length === 0 && <div style={{ padding: '12px 0', color: '#9aa69e', fontSize: 12.5 }}>No line items.</div>}
         {inv.items.map((it) => (
-          <div key={it.id} style={{ display: 'grid', gridTemplateColumns: '1fr 50px 90px 90px', gap: 8, padding: '9px 0', borderBottom: '1px solid #f5f6f4', fontSize: 13 }}>
-            <div>{it.description || '—'}</div>
-            <div style={{ textAlign: 'center', fontFamily: MONO, color: '#5d6b63' }}>{it.quantity}</div>
-            <div style={{ textAlign: 'right', fontFamily: MONO, color: '#5d6b63' }}>{money(it.unitPrice)}</div>
-            <div style={{ textAlign: 'right', fontFamily: MONO }}>{money(it.amount)}</div>
+          <div key={it.id} style={{ display: 'grid', gridTemplateColumns: '1fr 50px 90px 90px', gap: 8, padding: '9px 10px', borderBottom: '1px solid #f5f6f4', fontSize: 13, alignItems: 'start' }}>
+            <div style={{ color: '#1a2420' }}>{it.description ? <RichText text={it.description} style={{ fontSize: 13, color: '#1a2420' }} /> : '—'}</div>
+            <div style={{ textAlign: 'center', fontFamily: MONO, color: '#5d6b63', paddingTop: 2 }}>{it.quantity}</div>
+            <div style={{ textAlign: 'right', fontFamily: MONO, color: '#5d6b63', paddingTop: 2 }}>{money(it.unitPrice)}</div>
+            <div style={{ textAlign: 'right', fontFamily: MONO, paddingTop: 2 }}>{money(it.amount)}</div>
           </div>
         ))}
 
@@ -496,10 +547,20 @@ function InvoiceDetail({ inv, paymentsOk, busy, onEdit, onMarkPaid, onSend, onTe
         </div>
       </div>
 
-      {inv.notes && (
-        <div style={{ padding: '0 22px 14px' }}>
-          <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.08em', color: '#9aa69e', marginBottom: 5 }}>NOTES</div>
-          <div style={{ fontSize: 12.5, color: '#5d6b63', whiteSpace: 'pre-wrap' }}>{inv.notes}</div>
+      {(inv.notes || company.invoice_terms) && (
+        <div style={{ padding: '4px 22px 14px' }}>
+          {inv.notes && (
+            <>
+              <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.08em', color: '#9aa69e', margin: '10px 0 5px' }}>NOTES</div>
+              <RichText text={inv.notes} style={{ fontSize: 12.5, color: '#5d6b63' }} />
+            </>
+          )}
+          {company.invoice_terms && (
+            <>
+              <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.08em', color: '#9aa69e', margin: '12px 0 5px' }}>TERMS &amp; CONDITIONS</div>
+              <RichText text={company.invoice_terms} style={{ fontSize: 11.5, color: '#7c8a82' }} />
+            </>
+          )}
         </div>
       )}
 
@@ -554,6 +615,10 @@ function CustomerSelect({ customers, value, onChange, onAddNew, disabled }) {
 
   const q = query.trim().toLowerCase()
   const filtered = q ? customers.filter((c) => (c.name || '').toLowerCase().includes(q)) : customers
+  // Typed a name nobody in the system matches → offer to add them. Exact
+  // (case-insensitive) matches mean they're already in the system.
+  const exact = q && customers.some((c) => (c.name || '').toLowerCase() === q)
+  const typed = query.trim()
 
   return (
     <div ref={boxRef} style={{ position: 'relative' }}>
@@ -561,16 +626,24 @@ function CustomerSelect({ customers, value, onChange, onAddNew, disabled }) {
         value={open ? query : (selected?.name || '')}
         onChange={(e) => { setQuery(e.target.value); setOpen(true) }}
         onFocus={() => { setOpen(true); setQuery('') }}
-        placeholder={selected ? selected.name : 'Search clients…'}
+        placeholder={selected ? selected.name : 'Search or type a new name…'}
         style={inp}
       />
       {open && (
         <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, marginTop: 4, background: '#fff', border: '1px solid #dde2dd', borderRadius: 9, boxShadow: '0 12px 32px rgba(0,0,0,.14)', zIndex: 20, maxHeight: 240, overflowY: 'auto', padding: 4 }}>
+          {typed && !exact && (
+            <div
+              onMouseDown={(e) => { e.preventDefault(); setOpen(false); setQuery(''); onAddNew(typed) }}
+              style={{ padding: '8px 10px', borderRadius: 7, cursor: 'pointer', fontSize: 13, fontWeight: 600, color: '#1f7a4d', background: '#f3faf5' }}
+            >
+              {filtered.length ? 'Not them? ' : ''}Add “{typed}” as a new client…
+            </div>
+          )}
           <div
-            onMouseDown={(e) => { e.preventDefault(); setOpen(false); setQuery(''); onAddNew() }}
-            style={{ padding: '8px 10px', borderRadius: 7, cursor: 'pointer', fontSize: 13, fontWeight: 600, color: '#1f7a4d' }}
-          >+ Add new client…</div>
-          {filtered.length === 0 && <div style={{ padding: '8px 10px', fontSize: 12.5, color: '#9aa69e' }}>No clients match.</div>}
+            onMouseDown={(e) => { e.preventDefault(); setOpen(false); setQuery(''); onAddNew('') }}
+            style={{ padding: '8px 10px', borderRadius: 7, cursor: 'pointer', fontSize: 12.5, fontWeight: 600, color: '#5d6b63' }}
+          >+ Add a different new client…</div>
+          {filtered.length === 0 && <div style={{ padding: '8px 10px', fontSize: 12.5, color: '#9aa69e' }}>No clients match — add them above.</div>}
           {filtered.map((c) => (
             <div
               key={c.id}
@@ -590,14 +663,6 @@ function SummaryCard({ label, value, sub, accent }) {
       <div style={{ fontSize: 11, color: '#7c8a82' }}>{label}</div>
       <div style={{ fontFamily: MONO, fontSize: 21, fontWeight: 600, color: accent, marginTop: 2 }}>{value}</div>
       <div style={{ fontSize: 10.5, color: '#9aa69e' }}>{sub}</div>
-    </div>
-  )
-}
-function MetaItem({ label, value }) {
-  return (
-    <div>
-      <div style={{ fontFamily: MONO, fontSize: 9.5, letterSpacing: '.08em', color: '#9aa69e' }}>{label.toUpperCase()}</div>
-      <div style={{ fontSize: 12.5, marginTop: 2 }}>{value}</div>
     </div>
   )
 }

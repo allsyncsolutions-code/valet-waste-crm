@@ -46,6 +46,22 @@ export async function saveSmsTemplates(t) {
   if (error) throw error
 }
 
+// Invoice branding: business contact info shown on invoices + default terms
+// & conditions (markdown-subset formatting) that populate every invoice.
+export async function saveInvoiceSettings(t) {
+  const { error } = await supabase
+    .from('app_settings')
+    .update({
+      company_phone: (t.company_phone || '').trim() || null,
+      company_email: (t.company_email || '').trim() || null,
+      company_address: (t.company_address || '').trim() || null,
+      invoice_terms: t.invoice_terms || null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', 1)
+  if (error) throw error
+}
+
 // Master on/off for the "service complete" check-out text. Per-contact
 // notify_on_service still governs WHO gets it. Off by default.
 export async function saveNotifyOnComplete(on) {

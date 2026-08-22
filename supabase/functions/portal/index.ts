@@ -407,10 +407,10 @@ Deno.serve(async (req) => {
       // portal payload. The charge itself goes through the `payments` fn.
       const invoiceId = String(body.invoice_id || "")
       if (!slug || !invoiceId) return json({ error: "Missing slug or invoice_id." }, 400)
-      const cust = (await sbGet(`customers?portal_slug=eq.${enc(String(slug))}&select=id,name`))[0]
+      const cust = (await sbGet(`customers?portal_slug=eq.${enc(String(slug))}&select=id,name,email,phone`))[0]
       if (!cust) return json({ error: "This payment link isn't valid." }, 404)
       const inv = (await sbGet(
-        `invoices?id=eq.${enc(invoiceId)}&customer_id=eq.${cust.id}&select=id,number,status,total,subtotal,discount,due_date,issue_date,invoice_line_items(description,quantity,unit_price,amount,position)`,
+        `invoices?id=eq.${enc(invoiceId)}&customer_id=eq.${cust.id}&select=id,number,status,total,subtotal,discount,due_date,issue_date,notes,invoice_line_items(description,quantity,unit_price,amount,position)`,
       ))[0]
       if (!inv) return json({ error: "This payment link isn't valid." }, 404)
       const settings = await getSettings()
@@ -420,12 +420,21 @@ Deno.serve(async (req) => {
         .map((li: any) => ({ description: li.description || "", quantity: Number(li.quantity || 0), unit_price: Number(li.unit_price || 0), amount: Number(li.amount || 0) }))
       return json({
         ok: true,
-        company: { name: settings.company_name || "Valet Waste FL", logo_url: settings.logo_url || null },
+        company: {
+          name: settings.company_name || "Valet Waste FL",
+          logo_url: settings.logo_url || null,
+          phone: settings.company_phone || null,
+          email: settings.company_email || null,
+          address: settings.company_address || null,
+        },
+        terms: settings.invoice_terms || null,
         customer_name: cust.name,
+        customer_email: cust.email || null,
+        customer_phone: cust.phone || null,
         invoice: {
           id: inv.id, number: inv.number, status: inv.status,
           total: inv.total, subtotal: inv.subtotal, discount: inv.discount,
-          due_date: inv.due_date, issue_date: inv.issue_date, items,
+          due_date: inv.due_date, issue_date: inv.issue_date, notes: inv.notes || null, items,
         },
         payment: {
           available: !!(settings.run_mid && settings.run_public_key),

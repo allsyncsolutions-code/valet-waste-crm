@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { MONO } from '../data.js'
 import { listTags, createTag, updateTag, deleteTag, tagUsageCounts, subscribeTags, TAG_COLORS } from '../lib/tagsData.js'
-import { loadSettings, saveDepot, geocodeAddress, subscribeSettings, saveSmsTemplates, saveRandyTone, saveNotifyOnComplete, RANDY_TONES } from '../lib/settingsData.js'
+import { loadSettings, saveDepot, geocodeAddress, subscribeSettings, saveSmsTemplates, saveRandyTone, saveNotifyOnComplete, saveInvoiceSettings, RANDY_TONES } from '../lib/settingsData.js'
+import { RichTextEditor, RichText } from '../components/RichText.jsx'
 import { paymentsStatus, savePaymentsCredentials, revealRequest, revealVerify } from '../lib/paymentsData.js'
 import { platformBillingStatus, platformBillingCheckout, platformBillingPortal } from '../lib/platformBillingData.js'
 import { getSmsConfig, saveSmsConfig, sendTestSms, listSmsSubscriptions, ensureSmsSubscription } from '../lib/smsData.js'
@@ -47,6 +48,9 @@ export default function Settings({ app }) {
   const [smsTesting, setSmsTesting] = useState(false)
   const [smsSub, setSmsSub] = useState({ loading: false, list: [], busy: false })
   const [tpl, setTpl] = useState({ company_name: '', sms_checkin_template: '', sms_checkout_template: '', sms_reminder_template: '', sms_invoice_template: '' })
+  const [invCfg, setInvCfg] = useState({ company_phone: '', company_email: '', company_address: '', invoice_terms: '' })
+  const [invSaving, setInvSaving] = useState(false)
+  const [invMsg, setInvMsg] = useState(null)
   const [tplSaving, setTplSaving] = useState(false)
   const [tplMsg, setTplMsg] = useState(null)
   const [randyTone, setRandyTone] = useState('spicy')
@@ -80,6 +84,12 @@ export default function Settings({ app }) {
         })
         if (s.randy_tone) setRandyTone(s.randy_tone)
         setNotifyComplete(!!s.notify_on_complete)
+        setInvCfg({
+          company_phone: s.company_phone || '',
+          company_email: s.company_email || '',
+          company_address: s.company_address || '',
+          invoice_terms: s.invoice_terms || '',
+        })
       }
     }).catch(() => {})
     load()
@@ -289,6 +299,19 @@ export default function Settings({ app }) {
       setTplSaving(false)
     }
   }
+  async function saveInvoiceCfg() {
+    setInvSaving(true)
+    setInvMsg(null)
+    try {
+      await saveInvoiceSettings(invCfg)
+      setInvMsg({ type: 'ok', text: 'Saved — every invoice now shows this contact info and terms.' })
+    } catch (e2) {
+      setInvMsg({ type: 'err', text: e2.message || String(e2) })
+    } finally {
+      setInvSaving(false)
+    }
+  }
+
   async function toggleNotifyComplete() {
     const next = !notifyComplete
     setNotifyComplete(next) // optimistic
@@ -682,6 +705,39 @@ export default function Settings({ app }) {
         <TplField label="Check-out (service complete)" value={tpl.sms_checkout_template} onChange={(v) => setTpl((t) => ({ ...t, sms_checkout_template: v }))} />
         <TplField label="Service reminder" value={tpl.sms_reminder_template} onChange={(v) => setTpl((t) => ({ ...t, sms_reminder_template: v }))} />
         <button type="button" onClick={saveTemplates} disabled={tplSaving} style={{ marginTop: 4, background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: tplSaving ? 0.6 : 1 }}>{tplSaving ? 'Saving…' : 'Save templates'}</button>
+      </div>
+
+      {/* invoicing: contact info + default terms */}
+      <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '20px 22px', marginBottom: 16 }}>
+        <div style={{ fontWeight: 700, fontSize: 16 }}>Invoicing</div>
+        <div style={{ fontSize: 12.5, color: '#7c8a82', marginTop: 3, marginBottom: 14 }}>
+          Business contact info and terms &amp; conditions printed on every invoice (web + customer pay page).
+        </div>
+        {invMsg && (
+          <div style={{ background: invMsg.type === 'ok' ? '#eef7f1' : '#fdecea', border: '1px solid ' + (invMsg.type === 'ok' ? '#cfe7da' : '#f3b7b0'), color: invMsg.type === 'ok' ? '#1f7a4d' : '#9a2c1e', borderRadius: 10, padding: '9px 12px', fontSize: 12.5, marginBottom: 14 }}>{invMsg.text}</div>
+        )}
+        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 11 }}>
+          <SField label="Business phone"><input value={invCfg.company_phone} onChange={(e) => setInvCfg((c) => ({ ...c, company_phone: e.target.value }))} style={inp} placeholder="(813) 555-0123" /></SField>
+          <SField label="Business email"><input value={invCfg.company_email} onChange={(e) => setInvCfg((c) => ({ ...c, company_email: e.target.value }))} style={inp} placeholder="billing@valetwastefl.com" type="email" /></SField>
+        </div>
+        <SField label="Business address"><input value={invCfg.company_address} onChange={(e) => setInvCfg((c) => ({ ...c, company_address: e.target.value }))} style={inp} placeholder="123 Main St, Tampa, FL 33601" /></SField>
+        <SField label="Terms & conditions (on every invoice)">
+          <RichTextEditor
+            value={invCfg.invoice_terms}
+            onChange={(v) => setInvCfg((c) => ({ ...c, invoice_terms: v }))}
+            placeholder={'Payment due within 15 days.\n- Late payments may pause service\n- Contact us with any questions'}
+            rows={6}
+          />
+        </SField>
+        {invCfg.invoice_terms.trim() && (
+          <div style={{ marginTop: 4, marginBottom: 12 }}>
+            <div style={{ fontSize: 11, color: '#9aa69e', marginBottom: 4 }}>PREVIEW — how it prints on the invoice</div>
+            <div style={{ border: '1px dashed #dde2dd', borderRadius: 9, padding: '10px 12px', fontSize: 12.5, color: '#5d6b63' }}>
+              <RichText text={invCfg.invoice_terms} />
+            </div>
+          </div>
+        )}
+        <button type="button" onClick={saveInvoiceCfg} disabled={invSaving} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: invSaving ? 0.6 : 1 }}>{invSaving ? 'Saving…' : 'Save invoicing settings'}</button>
       </div>
 
       {/* tags */}
