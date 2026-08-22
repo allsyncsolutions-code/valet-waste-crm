@@ -27,6 +27,11 @@ export const revealVerify = (email, code) => call({ action: 'reveal_verify', ema
 export const invoicePaymentUrl = (invoiceId) =>
   call({ action: 'payment_url', invoice_id: invoiceId, origin: window.location.origin })
 
+// Email the customer a full HTML invoice with a Pay Now button (SendGrid,
+// server-side). Mints the pay link if needed and marks the invoice 'sent'.
+export const emailInvoice = (invoiceId) =>
+  call({ action: 'email_invoice', invoice_id: invoiceId, origin: window.location.origin })
+
 // Run a one-time charge against a tokenized card (from Runner.js). Optionally
 // vault the card for autopay (save_card). Pass useSaved:true to charge the
 // customer's card on file (vault) instead of a freshly tokenized card — used

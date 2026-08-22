@@ -14,6 +14,7 @@ import {
   deleteInvoice,
   sendInvoiceLink,
   textInvoice,
+  emailInvoice,
   subscribeInvoices,
   invoiceTotals,
   lineAmount,
@@ -241,6 +242,7 @@ export default function Invoices({ app }) {
   const onMarkPaid = () => action(() => markPaid(cur.id, cur.number))
   const onSend = () => action(async () => { await sendInvoiceLink(cur) })
   const onText = () => action(async () => { await textInvoice(cur) })
+  const onEmail = () => action(async () => { await emailInvoice(cur) })
   async function onDelete() {
     if (!cur || !window.confirm(`Delete invoice ${cur.number}? This can’t be undone.`)) return
     const id = cur.id
@@ -323,7 +325,7 @@ export default function Invoices({ app }) {
               Select an invoice, or create a new one.
             </div>
           )}
-          {cur && <InvoiceDetail inv={cur} settings={settings} paymentsOk={paymentsOk} busy={busy} onEdit={() => openEdit(cur)} onMarkPaid={onMarkPaid} onSend={onSend} onText={onText} onDelete={onDelete} onTakePayment={payCfg ? () => setTakePay(true) : null} />}
+          {cur && <InvoiceDetail inv={cur} settings={settings} paymentsOk={paymentsOk} busy={busy} onEdit={() => openEdit(cur)} onMarkPaid={onMarkPaid} onSend={onSend} onText={onText} onEmail={onEmail} onDelete={onDelete} onTakePayment={payCfg ? () => setTakePay(true) : null} />}
         </div>
       </div>
 
@@ -476,7 +478,7 @@ export default function Invoices({ app }) {
   )
 }
 
-function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, onSend, onText, onDelete, onTakePayment }) {
+function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, onSend, onText, onEmail, onDelete, onTakePayment }) {
   const meta = STATUS_META[inv.status] || STATUS_META.draft
   const company = settings || {}
   const contactBits = [company.company_phone, company.company_email, company.company_address].filter(Boolean)
@@ -586,6 +588,9 @@ function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, on
         )}
         {inv.status !== 'paid' && (
           <button onClick={onText} disabled={busy || !inv.customerPhone} title={inv.customerPhone ? '' : 'No phone number on file for this customer'} style={{ background: '#fff', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: inv.customerPhone ? 'pointer' : 'not-allowed', opacity: busy || !inv.customerPhone ? 0.5 : 1 }}>{busy ? 'Working…' : 'Text invoice'}</button>
+        )}
+        {inv.status !== 'paid' && inv.status !== 'void' && (
+          <button onClick={onEmail} disabled={busy || !inv.customerEmail} title={inv.customerEmail ? '' : 'No email on file for this customer'} style={{ background: '#fff', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: inv.customerEmail ? 'pointer' : 'not-allowed', opacity: busy || !inv.customerEmail ? 0.5 : 1 }}>{busy ? 'Working…' : '✉️ Email invoice'}</button>
         )}
         {inv.status !== 'paid' && <button onClick={onMarkPaid} disabled={busy} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: busy ? 0.6 : 1 }}>Mark paid</button>}
         <div style={{ flex: 1 }} />

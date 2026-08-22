@@ -17,6 +17,11 @@
 //                                   → runs a one-time charge via /charge; on
 //                                     approval stores run_trans_id and marks the
 //                                     invoice paid. Optionally vaults the card.
+//   email_invoice {invoice_id, origin}
+//                                   → emails the customer an HTML invoice (line
+//                                     items, totals, terms) with a Pay Now button
+//                                     via SendGrid; mints the pay link if needed
+//                                     and marks the invoice 'sent'.
 //
 // Auth: verify_jwt OFF — the charge action is invoked from the public portal
 // pay screen (anon key + invoice context), mirroring the portal function.
@@ -211,6 +216,96 @@ async function runVaultCreate(env: string, token: string, body: Record<string, u
   return d
 }
 
+// ---- invoice email (SendGrid) -------------------------------------------------
+// Plain-text fallback for the invoice email (same content as the HTML below).
+function invoiceEmailText(c: Record<string, unknown>, s: Record<string, unknown>, inv: Record<string, unknown>, items: Array<Record<string, unknown>>, url: string) {
+  const company = s.company_name || "Valet Waste FL"
+  const money = (v: unknown) => "$" + Number(v || 0).toFixed(2)
+  const lines = items.map((it) => `  ${it.description || "Service"} x${it.quantity} — ${money(it.amount)}`)
+  return [
+    `Hi ${c.name || "there"},`,
+    ``,
+    `Invoice ${inv.number} from ${company} is ready.`,
+    ...lines,
+    `Subtotal: ${money(inv.subtotal)}`,
+    Number(inv.discount) ? `Discount: -${money(inv.discount)}` : "",
+    `Total due${inv.due_date ? ` by ${String(inv.due_date).slice(0, 10)}` : ""}: ${money(inv.total)}`,
+    ``,
+    `Pay online: ${url}`,
+    inv.notes ? `\nNotes: ${inv.notes}` : "",
+    s.invoice_terms ? `\n${s.invoice_terms}` : "",
+    ``,
+    `Thank you!`,
+    [s.company_name, s.company_phone, s.company_email].filter(Boolean).join(" · "),
+  ].filter((l) => l !== "").join("\n")
+}
+
+function invoiceEmailHtml(c: Record<string, unknown>, s: Record<string, unknown>, inv: Record<string, unknown>, items: Array<Record<string, unknown>>, url: string) {
+  const company = s.company_name || "Valet Waste FL"
+  const money = (v: unknown) => "$" + Number(v || 0).toFixed(2)
+  const esc = (t: unknown) => String(t ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" } as Record<string, string>)[ch])
+  const rows = items
+    .map((it) => `<tr>
+      <td style="padding:7px 10px;border-bottom:1px solid #e6ece8;font-size:14px;color:#1a2420">${esc(it.description || "Service")}</td>
+      <td style="padding:7px 10px;border-bottom:1px solid #e6ece8;font-size:14px;color:#5d6b63;text-align:center;white-space:nowrap">${it.quantity}</td>
+      <td style="padding:7px 10px;border-bottom:1px solid #e6ece8;font-size:14px;color:#5d6b63;text-align:right;white-space:nowrap">${money(it.unit_price)}</td>
+      <td style="padding:7px 10px;border-bottom:1px solid #e6ece8;font-size:14px;color:#1a2420;text-align:right;white-space:nowrap">${money(it.amount)}</td>
+    </tr>`)
+    .join("")
+  return `<!DOCTYPE html><html><body style="margin:0;padding:24px 12px;background:#f2f5f3;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <div style="max-width:560px;margin:0 auto;background:#fff;border-radius:14px;overflow:hidden;border:1px solid #e0e7e2">
+    <div style="background:#1f7a4d;color:#fff;padding:22px 26px">
+      <div style="font-size:18px;font-weight:700">${esc(company)}</div>
+      <div style="font-size:13px;opacity:.85;margin-top:2px">Invoice ${esc(inv.number)}${inv.due_date ? ` · Due ${esc(String(inv.due_date).slice(0, 10))}` : ""}</div>
+    </div>
+    <div style="padding:26px">
+      <p style="margin:0 0 18px;font-size:15px;color:#1a2420">Hi ${esc(c.name || "there")}, your invoice is ready. Total due: <b>${money(inv.total)}</b></p>
+      <table style="width:100%;border-collapse:collapse">
+        <tr style="background:#f7faf8">
+          <th style="padding:8px 10px;text-align:left;font-size:12px;color:#7c8a82;text-transform:uppercase;letter-spacing:.04em">Item</th>
+          <th style="padding:8px 10px;text-align:center;font-size:12px;color:#7c8a82;text-transform:uppercase;letter-spacing:.04em">Qty</th>
+          <th style="padding:8px 10px;text-align:right;font-size:12px;color:#7c8a82;text-transform:uppercase;letter-spacing:.04em">Rate</th>
+          <th style="padding:8px 10px;text-align:right;font-size:12px;color:#7c8a82;text-transform:uppercase;letter-spacing:.04em">Amount</th>
+        </tr>
+        ${rows}
+        <tr><td colspan="3" style="padding:9px 10px;font-size:13px;color:#5d6b63;text-align:right">Subtotal</td><td style="padding:9px 10px;font-size:13px;color:#5d6b63;text-align:right">${money(inv.subtotal)}</td></tr>
+        ${Number(inv.discount) ? `<tr><td colspan="3" style="padding:4px 10px;font-size:13px;color:#5d6b63;text-align:right">Discount</td><td style="padding:4px 10px;font-size:13px;color:#5d6b63;text-align:right">-${money(inv.discount)}</td></tr>` : ""}
+        <tr><td colspan="3" style="padding:6px 10px;font-size:15px;font-weight:700;color:#1a2420;text-align:right">Total</td><td style="padding:6px 10px;font-size:15px;font-weight:700;color:#1f7a4d;text-align:right">${money(inv.total)}</td></tr>
+      </table>
+      <div style="text-align:center;margin:26px 0 8px">
+        <a href="${url}" style="display:inline-block;background:#1f7a4d;color:#fff;text-decoration:none;font-size:15px;font-weight:600;padding:13px 34px;border-radius:9px">Pay Now</a>
+        <div style="font-size:12px;color:#7c8a82;margin-top:10px;word-break:break-all">Or paste this link: ${url}</div>
+      </div>
+      ${inv.notes ? `<p style="margin:18px 0 0;font-size:13px;color:#5d6b63"><b>Notes:</b> ${esc(inv.notes)}</p>` : ""}
+      ${s.invoice_terms ? `<p style="margin:14px 0 0;font-size:12px;color:#7c8a82;border-top:1px solid #e6ece8;padding-top:14px">${esc(s.invoice_terms)}</p>` : ""}
+    </div>
+    <div style="padding:16px 26px;background:#f7faf8;border-top:1px solid #e6ece8;font-size:12px;color:#7c8a82">
+      ${[s.company_phone, s.company_email, s.company_address].filter(Boolean).map((v) => `<div>${esc(v)}</div>`).join("")}
+    </div>
+  </div>
+</body></html>`
+}
+
+async function sendInvoiceEmail(to: string, subject: string, html: string, text: string, fromName: string) {
+  const key = Deno.env.get("SENDGRID_API_KEY")
+  if (!key) throw new Error("SENDGRID_API_KEY is not configured.")
+  const from = Deno.env.get("SENDGRID_FROM") || "valetwastefl@allsynccrm.com"
+  const r = await fetch("https://api.sendgrid.com/v3/mail/send", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      personalizations: [{ to: [{ email: to }] }],
+      from: { email: from, name: fromName },
+      subject,
+      content: [
+        { type: "text/plain", value: text },
+        { type: "text/html", value: html },
+      ],
+    }),
+  })
+  if (!r.ok) throw new Error(`SendGrid ${r.status}: ${await r.text()}`)
+}
+
 // ---- staff auth for save_credentials -----------------------------------------
 async function isStaff(req: Request): Promise<boolean> {
   const t = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "")
@@ -343,6 +438,45 @@ Deno.serve(async (req) => {
         await sbPatch(`invoices?id=eq.${inv.id}`, patch)
       }
       return json({ ok: true, url })
+    }
+
+    if (action === "email_invoice") {
+      if (!body.invoice_id) return json({ error: "Missing invoice_id." }, 400)
+      const inv = (await sbGet(
+        `invoices?id=eq.${enc(String(body.invoice_id))}&select=id,number,customer_id,status,payment_url,subtotal,discount,total,due_date,issue_date,notes`,
+      ))[0]
+      if (!inv) return json({ error: "Invoice not found." }, 404)
+      if (inv.status === "void") return json({ error: "This invoice is void." }, 400)
+      const cust = (await sbGet(`customers?id=eq.${inv.customer_id}&select=name,email,portal_slug`))[0]
+      if (!cust?.email) return json({ error: "This customer has no email on file." }, 400)
+      if (!cust?.portal_slug) return json({ error: "This customer has no portal — add a portal slug first." }, 400)
+
+      // Reuse the stored pay link, or mint one (marks the invoice sent).
+      const origin = String(body.origin || PORTAL_ORIGIN).replace(/\/$/, "")
+      let url = inv.payment_url
+      if (!url) {
+        url = `${origin}/?portal=${enc(cust.portal_slug)}&pay_invoice=${enc(String(inv.id))}`
+        const patch: Record<string, unknown> = { payment_url: url }
+        if (inv.status === "draft") {
+          patch.status = "sent"
+          patch.sent_at = new Date().toISOString()
+        }
+        await sbPatch(`invoices?id=eq.${inv.id}`, patch)
+      }
+
+      const items = await sbGet(`invoice_line_items?invoice_id=eq.${inv.id}&select=description,quantity,unit_price,amount&order=position`)
+      const s = await getSettings()
+      const company = s.company_name || "Valet Waste FL"
+      const money = (v: unknown) => "$" + Number(v || 0).toFixed(2)
+      const subject = `${company} — Invoice ${inv.number} (${money(inv.total)})`
+      await sendInvoiceEmail(
+        cust.email,
+        subject,
+        invoiceEmailHtml(cust, s, inv, items, url),
+        invoiceEmailText(cust, s, inv, items, url),
+        company,
+      )
+      return json({ ok: true, url, to: cust.email })
     }
 
     if (action === "charge_invoice") {

@@ -3,7 +3,7 @@
 // Payment links are minted through the `payments` edge function (Run Merchant)
 // so merchant credentials stay server-side.
 import { supabase } from './supabaseClient.js'
-import { invoicePaymentUrl } from './paymentsData.js'
+import { invoicePaymentUrl, emailInvoice as emailInvoicePay } from './paymentsData.js'
 import { logActivity } from './activityData.js'
 import { loadSettings } from './settingsData.js'
 import { sendSms, renderTemplate } from './smsData.js'
@@ -202,6 +202,20 @@ export async function textInvoice(invoice, customMessage) {
     await setInvoiceStatus(invoice.id, 'sent', { sent_at: new Date().toISOString() })
   }
   logActivity({ type: 'invoice_texted', summary: `Texted invoice ${invoice.number} to ${invoice.customerName || 'customer'}`, entityType: 'invoice', entityId: invoice.id })
+  return r
+}
+
+// Email the customer their invoice: a full HTML invoice (line items, totals,
+// terms) with a Pay Now button, sent server-side via SendGrid through the
+// payments edge function. Marks the invoice sent.
+export async function emailInvoice(invoice) {
+  if (!invoice.customerEmail) throw new Error('This customer has no email on file.')
+  const r = await emailInvoicePay(invoice.id)
+  if (!r || !r.ok) throw new Error('Could not send the invoice email.')
+  if (invoice.status === 'draft') {
+    await setInvoiceStatus(invoice.id, 'sent', { sent_at: new Date().toISOString() })
+  }
+  logActivity({ type: 'invoice_emailed', summary: `Emailed invoice ${invoice.number} to ${invoice.customerEmail}`, entityType: 'invoice', entityId: invoice.id })
   return r
 }
 
