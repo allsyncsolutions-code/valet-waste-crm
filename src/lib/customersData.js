@@ -394,7 +394,7 @@ export async function loadPropertyVisits(propertyId, limit = 20) {
 export async function loadPropertyArchive(propertyId) {
   const { data: stops, error } = await supabase
     .from('route_stops')
-    .select('id, check_in, check_out, status, skip_reason, skipped_by, skipped_at')
+    .select('id, check_in, check_out, status, skip_reason, skipped_by, skipped_at, checkin_note')
     .eq('property_id', propertyId)
     .or('check_in.not.is.null,skipped_at.not.is.null')
   if (error) throw error
@@ -410,6 +410,7 @@ export async function loadPropertyArchive(propertyId) {
         at: s.check_in,
         checkIn: s.check_in,
         checkOut: s.check_out,
+        note: s.checkin_note || '',
         photos: photoMap[s.id] || [],
       })
     } else if (s.skipped_at) {

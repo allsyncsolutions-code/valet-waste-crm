@@ -1073,7 +1073,10 @@ export default function Clients({ app }) {
                                     <span style={{ fontWeight: 600, color: '#1a2420', minWidth: 96, flex: 'none' }}>{fmtDate(e.at)}</span>
                                     <div style={{ flex: 1, minWidth: 0 }}>
                                       {e.kind === 'visit' && (
-                                        <span style={{ color: '#5d6b63' }}>Checked in {fmtTime(e.checkIn)}{e.checkOut ? ` · out ${fmtTime(e.checkOut)}` : ''}</span>
+                                        <span style={{ color: '#5d6b63' }}>
+                                          Checked in {fmtTime(e.checkIn)}{e.checkOut ? ` · out ${fmtTime(e.checkOut)}` : ''}
+                                          {e.note ? <span style={{ color: '#1a2420' }}> — 📝 {e.note}</span> : null}
+                                        </span>
                                       )}
                                       {e.kind === 'skip' && (
                                         <span style={{ color: '#8a6d1e' }}>Skipped{e.note ? ` — ${e.note}` : ''}{e.by ? <span style={{ color: '#9aa69e' }}> ({e.by})</span> : null}</span>
