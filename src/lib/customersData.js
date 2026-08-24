@@ -388,8 +388,9 @@ export async function loadPropertyVisits(propertyId, limit = 20) {
 }
 
 // Full service archive for one property: every check-in (with the stop photos
-// taken that day), every skip (with its reason), and every property photo
-// (with its note) — merged into one newest-first timeline the Clients view can
+// taken that day), every skip (with its reason), every property photo
+// (with its note), and the audit trail (who added/edited the address)
+// — merged into one newest-first timeline the Clients view can
 // search by date range or free text.
 export async function loadPropertyArchive(propertyId) {
   const { data: stops, error } = await supabase
@@ -398,8 +399,11 @@ export async function loadPropertyArchive(propertyId) {
     .eq('property_id', propertyId)
     .or('check_in.not.is.null,skipped_at.not.is.null')
   if (error) throw error
-  const photoMap = await loadStopPhotos((stops || []).map((s) => s.id))
-  const propPhotos = await loadPropertyPhotos(propertyId)
+  const [photoMap, propPhotos, logRows] = await Promise.all([
+    loadStopPhotos((stops || []).map((s) => s.id)),
+    loadPropertyPhotos(propertyId),
+    loadPropertyLog(propertyId, 200),
+  ])
 
   const entries = []
   for (const s of stops || []) {
@@ -431,6 +435,16 @@ export async function loadPropertyArchive(propertyId) {
       at: `${ph.takenOn || (ph.createdAt || '').slice(0, 10)}T12:00:00`,
       note: ph.note || '',
       url: ph.url,
+      photo: ph, // full property_photos row (id/takenOn/note) so the UI can edit or delete it
+    })
+  }
+  for (const r of logRows || []) {
+    entries.push({
+      key: `log-${r.id}`,
+      kind: 'log',
+      at: r.created_at,
+      note: r.summary || '',
+      by: r.actor || '',
     })
   }
   entries.sort((a, b) => new Date(b.at) - new Date(a.at))

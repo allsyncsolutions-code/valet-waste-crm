@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { MONO } from '../data.js'
-import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, addProperty, updateProperty, savePin, loadPropertyVisits, loadPropertyArchive, loadPropertyAddressIndex, countDuplicateProperties, findDuplicateProperties, mergeDuplicateGroup, loadPropertiesByIds, countPropertiesByCustomer, deleteProperty, sendPortalInvite, loadClientFieldActivity, loadClientPortalRequests, loadClientNotes, addClientNote, deleteClientNote, loadPropertyLog } from '../lib/customersData.js'
+import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, addProperty, updateProperty, savePin, loadPropertyArchive, loadPropertyAddressIndex, countDuplicateProperties, findDuplicateProperties, mergeDuplicateGroup, loadPropertiesByIds, countPropertiesByCustomer, deleteProperty, sendPortalInvite, loadClientFieldActivity, loadClientPortalRequests, loadClientNotes, addClientNote, deleteClientNote } from '../lib/customersData.js'
 import PinPicker from '../components/PinPicker.jsx'
 import { geocodeAll } from '../lib/importData.js'
 import { listTags, findOrCreateTag, subscribeTags } from '../lib/tagsData.js'
 import { paymentsStatus, invoicePaymentUrl } from '../lib/paymentsData.js'
 import { createInvoice } from '../lib/invoicesData.js'
-import { loadPropertyPhotos, uploadPropertyPhoto, updatePropertyPhoto, deletePropertyPhoto } from '../lib/propertyPhotosData.js'
+import { uploadPropertyPhoto, updatePropertyPhoto, deletePropertyPhoto } from '../lib/propertyPhotosData.js'
 
 const todayStr = () => new Date().toISOString().slice(0, 10)
 const fmtDay = (d) => { try { return new Date(d + 'T00:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) } catch { return d } }
@@ -75,9 +75,6 @@ export default function Clients({ app }) {
   const [addingAddr, setAddingAddr] = useState(false)
   const [newP, setNewP] = useState(BLANK_PROP)
   const [pBusy, setPBusy] = useState(false)
-  const [histPid, setHistPid] = useState(null)
-  const [hist, setHist] = useState([])
-  const [histBusy, setHistBusy] = useState(false)
   const [archPid, setArchPid] = useState(null) // property whose archive is open
   const [archRows, setArchRows] = useState([])
   const [archBusy, setArchBusy] = useState(false)
@@ -85,8 +82,6 @@ export default function Clients({ app }) {
   const [archFrom, setArchFrom] = useState('')
   const [archTo, setArchTo] = useState('')
   const [archView, setArchView] = useState(null) // {url, caption} photo open in the lightbox
-  const [photoPid, setPhotoPid] = useState(null)
-  const [photos, setPhotos] = useState([])
   const [photoBusy, setPhotoBusy] = useState(false)
   const [photoDate, setPhotoDate] = useState(todayStr())
   const [photoNote, setPhotoNote] = useState('')
@@ -107,9 +102,6 @@ export default function Clients({ app }) {
   const [noteInput, setNoteInput] = useState('')
   const [noteBusy, setNoteBusy] = useState(false)
   const [billingFilter, setBillingFilter] = useState('all') // all | subscription | one_time
-  const [logPid, setLogPid] = useState(null) // property whose activity log is open
-  const [logRows, setLogRows] = useState([])
-  const [logBusy, setLogBusy] = useState(false)
   const [focusPropId, setFocusPropId] = useState(null) // property briefly highlighted when jumped to from Routes/Field
   const [pinProp, setPinProp] = useState(null) // property whose pin is being set manually
   const [propSearch, setPropSearch] = useState('') // filter within a client's addresses
@@ -346,21 +338,18 @@ export default function Clients({ app }) {
     setEditPid(p.id)
     setEditP({ address: p.address || '', service: p.service || '', notes: p.notes || '', price: p.price ?? '', techPay: p.tech_pay ?? '', days: p.pickup_days || [], frequency: p.pickup_frequency || 'weekly' })
   }
-  async function toggleHistory(p) {
-    if (histPid === p.id) { setHistPid(null); setHist([]); return }
-    setHistPid(p.id); setHist([]); setHistBusy(true)
-    try { setHist(await loadPropertyVisits(p.id)) }
-    catch (e) { setErr(e.message || String(e)) }
-    finally { setHistBusy(false) }
-  }
-  // Full archive for one address: every check-in, skip and photo on a single
-  // searchable timeline. Opening resets the filters so each address starts fresh.
+  // Full archive for one address: every check-in, skip, photo and change on a
+  // single searchable timeline. Opening resets the filters so each address starts fresh.
   async function toggleArchive(p) {
     if (archPid === p.id) { setArchPid(null); setArchRows([]); return }
-    setArchPid(p.id); setArchRows([]); setArchQ(''); setArchFrom(''); setArchTo(''); setArchBusy(true)
+    setArchPid(p.id); setArchRows([]); setArchQ(''); setArchFrom(''); setArchTo(''); setPhotoDate(todayStr()); setPhotoNote(''); setArchBusy(true)
     try { setArchRows(await loadPropertyArchive(p.id)) }
     catch (e) { setErr(e.message || String(e)) }
     finally { setArchBusy(false) }
+  }
+  async function refreshArchive(p) {
+    try { setArchRows(await loadPropertyArchive(p.id)) }
+    catch (e) { setErr(e.message || String(e)) }
   }
   // Public-bucket URLs are cross-origin, so the plain `download` attribute is
   // ignored — fetch the blob locally and save it, falling back to a new tab.
@@ -378,22 +367,6 @@ export default function Clients({ app }) {
       window.open(url, '_blank')
     }
   }
-  // Per-address audit trail: who added it (Laura / Matt / Trashy Randy / ...),
-  // edits, skips, one-time day changes.
-  async function toggleLog(p) {
-    if (logPid === p.id) { setLogPid(null); setLogRows([]); return }
-    setLogPid(p.id); setLogRows([]); setLogBusy(true)
-    try { setLogRows(await loadPropertyLog(p.id)) }
-    catch (e) { setErr(e.message || String(e)) }
-    finally { setLogBusy(false) }
-  }
-  async function togglePhotos(p) {
-    if (photoPid === p.id) { setPhotoPid(null); setPhotos([]); return }
-    setPhotoPid(p.id); setPhotos([]); setPhotoDate(todayStr()); setPhotoNote(''); setPhotoBusy(true)
-    try { setPhotos(await loadPropertyPhotos(p.id)) }
-    catch (e) { setErr(e.message || String(e)) }
-    finally { setPhotoBusy(false) }
-  }
   async function addPhotos(p, fileList) {
     const files = Array.from(fileList || [])
     if (!files.length || photoBusy) return
@@ -404,23 +377,25 @@ export default function Clients({ app }) {
         await uploadPropertyPhoto(p.id, f, { takenOn: photoDate || todayStr(), note: photoNote.trim() || null })
       }
       setPhotoNote('')
-      setPhotos(await loadPropertyPhotos(p.id))
+      await refreshArchive(p)
     } catch (e) {
       setErr(e.message || String(e))
     } finally {
       setPhotoBusy(false)
     }
   }
-  async function changePhotoDate(ph, takenOn) {
+  async function changePhotoDate(p, ph, takenOn) {
     if (!takenOn || takenOn === ph.takenOn) return
-    setPhotos((list) => list.map((x) => (x.id === ph.id ? { ...x, takenOn } : x)))
-    try { await updatePropertyPhoto(ph.id, { takenOn }) }
+    try {
+      await updatePropertyPhoto(ph.id, { takenOn })
+      await refreshArchive(p)
+    }
     catch (e) { setErr(e.message || String(e)) }
   }
   async function removePhoto(p, ph) {
     if (photoBusy) return
     setPhotoBusy(true)
-    try { await deletePropertyPhoto(ph); setPhotos(await loadPropertyPhotos(p.id)) }
+    try { await deletePropertyPhoto(ph); await refreshArchive(p) }
     catch (e) { setErr(e.message || String(e)) }
     finally { setPhotoBusy(false) }
   }
@@ -949,7 +924,7 @@ export default function Clients({ app }) {
                               if (archFrom && d < archFrom) return false
                               if (archTo && d > archTo) return false
                               if (!aq) return true
-                              const hay = [e.note, e.by, fmtDate(e.at), e.kind === 'visit' ? 'checked in' : e.kind === 'skip' ? 'skipped' : 'photo', ...(e.photos || []).map((ph) => fmtDate(ph.createdAt))]
+                              const hay = [e.note, e.by, fmtDate(e.at), e.kind === 'visit' ? 'checked in' : e.kind === 'skip' ? 'skipped' : e.kind === 'log' ? 'changed' : 'photo', ...(e.photos || []).map((ph) => fmtDate(ph.createdAt))]
                                 .filter(Boolean).join(' ').toLowerCase()
                               return hay.includes(aq)
                             })
@@ -1019,37 +994,15 @@ export default function Clients({ app }) {
                           </div>
                           {p.price != null && <div style={{ fontSize: 12.5, color: '#5d6b63', flex: 'none' }}>${Number(p.price).toFixed(2)}</div>}
                           <button onClick={() => toggleReview(p)} disabled={pBusy} title={p.needs_review ? 'Clear the review flag' : 'Flag this property for the owner to review'} style={{ flex: 'none', background: 'none', border: 'none', color: p.needs_review ? '#1f7a4d' : '#c0492f', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px', opacity: pBusy ? 0.6 : 1 }}>{p.needs_review ? 'Mark reviewed' : 'Needs review'}</button>
-                          <button onClick={() => toggleHistory(p)} disabled={histBusy && histPid === p.id} style={{ flex: 'none', background: 'none', border: 'none', color: '#5d6b63', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>{histPid === p.id ? 'Hide' : 'History'}</button>
-                          <button onClick={() => toggleArchive(p)} disabled={archBusy && archPid === p.id} title="Every check-in, skip and photo for this address — searchable" style={{ flex: 'none', background: 'none', border: 'none', color: '#5d6b63', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>{archPid === p.id ? 'Hide' : 'Archive'}</button>
-                          <button onClick={() => toggleLog(p)} disabled={logBusy && logPid === p.id} title="Who added and changed this address" style={{ flex: 'none', background: 'none', border: 'none', color: '#5d6b63', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>{logPid === p.id ? 'Hide log' : 'Log'}</button>
-                          <button onClick={() => togglePhotos(p)} disabled={photoBusy && photoPid === p.id} style={{ flex: 'none', background: 'none', border: 'none', color: '#5d6b63', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>{photoPid === p.id ? 'Hide' : 'Photos'}</button>
+                          <button onClick={() => toggleArchive(p)} disabled={archBusy && archPid === p.id} title="Every check-in, skip, photo and change for this address — searchable" style={{ flex: 'none', background: 'none', border: 'none', color: '#5d6b63', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>{archPid === p.id ? 'Hide' : 'Archive'}</button>
                           <button onClick={() => setPinProp(p)} title={p.lat != null ? 'Move this address\'s map pin manually' : 'No map pin — set it manually by clicking the map'} style={{ flex: 'none', background: 'none', border: 'none', color: p.lat != null ? '#5d6b63' : '#c08a2e', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>{p.lat != null ? 'Pin' : 'Set pin'}</button>
                           <button onClick={() => startEditProp(p)} style={{ flex: 'none', background: 'none', border: 'none', color: '#1f7a4d', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>Edit</button>
                           <button onClick={() => togglePause(p)} disabled={pBusy} title={p.paused ? 'Resume — put this address back on routes' : 'Pause — keep the address but skip it on all routes'} style={{ flex: 'none', background: 'none', border: 'none', color: p.paused ? '#1f7a4d' : '#8a6d1e', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px', opacity: pBusy ? 0.6 : 1 }}>{p.paused ? 'Resume' : 'Pause'}</button>
                           <button onClick={() => delProp(p)} disabled={pBusy} title="Delete this address permanently" style={{ flex: 'none', background: 'none', border: 'none', color: '#c0492f', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px', opacity: pBusy ? 0.6 : 1 }}>Delete</button>
                         </div>
-                        {histPid === p.id && (
-                          <div style={{ margin: '6px 0 2px 18px', borderLeft: '2px solid #eef0ed', paddingLeft: 12 }}>
-                            <div style={{ fontSize: 10.5, color: '#7c8a82', fontFamily: MONO, letterSpacing: '.06em', marginBottom: 6 }}>CHECK-IN HISTORY</div>
-                            {histBusy ? (
-                              <div style={{ fontSize: 12, color: '#9aa69e' }}>Loading…</div>
-                            ) : hist.length === 0 ? (
-                              <div style={{ fontSize: 12, color: '#9aa69e' }}>No check-ins recorded yet.</div>
-                            ) : (
-                              hist.map((v) => (
-                                <div key={v.id} style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 12, padding: '3px 0' }}>
-                                  <span style={{ fontWeight: 600, color: '#1a2420', minWidth: 96 }}>{fmtDate(v.check_in)}</span>
-                                  <span style={{ color: '#5d6b63' }}>
-                                    in {fmtTime(v.check_in)}{v.check_out ? ` · out ${fmtTime(v.check_out)}` : ''}
-                                  </span>
-                                </div>
-                              ))
-                            )}
-                          </div>
-                        )}
                         {archPid === p.id && (
                           <div style={{ margin: '8px 0 2px 18px', borderLeft: '2px solid #eef0ed', paddingLeft: 12 }}>
-                            <div style={{ fontSize: 10.5, color: '#7c8a82', fontFamily: MONO, letterSpacing: '.06em', marginBottom: 6 }}>ARCHIVE — CHECK-INS, SKIPS & PHOTOS</div>
+                            <div style={{ fontSize: 10.5, color: '#7c8a82', fontFamily: MONO, letterSpacing: '.06em', marginBottom: 6 }}>ARCHIVE — CHECK-INS, SKIPS, PHOTOS & CHANGES</div>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
                               <input value={archQ} onChange={(e) => setArchQ(e.target.value)} placeholder="Search notes, skip reasons, dates…" style={{ ...inp, fontSize: 12.5, padding: '5px 9px', flex: 1, minWidth: 140 }} />
                               <label style={{ fontSize: 11.5, color: '#7c8a82' }}>From
@@ -1062,10 +1015,20 @@ export default function Clients({ app }) {
                                 <button onClick={() => { setArchQ(''); setArchFrom(''); setArchTo('') }} style={{ flex: 'none', background: 'none', border: 'none', color: '#1f7a4d', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>Clear</button>
                               )}
                             </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+                              <label style={{ fontSize: 11.5, color: '#7c8a82' }}>Add photo — date
+                                <input type="date" value={photoDate} max={todayStr()} onChange={(e) => setPhotoDate(e.target.value)} style={{ ...inp, fontSize: 12.5, marginLeft: 6, padding: '5px 8px', width: 'auto' }} />
+                              </label>
+                              <input value={photoNote} onChange={(e) => setPhotoNote(e.target.value)} placeholder="Note (e.g. bin not out)" style={{ ...inp, fontSize: 12.5, padding: '5px 8px', flex: 1, minWidth: 120 }} />
+                              <label style={{ flex: 'none', cursor: photoBusy ? 'default' : 'pointer', fontSize: 12.5, fontWeight: 600, color: '#fff', background: photoBusy ? '#9aa69e' : '#1f7a4d', borderRadius: 8, padding: '6px 12px' }}>
+                                {photoBusy ? 'Working…' : '+ Add photo'}
+                                <input type="file" accept="image/*" multiple disabled={photoBusy} onChange={(e) => { addPhotos(p, e.target.files); e.target.value = '' }} style={{ display: 'none' }} />
+                              </label>
+                            </div>
                             {archBusy ? (
                               <div style={{ fontSize: 12, color: '#9aa69e' }}>Loading…</div>
                             ) : archList.length === 0 ? (
-                              <div style={{ fontSize: 12, color: '#9aa69e' }}>{archRows.length === 0 ? 'Nothing recorded yet — check-ins, skips and photos will appear here.' : 'No entries match the current search.'}</div>
+                              <div style={{ fontSize: 12, color: '#9aa69e' }}>{archRows.length === 0 ? 'Nothing recorded yet — check-ins, skips, photos and changes will appear here.' : 'No entries match the current search.'}</div>
                             ) : (
                               <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 420, overflowY: 'auto', margin: '0 -6px', padding: '0 6px' }}>
                                 {archList.map((e) => (
@@ -1081,13 +1044,25 @@ export default function Clients({ app }) {
                                       {e.kind === 'skip' && (
                                         <span style={{ color: '#8a6d1e' }}>Skipped{e.note ? ` — ${e.note}` : ''}{e.by ? <span style={{ color: '#9aa69e' }}> ({e.by})</span> : null}</span>
                                       )}
+                                      {e.kind === 'log' && (
+                                        <span style={{ color: '#9aa69e' }}>✎ {e.note}{e.by ? ` — ${e.by}` : ''}</span>
+                                      )}
                                       {e.kind === 'photo' && (
                                         <span style={{ color: '#5d6b63' }}>Photo{e.note ? ` — ${e.note}` : ''}</span>
                                       )}
                                       {e.kind === 'photo' && e.url && (
+                                        <>
                                         <button onClick={() => setArchView({ url: e.url, caption: `${fmtDate(e.at)}${e.note ? ` — ${e.note}` : ''}` })} style={{ marginLeft: 8, verticalAlign: 'middle', width: 44, height: 44, padding: 0, border: '1px solid #e6eae6', borderRadius: 8, overflow: 'hidden', cursor: 'pointer', background: '#eef0ed' }}>
                                           <img src={e.url} alt={e.note || 'photo'} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
                                         </button>
+                                        {e.photo && (
+                                          <span style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 6, verticalAlign: 'middle' }}>
+                                            <input type="date" value={e.photo.takenOn || ''} max={todayStr()} onChange={(ev) => changePhotoDate(p, e.photo, ev.target.value)} title="Change the photo's date" style={{ border: '1px solid #eef0ed', borderRadius: 6, padding: '3px 5px', fontSize: 11, color: '#1a2420', outline: 'none' }} />
+                                            <button onClick={() => removePhoto(p, e.photo)} disabled={photoBusy} title="Delete photo" style={{ width: 22, height: 22, borderRadius: 6, border: 'none', background: 'rgba(15,30,20,.55)', color: '#fff', fontSize: 12, cursor: 'pointer', lineHeight: 1 }}>✕</button>
+                                            {e.photo.source === 'randy' && <span style={{ fontSize: 9.5, color: '#9aa69e', fontFamily: MONO }}>via Randy</span>}
+                                          </span>
+                                        )}
+                                        </>
                                       )}
                                       {(e.kind === 'visit' || e.kind === 'skip') && e.photos.length > 0 && (
                                         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 5 }}>
@@ -1119,68 +1094,6 @@ export default function Clients({ app }) {
                                 <button onClick={() => setArchView(null)} style={{ background: '#fff', border: '1px solid #dde2dd', color: '#5d6b63', borderRadius: 8, padding: '6px 12px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>Close</button>
                               </div>
                             </div>
-                          </div>
-                        )}
-                        {logPid === p.id && (
-                          <div style={{ margin: '6px 0 2px 18px', borderLeft: '2px solid #eef0ed', paddingLeft: 12 }}>
-                            <div style={{ fontSize: 10.5, color: '#7c8a82', fontFamily: MONO, letterSpacing: '.06em', marginBottom: 6 }}>ADDRESS LOG — WHO DID WHAT</div>
-                            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 12, padding: '3px 0' }}>
-                              <span style={{ fontWeight: 600, color: '#1a2420', minWidth: 96 }}>{p.created_at ? fmtDate(p.created_at) : '—'}</span>
-                              <span style={{ color: '#5d6b63' }}>Added{p.created_by ? ` by ${p.created_by}` : ''}</span>
-                            </div>
-                            {logBusy ? (
-                              <div style={{ fontSize: 12, color: '#9aa69e' }}>Loading…</div>
-                            ) : (
-                              logRows.map((r) => (
-                                <div key={r.id} style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 12, padding: '3px 0' }}>
-                                  <span style={{ fontWeight: 600, color: '#1a2420', minWidth: 96 }}>{fmtDate(r.created_at)}</span>
-                                  <span style={{ color: '#5d6b63', flex: 1, minWidth: 0 }}>{r.summary} <span style={{ color: '#9aa69e' }}>— {r.actor}</span></span>
-                                </div>
-                              ))
-                            )}
-                            {!logBusy && logRows.length === 0 && (
-                              <div style={{ fontSize: 12, color: '#9aa69e' }}>No changes recorded yet (edits, skips and day changes will show here).</div>
-                            )}
-                          </div>
-                        )}
-                        {photoPid === p.id && (
-                          <div style={{ margin: '6px 0 2px 18px', borderLeft: '2px solid #eef0ed', paddingLeft: 12 }}>
-                            <div style={{ fontSize: 10.5, color: '#7c8a82', fontFamily: MONO, letterSpacing: '.06em', marginBottom: 8 }}>PHOTOS — PROOF FOR ADDRESSES NOT CHECKED IN</div>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
-                              <label style={{ fontSize: 11.5, color: '#7c8a82' }}>Date
-                                <input type="date" value={photoDate} max={todayStr()} onChange={(e) => setPhotoDate(e.target.value)} style={{ ...inp, fontSize: 12.5, marginLeft: 6, padding: '5px 8px', width: 'auto' }} />
-                              </label>
-                              <input value={photoNote} onChange={(e) => setPhotoNote(e.target.value)} placeholder="Note (e.g. bin not out)" style={{ ...inp, fontSize: 12.5, padding: '5px 8px', flex: 1, minWidth: 120 }} />
-                              <label style={{ flex: 'none', cursor: photoBusy ? 'default' : 'pointer', fontSize: 12.5, fontWeight: 600, color: '#fff', background: photoBusy ? '#9aa69e' : '#1f7a4d', borderRadius: 8, padding: '6px 12px' }}>
-                                {photoBusy ? 'Working…' : '+ Add photo'}
-                                <input type="file" accept="image/*" multiple disabled={photoBusy} onChange={(e) => { addPhotos(p, e.target.files); e.target.value = '' }} style={{ display: 'none' }} />
-                              </label>
-                            </div>
-                            {photoBusy && !photos.length ? (
-                              <div style={{ fontSize: 12, color: '#9aa69e' }}>Loading…</div>
-                            ) : photos.length === 0 ? (
-                              <div style={{ fontSize: 12, color: '#9aa69e' }}>No photos yet. Pick a date, then add a photo of the address.</div>
-                            ) : (
-                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(96px, 1fr))', gap: 8 }}>
-                                {photos.map((ph) => (
-                                  <div key={ph.id} style={{ border: '1px solid #e6eae6', borderRadius: 10, overflow: 'hidden', background: '#fff' }}>
-                                    <div style={{ position: 'relative', aspectRatio: '1', background: '#eef0ed' }}>
-                                      {ph.url ? (
-                                        <a href={ph.url} target="_blank" rel="noreferrer"><img src={ph.url} alt={ph.note || 'photo'} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} /></a>
-                                      ) : (
-                                        <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#9aa69e', fontSize: 22 }}>▦</div>
-                                      )}
-                                      <button onClick={() => removePhoto(p, ph)} title="Delete photo" style={{ position: 'absolute', top: 4, right: 4, width: 22, height: 22, borderRadius: 6, border: 'none', background: 'rgba(15,30,20,.55)', color: '#fff', fontSize: 12, cursor: 'pointer', lineHeight: 1 }}>✕</button>
-                                    </div>
-                                    <div style={{ padding: '6px 7px' }}>
-                                      <input type="date" value={ph.takenOn} max={todayStr()} onChange={(e) => changePhotoDate(ph, e.target.value)} style={{ width: '100%', border: '1px solid #eef0ed', borderRadius: 6, padding: '3px 5px', fontSize: 11, color: '#1a2420', outline: 'none' }} />
-                                      {ph.note && <div style={{ fontSize: 11, color: '#7c8a82', marginTop: 3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={ph.note}>{ph.note}</div>}
-                                      {ph.source === 'randy' && <div style={{ fontSize: 9.5, color: '#9aa69e', fontFamily: MONO, marginTop: 2 }}>via Randy</div>}
-                                    </div>
-                                  </div>
-                                ))}
-                              </div>
-                            )}
                           </div>
                         )}
                         </>
