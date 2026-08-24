@@ -1093,7 +1093,7 @@ export default function Clients({ app }) {
                     <div key={e.id} style={{ display: 'flex', alignItems: 'baseline', gap: 10, padding: '7px 6px', borderTop: '1px solid #f1f3f0', fontSize: 12.5 }}>
                       <span style={{ flex: 'none', width: 20, textAlign: 'center' }}>{e.icon}</span>
                       <span style={{ flex: 'none', fontWeight: 600, width: 92 }}>{e.type}</span>
-                      <span style={{ flex: 1, minWidth: 0, color: '#5d6b63', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={e.message || e.address}>
+                      <span style={{ flex: 1, minWidth: 0, color: '#5d6b63', ...(e.message ? { whiteSpace: 'normal', overflowWrap: 'anywhere' } : { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }) }}>
                         {e.message
                           ? <><span style={{ color: '#1f7a4d', fontWeight: 600 }}>{e.kindLabel}</span>{e.status === 'new' ? <span style={{ color: '#c0492f', fontWeight: 700 }}> (new)</span> : null} — {e.message}</>
                           : <>{e.address || '—'}{e.route ? <span style={{ color: '#9aa69e' }}> · Rt {e.route}</span> : null}</>}
