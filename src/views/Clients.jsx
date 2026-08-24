@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { MONO } from '../data.js'
-import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, addProperty, updateProperty, savePin, loadPropertyVisits, loadPropertyAddressIndex, countDuplicateProperties, findDuplicateProperties, mergeDuplicateGroup, loadPropertiesByIds, countPropertiesByCustomer, deleteProperty, sendPortalInvite, loadClientFieldActivity, loadClientNotes, addClientNote, deleteClientNote, loadPropertyLog } from '../lib/customersData.js'
+import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, addProperty, updateProperty, savePin, loadPropertyVisits, loadPropertyAddressIndex, countDuplicateProperties, findDuplicateProperties, mergeDuplicateGroup, loadPropertiesByIds, countPropertiesByCustomer, deleteProperty, sendPortalInvite, loadClientFieldActivity, loadClientPortalRequests, loadClientNotes, addClientNote, deleteClientNote, loadPropertyLog } from '../lib/customersData.js'
 import PinPicker from '../components/PinPicker.jsx'
 import { geocodeAll } from '../lib/importData.js'
 import { listTags, findOrCreateTag, subscribeTags } from '../lib/tagsData.js'
@@ -147,9 +147,14 @@ export default function Clients({ app }) {
     let alive = true
     setActBusy(true)
     setActSearch('')
-    loadClientFieldActivity(selId)
-      .then((r) => { if (alive) setActEvents(r) })
-      .catch(() => { if (alive) setActEvents([]) })
+    Promise.all([
+      loadClientFieldActivity(selId).catch(() => []),
+      loadClientPortalRequests(selId).catch(() => []),
+    ])
+      .then(([field, reqs]) => {
+        if (!alive) return
+        setActEvents([...field, ...reqs].sort((a, b) => new Date(b.ts) - new Date(a.ts)))
+      })
       .finally(() => { if (alive) setActBusy(false) })
     return () => { alive = false }
   }, [selId])
@@ -166,7 +171,7 @@ export default function Clients({ app }) {
     const q = actSearch.trim().toLowerCase()
     if (!q) return actEvents
     return actEvents.filter((e) =>
-      `${e.type} ${e.address} ${e.route || ''} ${fmtDate(e.ts)} ${fmtTime(e.ts)}`.toLowerCase().includes(q))
+      `${e.type} ${e.address || ''} ${e.kindLabel || ''} ${e.message || ''} ${e.route || ''} ${fmtDate(e.ts)} ${fmtTime(e.ts)}`.toLowerCase().includes(q))
   }, [actEvents, actSearch])
 
   // Filter a client's service addresses (property managers with many locations
@@ -1079,7 +1084,7 @@ export default function Clients({ app }) {
               {actBusy ? (
                 <div style={{ fontSize: 12.5, color: '#9aa69e' }}>Loading…</div>
               ) : actEvents.length === 0 ? (
-                <div style={{ fontSize: 12.5, color: '#9aa69e' }}>No field activity yet — on-my-way texts, clock-ins, completions, and job photos will show here.</div>
+                <div style={{ fontSize: 12.5, color: '#9aa69e' }}>No activity yet — portal requests, on-my-way texts, clock-ins, completions, and job photos will show here.</div>
               ) : actFiltered.length === 0 ? (
                 <div style={{ fontSize: 12.5, color: '#9aa69e' }}>Nothing matches “{actSearch.trim()}”.</div>
               ) : (
@@ -1088,7 +1093,11 @@ export default function Clients({ app }) {
                     <div key={e.id} style={{ display: 'flex', alignItems: 'baseline', gap: 10, padding: '7px 6px', borderTop: '1px solid #f1f3f0', fontSize: 12.5 }}>
                       <span style={{ flex: 'none', width: 20, textAlign: 'center' }}>{e.icon}</span>
                       <span style={{ flex: 'none', fontWeight: 600, width: 92 }}>{e.type}</span>
-                      <span style={{ flex: 1, minWidth: 0, color: '#5d6b63', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={e.address}>{e.address || '—'}{e.route ? <span style={{ color: '#9aa69e' }}> · Rt {e.route}</span> : null}</span>
+                      <span style={{ flex: 1, minWidth: 0, color: '#5d6b63', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={e.message || e.address}>
+                        {e.message
+                          ? <><span style={{ color: '#1f7a4d', fontWeight: 600 }}>{e.kindLabel}</span>{e.status === 'new' ? <span style={{ color: '#c0492f', fontWeight: 700 }}> (new)</span> : null} — {e.message}</>
+                          : <>{e.address || '—'}{e.route ? <span style={{ color: '#9aa69e' }}> · Rt {e.route}</span> : null}</>}
+                      </span>
                       <span style={{ flex: 'none', color: '#9aa69e', fontFamily: MONO, fontSize: 11 }}>{fmtDate(e.ts)} · {fmtTime(e.ts)}</span>
                     </div>
                   ))}

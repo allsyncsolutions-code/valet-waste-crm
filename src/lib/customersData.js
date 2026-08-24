@@ -186,6 +186,27 @@ export async function loadClientFieldActivity(customerId, limit = 300) {
   return events
 }
 
+// Portal requests this client submitted from their client portal, newest
+// first. Each request is a single message (no reply thread).
+export async function loadClientPortalRequests(customerId) {
+  const { data, error } = await supabase
+    .from('portal_requests')
+    .select('id, kind, message, status, created_at')
+    .eq('customer_id', customerId)
+    .order('created_at', { ascending: false })
+  if (error) throw error
+  const KINDS = { extra_pickup: 'Extra pickup', junk_removal: 'Junk removal', lawn_care: 'Lawn care', billing: 'Billing', other: 'Other' }
+  return (data || []).map((r) => ({
+    id: `pr-${r.id}`,
+    ts: r.created_at,
+    type: 'Portal request',
+    icon: '✉',
+    kindLabel: KINDS[r.kind] || r.kind,
+    message: r.message || '',
+    status: r.status,
+  }))
+}
+
 // --- Per-client notes log (running history, newest first). Separate from the
 // single customers.notes summary field. ---
 export async function loadClientNotes(customerId) {
