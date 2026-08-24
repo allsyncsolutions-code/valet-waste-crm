@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { MONO } from '../data.js'
-import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, addProperty, updateProperty, savePin, loadPropertyVisits, loadPropertyAddressIndex, countDuplicateProperties, findDuplicateProperties, mergeDuplicateGroup, loadPropertiesByIds, countPropertiesByCustomer, deleteProperty, sendPortalInvite, loadClientFieldActivity, loadClientPortalRequests, loadClientNotes, addClientNote, deleteClientNote, loadPropertyLog } from '../lib/customersData.js'
+import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, addProperty, updateProperty, savePin, loadPropertyVisits, loadPropertyArchive, loadPropertyAddressIndex, countDuplicateProperties, findDuplicateProperties, mergeDuplicateGroup, loadPropertiesByIds, countPropertiesByCustomer, deleteProperty, sendPortalInvite, loadClientFieldActivity, loadClientPortalRequests, loadClientNotes, addClientNote, deleteClientNote, loadPropertyLog } from '../lib/customersData.js'
 import PinPicker from '../components/PinPicker.jsx'
 import { geocodeAll } from '../lib/importData.js'
 import { listTags, findOrCreateTag, subscribeTags } from '../lib/tagsData.js'
@@ -78,6 +78,13 @@ export default function Clients({ app }) {
   const [histPid, setHistPid] = useState(null)
   const [hist, setHist] = useState([])
   const [histBusy, setHistBusy] = useState(false)
+  const [archPid, setArchPid] = useState(null) // property whose archive is open
+  const [archRows, setArchRows] = useState([])
+  const [archBusy, setArchBusy] = useState(false)
+  const [archQ, setArchQ] = useState('')
+  const [archFrom, setArchFrom] = useState('')
+  const [archTo, setArchTo] = useState('')
+  const [archView, setArchView] = useState(null) // {url, caption} photo open in the lightbox
   const [photoPid, setPhotoPid] = useState(null)
   const [photos, setPhotos] = useState([])
   const [photoBusy, setPhotoBusy] = useState(false)
@@ -345,6 +352,31 @@ export default function Clients({ app }) {
     try { setHist(await loadPropertyVisits(p.id)) }
     catch (e) { setErr(e.message || String(e)) }
     finally { setHistBusy(false) }
+  }
+  // Full archive for one address: every check-in, skip and photo on a single
+  // searchable timeline. Opening resets the filters so each address starts fresh.
+  async function toggleArchive(p) {
+    if (archPid === p.id) { setArchPid(null); setArchRows([]); return }
+    setArchPid(p.id); setArchRows([]); setArchQ(''); setArchFrom(''); setArchTo(''); setArchBusy(true)
+    try { setArchRows(await loadPropertyArchive(p.id)) }
+    catch (e) { setErr(e.message || String(e)) }
+    finally { setArchBusy(false) }
+  }
+  // Public-bucket URLs are cross-origin, so the plain `download` attribute is
+  // ignored — fetch the blob locally and save it, falling back to a new tab.
+  async function downloadPhoto(url, name) {
+    try {
+      const blob = await (await fetch(url)).blob()
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(blob)
+      a.download = name
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000)
+    } catch {
+      window.open(url, '_blank')
+    }
   }
   // Per-address audit trail: who added it (Laura / Matt / Trashy Randy / ...),
   // edits, skips, one-time day changes.
@@ -907,9 +939,22 @@ export default function Clients({ app }) {
                   <div style={{ fontSize: 12.5, color: '#9aa69e', padding: '6px 0 2px' }}>No addresses match “{propSearch.trim()}”.</div>
                 )}
                 <div style={{ maxHeight: 360, overflowY: 'auto', margin: '0 -6px' }}>
-                  {visibleProps.map((p) => {
-                    const flashing = focusPropId === p.id
-                    return (
+                      {visibleProps.map((p) => {
+                        const flashing = focusPropId === p.id
+                        // Archive rows passing the current text + date-range filters.
+                        const aq = archQ.trim().toLowerCase()
+                        const archList = archPid === p.id
+                          ? archRows.filter((e) => {
+                              const d = (e.at || '').slice(0, 10)
+                              if (archFrom && d < archFrom) return false
+                              if (archTo && d > archTo) return false
+                              if (!aq) return true
+                              const hay = [e.note, e.by, fmtDate(e.at), e.kind === 'visit' ? 'checked in' : e.kind === 'skip' ? 'skipped' : 'photo', ...(e.photos || []).map((ph) => fmtDate(ph.createdAt))]
+                                .filter(Boolean).join(' ').toLowerCase()
+                              return hay.includes(aq)
+                            })
+                          : []
+                        return (
                     <div key={p.id} ref={(el) => { if (el) propRowRefs.current[p.id] = el }} style={{ padding: '8px 6px', borderTop: '1px solid #f1f3f0', background: flashing ? '#eef7f1' : 'transparent', boxShadow: flashing ? 'inset 3px 0 0 #1f7a4d' : 'none', transition: 'background .25s' }}>
                       {editPid === p.id ? (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -975,6 +1020,7 @@ export default function Clients({ app }) {
                           {p.price != null && <div style={{ fontSize: 12.5, color: '#5d6b63', flex: 'none' }}>${Number(p.price).toFixed(2)}</div>}
                           <button onClick={() => toggleReview(p)} disabled={pBusy} title={p.needs_review ? 'Clear the review flag' : 'Flag this property for the owner to review'} style={{ flex: 'none', background: 'none', border: 'none', color: p.needs_review ? '#1f7a4d' : '#c0492f', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px', opacity: pBusy ? 0.6 : 1 }}>{p.needs_review ? 'Mark reviewed' : 'Needs review'}</button>
                           <button onClick={() => toggleHistory(p)} disabled={histBusy && histPid === p.id} style={{ flex: 'none', background: 'none', border: 'none', color: '#5d6b63', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>{histPid === p.id ? 'Hide' : 'History'}</button>
+                          <button onClick={() => toggleArchive(p)} disabled={archBusy && archPid === p.id} title="Every check-in, skip and photo for this address — searchable" style={{ flex: 'none', background: 'none', border: 'none', color: '#5d6b63', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>{archPid === p.id ? 'Hide' : 'Archive'}</button>
                           <button onClick={() => toggleLog(p)} disabled={logBusy && logPid === p.id} title="Who added and changed this address" style={{ flex: 'none', background: 'none', border: 'none', color: '#5d6b63', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>{logPid === p.id ? 'Hide log' : 'Log'}</button>
                           <button onClick={() => togglePhotos(p)} disabled={photoBusy && photoPid === p.id} style={{ flex: 'none', background: 'none', border: 'none', color: '#5d6b63', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>{photoPid === p.id ? 'Hide' : 'Photos'}</button>
                           <button onClick={() => setPinProp(p)} title={p.lat != null ? 'Move this address\'s map pin manually' : 'No map pin — set it manually by clicking the map'} style={{ flex: 'none', background: 'none', border: 'none', color: p.lat != null ? '#5d6b63' : '#c08a2e', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>{p.lat != null ? 'Pin' : 'Set pin'}</button>
@@ -999,6 +1045,77 @@ export default function Clients({ app }) {
                                 </div>
                               ))
                             )}
+                          </div>
+                        )}
+                        {archPid === p.id && (
+                          <div style={{ margin: '8px 0 2px 18px', borderLeft: '2px solid #eef0ed', paddingLeft: 12 }}>
+                            <div style={{ fontSize: 10.5, color: '#7c8a82', fontFamily: MONO, letterSpacing: '.06em', marginBottom: 6 }}>ARCHIVE — CHECK-INS, SKIPS & PHOTOS</div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+                              <input value={archQ} onChange={(e) => setArchQ(e.target.value)} placeholder="Search notes, skip reasons, dates…" style={{ ...inp, fontSize: 12.5, padding: '5px 9px', flex: 1, minWidth: 140 }} />
+                              <label style={{ fontSize: 11.5, color: '#7c8a82' }}>From
+                                <input type="date" value={archFrom} onChange={(e) => setArchFrom(e.target.value)} style={{ ...inp, fontSize: 12.5, marginLeft: 6, padding: '5px 8px', width: 'auto' }} />
+                              </label>
+                              <label style={{ fontSize: 11.5, color: '#7c8a82' }}>To
+                                <input type="date" value={archTo} onChange={(e) => setArchTo(e.target.value)} style={{ ...inp, fontSize: 12.5, marginLeft: 6, padding: '5px 8px', width: 'auto' }} />
+                              </label>
+                              {(archQ || archFrom || archTo) && (
+                                <button onClick={() => { setArchQ(''); setArchFrom(''); setArchTo('') }} style={{ flex: 'none', background: 'none', border: 'none', color: '#1f7a4d', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '0 2px' }}>Clear</button>
+                              )}
+                            </div>
+                            {archBusy ? (
+                              <div style={{ fontSize: 12, color: '#9aa69e' }}>Loading…</div>
+                            ) : archList.length === 0 ? (
+                              <div style={{ fontSize: 12, color: '#9aa69e' }}>{archRows.length === 0 ? 'Nothing recorded yet — check-ins, skips and photos will appear here.' : 'No entries match the current search.'}</div>
+                            ) : (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 420, overflowY: 'auto', margin: '0 -6px', padding: '0 6px' }}>
+                                {archList.map((e) => (
+                                  <div key={e.key} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, fontSize: 12, padding: '6px 0', borderTop: '1px solid #f1f3f0' }}>
+                                    <span style={{ fontWeight: 600, color: '#1a2420', minWidth: 96, flex: 'none' }}>{fmtDate(e.at)}</span>
+                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                      {e.kind === 'visit' && (
+                                        <span style={{ color: '#5d6b63' }}>Checked in {fmtTime(e.checkIn)}{e.checkOut ? ` · out ${fmtTime(e.checkOut)}` : ''}</span>
+                                      )}
+                                      {e.kind === 'skip' && (
+                                        <span style={{ color: '#8a6d1e' }}>Skipped{e.note ? ` — ${e.note}` : ''}{e.by ? <span style={{ color: '#9aa69e' }}> ({e.by})</span> : null}</span>
+                                      )}
+                                      {e.kind === 'photo' && (
+                                        <span style={{ color: '#5d6b63' }}>Photo{e.note ? ` — ${e.note}` : ''}</span>
+                                      )}
+                                      {e.kind === 'photo' && e.url && (
+                                        <button onClick={() => setArchView({ url: e.url, caption: `${fmtDate(e.at)}${e.note ? ` — ${e.note}` : ''}` })} style={{ marginLeft: 8, verticalAlign: 'middle', width: 44, height: 44, padding: 0, border: '1px solid #e6eae6', borderRadius: 8, overflow: 'hidden', cursor: 'pointer', background: '#eef0ed' }}>
+                                          <img src={e.url} alt={e.note || 'photo'} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+                                        </button>
+                                      )}
+                                      {(e.kind === 'visit' || e.kind === 'skip') && e.photos.length > 0 && (
+                                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 5 }}>
+                                          {e.photos.map((ph) => (
+                                            <button key={ph.id} onClick={() => setArchView({ url: ph.url, caption: `${fmtDate(e.at)} · photo ${fmtTime(ph.createdAt)}` })} title="View photo" style={{ width: 44, height: 44, padding: 0, border: '1px solid #e6eae6', borderRadius: 8, overflow: 'hidden', cursor: 'pointer', background: '#eef0ed' }}>
+                                              <img src={ph.url} alt="stop photo" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+                                            </button>
+                                          ))}
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                            <div style={{ fontSize: 11, color: '#9aa69e', marginTop: 6 }}>
+                              {archRows.length} {archRows.length === 1 ? 'entry' : 'entries'}{archList.length !== archRows.length ? ` · ${archList.length} shown` : ''}
+                            </div>
+                          </div>
+                        )}
+                        {archView && (
+                          <div onClick={() => setArchView(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(10,20,14,.82)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 24 }}>
+                            <div onClick={(ev) => ev.stopPropagation()} style={{ background: '#fff', borderRadius: 14, padding: 14, maxWidth: '90vw', display: 'flex', flexDirection: 'column', gap: 10, boxShadow: '0 18px 50px rgba(0,0,0,.35)' }}>
+                              <img src={archView.url} alt={archView.caption || 'photo'} style={{ maxWidth: '100%', maxHeight: '68vh', objectFit: 'contain', borderRadius: 8, background: '#eef0ed' }} />
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                                <span style={{ fontSize: 12, color: '#5d6b63', flex: 1, minWidth: 120 }}>{archView.caption}</span>
+                                <button onClick={() => window.open(archView.url, '_blank')} style={{ background: '#fff', border: '1px solid #dde2dd', color: '#5d6b63', borderRadius: 8, padding: '6px 12px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>Open in new tab</button>
+                                <button onClick={() => downloadPhoto(archView.url, archView.url.split('/').pop())} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 8, padding: '6px 12px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>Download</button>
+                                <button onClick={() => setArchView(null)} style={{ background: '#fff', border: '1px solid #dde2dd', color: '#5d6b63', borderRadius: 8, padding: '6px 12px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>Close</button>
+                              </div>
+                            </div>
                           </div>
                         )}
                         {logPid === p.id && (

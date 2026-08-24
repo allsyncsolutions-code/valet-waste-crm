@@ -3,6 +3,8 @@
 // to the same tables, so realtime keeps everything in sync).
 import { supabase } from './supabaseClient.js'
 import { logActivity } from './activityData.js'
+import { loadStopPhotos } from './photosData.js'
+import { loadPropertyPhotos } from './propertyPhotosData.js'
 
 function mapCustomer(row) {
   const pickup = (row.pickup_schedules || [])[0] || null
@@ -383,6 +385,55 @@ export async function loadPropertyVisits(propertyId, limit = 20) {
     .limit(limit)
   if (error) throw error
   return data || []
+}
+
+// Full service archive for one property: every check-in (with the stop photos
+// taken that day), every skip (with its reason), and every property photo
+// (with its note) — merged into one newest-first timeline the Clients view can
+// search by date range or free text.
+export async function loadPropertyArchive(propertyId) {
+  const { data: stops, error } = await supabase
+    .from('route_stops')
+    .select('id, check_in, check_out, status, skip_reason, skipped_by, skipped_at')
+    .eq('property_id', propertyId)
+    .or('check_in.not.is.null,skipped_at.not.is.null')
+  if (error) throw error
+  const photoMap = await loadStopPhotos((stops || []).map((s) => s.id))
+  const propPhotos = await loadPropertyPhotos(propertyId)
+
+  const entries = []
+  for (const s of stops || []) {
+    if (s.check_in) {
+      entries.push({
+        key: `stop-${s.id}`,
+        kind: 'visit',
+        at: s.check_in,
+        checkIn: s.check_in,
+        checkOut: s.check_out,
+        photos: photoMap[s.id] || [],
+      })
+    } else if (s.skipped_at) {
+      entries.push({
+        key: `skip-${s.id}`,
+        kind: 'skip',
+        at: s.skipped_at,
+        note: s.skip_reason || '',
+        by: s.skipped_by || '',
+        photos: photoMap[s.id] || [],
+      })
+    }
+  }
+  for (const ph of propPhotos) {
+    entries.push({
+      key: `photo-${ph.id}`,
+      kind: 'photo',
+      at: `${ph.takenOn || (ph.createdAt || '').slice(0, 10)}T12:00:00`,
+      note: ph.note || '',
+      url: ph.url,
+    })
+  }
+  entries.sort((a, b) => new Date(b.at) - new Date(a.at))
+  return entries
 }
 
 // Update a property. Editing the address clears its coordinates and resets the
