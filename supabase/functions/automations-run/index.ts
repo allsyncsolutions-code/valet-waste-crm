@@ -388,6 +388,7 @@ async function runScheduledInvoiceSends(): Promise<string> {
         url = d.url
       }
 
+      let smsPaused = false
       if ((row.channel === "sms" || row.channel === "both") && cust.phone) {
         const tpl = settings.sms_invoice_template || DEFAULT_TPL
         const body = String(tpl).replace(/\{(\w+)\}/g, (m, k) => {
@@ -406,10 +407,22 @@ async function runScheduledInvoiceSends(): Promise<string> {
           body: JSON.stringify({ action: "send", to: cust.phone, body, customerId: inv.customer_id, purpose: "invoice" }),
         })
         const d = await r.json().catch(() => ({}))
-        if (!d?.ok) throw new Error(d?.error || "SMS send failed")
+        if (d?.paused) {
+          // Texting is globally paused (RingCentral limit): don't fail the send —
+          // deliver by email instead when the customer has one.
+          smsPaused = true
+        } else if (!d?.ok) {
+          throw new Error(d?.error || "SMS send failed")
+        }
       }
 
-      if (row.channel === "email" || row.channel === "both") {
+      if (smsPaused && row.channel === "sms" && !cust.email) {
+        await sbPatch(`invoice_scheduled_sends?id=eq.${row.id}`, { status: "failed", last_error: "Texting paused (RingCentral limit) and this customer has no email on file" })
+        failed++
+        continue
+      }
+
+      if (row.channel === "email" || row.channel === "both" || smsPaused) {
         const r = await fetch(`${SUPABASE_URL}/functions/v1/payments`, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${SERVICE_KEY}` },

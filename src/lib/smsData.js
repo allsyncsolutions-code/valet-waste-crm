@@ -19,8 +19,13 @@ export const saveSmsConfig = (config) => call({ action: 'save_config', config })
 
 // Send one SMS. `to` is any phone format; the function normalizes to E.164.
 // opts: { customerId, purpose, sentBy } — purpose is logged for the Activity view.
-export const sendSms = (to, body, opts = {}) =>
-  call({ action: 'send', to, body, customerId: opts.customerId, purpose: opts.purpose, sentBy: opts.sentBy })
+// Throws when texting is globally paused (RingCentral limit) so manual-send UIs
+// show why nothing went out.
+export const sendSms = async (to, body, opts = {}) => {
+  const d = await call({ action: 'send', to, body, customerId: opts.customerId, purpose: opts.purpose, sentBy: opts.sentBy })
+  if (d && d.paused) throw new Error(d.message || 'Texting is paused — no SMS was sent.')
+  return d
+}
 
 // Fill {token} placeholders in a message template.
 export function renderTemplate(tpl, vars) {
@@ -28,7 +33,11 @@ export function renderTemplate(tpl, vars) {
 }
 
 // Fire a test text to confirm the setup works end to end.
-export const sendTestSms = (to) => call({ action: 'test', to })
+export const sendTestSms = async (to) => {
+  const d = await call({ action: 'test', to })
+  if (d && d.paused) throw new Error(d.message || 'Texting is paused — no SMS was sent.')
+  return d
+}
 
 // Inbound-reply webhook subscription lifecycle (RingCentral push subscriptions
 // expire, so we create + auto-renew them via the API instead of registering by

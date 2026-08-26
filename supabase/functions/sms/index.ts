@@ -10,6 +10,11 @@
 //   send {to, body, customerId?}  → send one SMS, logged to sms_messages
 //   test {to}             → send a short test message
 //
+// Global pause: while app_settings.sms_paused is true, send/test contact no
+// provider at all — they log a status='paused' row and return
+// { ok:false, paused:true, message } (deliberately no `error` key: server
+// callers treat that as fatal; they read `paused` and fall back to email).
+//
 // Secrets required (set as Supabase function secrets / env):
 //   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY   (injected automatically)
 //   TELNYX_API_KEY, TELNYX_FROM               (optional — only for fallback)
@@ -220,6 +225,15 @@ async function sendSms(to: string, body: string, customerId?: string | null, pur
   const toNum = e164(to)
   const meta = { purpose: purpose || null, sent_by: sentBy || null }
 
+  // Global pause (RingCentral limit hit, etc.): refuse BEFORE any provider is
+  // contacted (Telnyx included) and leave an audit row. The response carries no
+  // `error` key on purpose — server-to-server callers (notify-*, automations)
+  // treat `error` as fatal; they read `paused` instead and degrade to email.
+  if (settings.sms_paused) {
+    await logMessage({ direction: "out", provider: "paused", to_number: toNum, body, status: "paused", customer_id: customerId || null, ...meta })
+    return { ok: false, paused: true, message: "Texting is paused (RingCentral limit) — no SMS was sent. Emails still go out." }
+  }
+
   const rcReady =
     settings.sms_enabled &&
     settings.rc_client_id &&
@@ -276,6 +290,7 @@ Deno.serve(async (req) => {
       const s = await getSettings()
       return json({
         sms_enabled: !!s.sms_enabled,
+        sms_paused: !!s.sms_paused,
         sms_from_number: s.sms_from_number || "",
         rc_server_url: s.rc_server_url || "https://platform.ringcentral.com",
         rc_client_id: s.rc_client_id || "",
@@ -288,14 +303,14 @@ Deno.serve(async (req) => {
 
     if (action === "save_config") {
       const c = config || {}
-      // Non-secret fields → app_settings
-      const patch: Record<string, unknown> = {
-        sms_enabled: !!c.sms_enabled,
-        sms_from_number: c.sms_from_number || null,
-        rc_server_url: c.rc_server_url || "https://platform.ringcentral.com",
-        rc_client_id: c.rc_client_id || null,
-        updated_at: new Date().toISOString(),
-      }
+      // Non-secret fields → app_settings. Every field is presence-guarded so a
+      // partial save (e.g. just the pause toggle) can't blank the others.
+      const patch: Record<string, unknown> = { updated_at: new Date().toISOString() }
+      if ("sms_enabled" in c) patch.sms_enabled = !!c.sms_enabled
+      if ("sms_paused" in c) patch.sms_paused = !!c.sms_paused
+      if ("sms_from_number" in c) patch.sms_from_number = c.sms_from_number || null
+      if ("rc_server_url" in c) patch.rc_server_url = c.rc_server_url || "https://platform.ringcentral.com"
+      if ("rc_client_id" in c) patch.rc_client_id = c.rc_client_id || null
       // Secret fields → sms_secrets, only when a new non-empty value is given
       const secretPatch: Record<string, unknown> = {}
       if (typeof c.rc_client_secret === "string" && c.rc_client_secret.trim()) {

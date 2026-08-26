@@ -11,6 +11,7 @@ import Activity from './Activity.jsx'
 
 const EMPTY_SMS = {
   sms_enabled: false,
+  sms_paused: false,
   sms_from_number: '',
   rc_server_url: 'https://platform.ringcentral.com',
   rc_client_id: '',
@@ -234,6 +235,7 @@ export default function Settings({ app }) {
     getSmsConfig().then((c) => {
       setSms({
         sms_enabled: !!c.sms_enabled,
+        sms_paused: !!c.sms_paused,
         sms_from_number: c.sms_from_number || '',
         rc_server_url: c.rc_server_url || 'https://platform.ringcentral.com',
         rc_client_id: c.rc_client_id || '',
@@ -339,6 +341,20 @@ export default function Settings({ app }) {
       setRandyMsg({ type: 'err', text: e.message || String(e) })
     }
   }
+  // Flip the global texting pause. Saved on its own — it must take effect (or
+  // lift) immediately, not wait for the rest of the SMS form to be saved.
+  async function toggleSmsPaused() {
+    const next = !sms.sms_paused
+    setSms((s) => ({ ...s, sms_paused: next }))
+    try {
+      await saveSmsConfig({ sms_paused: next })
+      setSmsMsg({ type: 'ok', text: next ? 'Texting paused — automated messages go out by email only.' : 'Texting resumed.' })
+    } catch (e) {
+      setSms((s) => ({ ...s, sms_paused: !next }))
+      setSmsMsg({ type: 'err', text: e.message || String(e) })
+    }
+  }
+
   async function testSms() {
     const to = smsTestTo.trim()
     if (!to) { setSmsMsg({ type: 'err', text: 'Enter a number to send a test to.' }); return }
@@ -606,6 +622,12 @@ export default function Settings({ app }) {
         {smsMsg && (
           <div style={{ background: smsMsg.type === 'ok' ? '#eef7f1' : '#fdecea', border: '1px solid ' + (smsMsg.type === 'ok' ? '#cfe7da' : '#f3b7b0'), color: smsMsg.type === 'ok' ? '#1f7a4d' : '#9a2c1e', borderRadius: 10, padding: '9px 12px', fontSize: 12.5, marginBottom: 14 }}>{smsMsg.text}</div>
         )}
+        {sms.sms_paused && (
+          <div style={{ background: '#faf3e2', border: '1px solid #ecd9a8', color: '#8a6414', borderRadius: 10, padding: '10px 12px', fontSize: 12.5, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ flex: 1 }}>⏸ <b>Texting is paused</b> (RingCentral limit). Nothing sends by SMS — automated messages deliver by email only. Customer replies still come in.</span>
+            <button type="button" onClick={toggleSmsPaused} style={{ flex: 'none', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 8, padding: '7px 13px', fontSize: 12.5, fontWeight: 700, cursor: 'pointer' }}>Resume texting</button>
+          </div>
+        )}
         <form onSubmit={saveSms}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, cursor: 'pointer' }}>
             <span
@@ -615,6 +637,16 @@ export default function Settings({ app }) {
               <span style={{ position: 'absolute', top: 3, left: sms.sms_enabled ? 21 : 3, width: 18, height: 18, borderRadius: '50%', background: '#fff', transition: 'left .15s' }} />
             </span>
             <span style={{ fontSize: 13.5, fontWeight: 600 }}>Enable RingCentral SMS</span>
+          </label>
+
+          <label style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, cursor: 'pointer' }}>
+            <span
+              onClick={toggleSmsPaused}
+              style={{ width: 42, height: 24, borderRadius: 12, background: sms.sms_paused ? '#d9902c' : '#cfd6d0', position: 'relative', flex: 'none', transition: 'background .15s' }}
+            >
+              <span style={{ position: 'absolute', top: 3, left: sms.sms_paused ? 21 : 3, width: 18, height: 18, borderRadius: '50%', background: '#fff', transition: 'left .15s' }} />
+            </span>
+            <span style={{ fontSize: 13.5, fontWeight: 600 }}>Pause all outbound texts <span style={{ fontWeight: 400, color: '#7c8a82' }}>(email-only mode — RingCentral limit)</span></span>
           </label>
 
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 11 }}>
