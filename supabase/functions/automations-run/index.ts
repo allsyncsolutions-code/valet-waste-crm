@@ -215,17 +215,22 @@ async function runKeyRefresh(s: Record<string, unknown>): Promise<{ token: strin
   return { token: d.api_key as string }
 }
 
-// Proactive keep-warm refresh (cron every 30 min, mig 0046): refreshes while
-// the stored api_key is STILL VALID (<45 min old) so the bearer is never
-// dead — the lazy on-demand refresh can't recover once Run purges an expired
-// key, which is what killed 2026-08-20/25/26 (outages #1-3).
+// Proactive keep-warm refresh (cron every 15 min, mig 0046): refreshes unless
+// the key was rotated seconds ago — the lazy on-demand refresh can't recover
+// once Run purges an expired key, which is what killed 2026-08-20/25/26
+// (outages #1-3). NOTE: refresh only works with the still-live api_key in the
+// body (shape2), so the threshold must guarantee a healthy margin across a
+// missed tick — a <15-min threshold with 30-min ticks left a 16-min-remaining
+// gap on 2026-08-26 (outage #4, same day) and the key died. Skip only when
+// the key has >50 min left (i.e. basically just rotated); every successful
+// tick rotation buys a full fresh hour and pushes the refresh token +30d.
 async function runRunKeyKeepwarm(): Promise<string> {
   const s = (await sbGet(`app_settings?id=eq.1&select=run_mid,run_refresh_token,run_api_key,run_api_key_expires_at,run_env`))[0] || {}
   if (!s.run_mid || !s.run_refresh_token) return "Run Merchant isn't configured — skipped."
   const exp = s.run_api_key_expires_at ? new Date(s.run_api_key_expires_at as string).getTime() : 0
   const remaining = exp - Date.now()
-  if (s.run_api_key && remaining > 15 * 60 * 1000) {
-    return `Key still valid (${Math.round(remaining / 60000)} min left) — no refresh needed.`
+  if (s.run_api_key && remaining > 50 * 60 * 1000) {
+    return `Key still fresh (${Math.round(remaining / 60000)} min left) — no refresh needed.`
   }
   try {
     await runKeyRefresh(s)
