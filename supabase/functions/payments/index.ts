@@ -158,13 +158,27 @@ async function getAccessToken(s: RunSettings): Promise<{ token: string; mid: str
     return { token: s.run_api_key, mid, env }
   }
   const d = await runKeyRefresh(env, s.run_api_key || null, s.run_refresh_token)
-  await sbPatch(`app_settings?id=eq.1`, {
+  await persistRunTokens(d)
+  return { token: d.api_key, mid, env }
+}
+
+// A Run refresh consumes the stored refresh token — if this write silently
+// failed the successor would be lost forever and every fn would 401. Back it
+// up to run_webhook_events (service-role only) on failure so it can be recovered.
+async function persistRunTokens(d: Record<string, unknown>) {
+  const body = {
     run_api_key: d.api_key,
     run_refresh_token: d.refresh_token,
     run_api_key_expires_at: new Date(Number(d.api_key_expires_at) * 1000).toISOString(),
     run_refresh_token_expires_at: new Date(Number(d.refresh_token_expires_at) * 1000).toISOString(),
-  })
-  return { token: d.api_key, mid, env }
+  }
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/app_settings?id=eq.1`, { method: "PATCH", headers: restHeaders, body: JSON.stringify(body) })
+  if (!r.ok) {
+    console.error("Run token persist failed", r.status, await r.text())
+    try {
+      await sbPost("run_webhook_events", { event_type: "debug.token_persist_failed", payload: d, webhook_id: `debug-${crypto.randomUUID()}` })
+    } catch (_e) { console.error("Run token persist backup also failed", _e) }
+  }
 }
 
 interface ChargeBody {

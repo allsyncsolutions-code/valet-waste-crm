@@ -62,7 +62,8 @@ async function sbPost(path: string, body: unknown) {
   return await r.json()
 }
 async function sbPatch(path: string, body: unknown) {
-  await fetch(`${SUPABASE_URL}/rest/v1/${path}`, { method: "PATCH", headers: restHeaders, body: JSON.stringify(body) })
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, { method: "PATCH", headers: restHeaders, body: JSON.stringify(body) })
+  if (!r.ok) console.error(`PATCH ${path}: ${r.status} ${await r.text()}`)
 }
 
 const enc = encodeURIComponent
@@ -126,13 +127,27 @@ async function runAccessToken(s: RunSettings): Promise<{ token: string; mid: str
     status = r.status
   }
   if (!ok) throw new Error((d?.message as string) || `Run Merchant key refresh failed: ${status}`)
-  await sbPatch(`app_settings?id=eq.1`, {
+  await persistRunTokens(d)
+  return { token: d.api_key as string, mid, env }
+}
+
+// A Run refresh consumes the stored refresh token — if this write silently
+// failed the successor would be lost forever and every fn would 401. Back it
+// up to run_webhook_events (service-role only) on failure so it can be recovered.
+async function persistRunTokens(d: Record<string, unknown>) {
+  const body = {
     run_api_key: d.api_key,
     run_refresh_token: d.refresh_token,
     run_api_key_expires_at: new Date(Number(d.api_key_expires_at) * 1000).toISOString(),
     run_refresh_token_expires_at: new Date(Number(d.refresh_token_expires_at) * 1000).toISOString(),
-  })
-  return { token: d.api_key as string, mid, env }
+  }
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/app_settings?id=eq.1`, { method: "PATCH", headers: restHeaders, body: JSON.stringify(body) })
+  if (!r.ok) {
+    console.error("Run token persist failed", r.status, await r.text())
+    try {
+      await sbPost("run_webhook_events", { event_type: "debug.token_persist_failed", payload: d, webhook_id: `debug-${crypto.randomUUID()}` })
+    } catch (_e) { console.error("Run token persist backup also failed", _e) }
+  }
 }
 
 async function runApi(env: string, token: string, path: string, opts: { method?: string; body?: Record<string, unknown> } = {}) {
@@ -556,15 +571,33 @@ Deno.serve(async (req) => {
       if (res.result && res.result !== "A") {
         return json({ error: res.resp_text || "Your card couldn't be verified. Please try another card." })
       }
-      await sbPatch(`customers?id=eq.${cust.id}`, {
+      // TEMP DIAGNOSTIC: capture Run's raw charge response if it lacks a
+      // vault_id (mapping question) — see 0038 for the column-type bug this caught.
+      console.log("RUN save_card response", JSON.stringify(res))
+      if (!res.vault_id) {
+        try {
+          await sbPost("run_webhook_events", { event_type: "debug.save_card_response", payload: res, webhook_id: `debug-${crypto.randomUUID()}` })
+        } catch (_e) { /* non-fatal */ }
+      }
+      const patchBody = {
         run_vault_id: res.vault_id ?? null,
         run_vault_holder_id: res.vault_holder_id ?? cust.run_vault_holder_id ?? null,
-        run_card_brand: res.card_type || null,
+        run_card_brand: res.card_brand || res.card_type || null,
         run_card_last4: String(res.card_number || "").slice(-4) || null,
         run_card_exp: String(body.expiration) || null,
         autopay_consent: !!body.consent,
         autopay_consented_at: body.consent ? new Date().toISOString() : null,
+      }
+      const patchRes = await fetch(`${SUPABASE_URL}/rest/v1/customers?id=eq.${cust.id}`, {
+        method: "PATCH", headers: restHeaders, body: JSON.stringify(patchBody),
       })
+      if (!patchRes.ok) {
+        const errText = await patchRes.text()
+        console.error("RUN save_card customers PATCH failed", patchRes.status, errText)
+        try {
+          await sbPost("run_webhook_events", { event_type: "debug.save_card_patch_failed", payload: { status: patchRes.status, body: errText, customer_id: cust.id }, webhook_id: `debug-${crypto.randomUUID()}` })
+        } catch (_e) { /* non-fatal */ }
+      }
       if (!alreadySaved && body.consent) {
         const cardTxt = res.card_type ? `${String(res.card_type).toUpperCase()} ••${String(res.card_number || "").slice(-4)}` : "a card"
         await textAdmins(
