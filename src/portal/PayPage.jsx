@@ -190,7 +190,8 @@ export default function PayPage({ slug, invoiceId }) {
             {inv.items.map((it, i) => (
               <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 34px 62px 68px', gap: 6, padding: '8px 8px', borderBottom: '1px solid #f5f6f4', alignItems: 'start' }}>
                 <div style={{ fontSize: 12, color: '#1a2420' }}>
-                  {it.description ? <RichText text={it.description} style={{ fontSize: 12, color: '#1a2420' }} /> : '—'}
+                  {it.title ? <div style={{ fontWeight: 700, fontSize: 12.5, marginBottom: 1 }}>{it.title}</div> : null}
+                  {it.description ? <RichText text={it.description} style={{ fontSize: 12, color: '#1a2420' }} /> : (it.title ? null : '—')}
                 </div>
                 <div style={{ textAlign: 'center', fontSize: 12, color: '#5d6b63', paddingTop: 1 }}>{it.quantity}</div>
                 <div style={{ textAlign: 'right', fontSize: 12, color: '#5d6b63', paddingTop: 1 }}>{money(it.unit_price)}</div>

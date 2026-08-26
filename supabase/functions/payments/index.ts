@@ -235,7 +235,7 @@ async function runVaultCreate(env: string, token: string, body: Record<string, u
 function invoiceEmailText(c: Record<string, unknown>, s: Record<string, unknown>, inv: Record<string, unknown>, items: Array<Record<string, unknown>>, url: string) {
   const company = s.company_name || "Valet Waste FL"
   const money = (v: unknown) => "$" + Number(v || 0).toFixed(2)
-  const lines = items.map((it) => `  ${it.description || "Service"} x${it.quantity} — ${money(it.amount)}`)
+  const lines = items.map((it) => `  ${it.title ? it.title + ": " : ""}${it.description || "Service"} x${it.quantity} — ${money(it.amount)}`)
   return [
     `Hi ${c.name || "there"},`,
     ``,
@@ -260,7 +260,7 @@ function invoiceEmailHtml(c: Record<string, unknown>, s: Record<string, unknown>
   const esc = (t: unknown) => String(t ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" } as Record<string, string>)[ch])
   const rows = items
     .map((it) => `<tr>
-      <td style="padding:7px 10px;border-bottom:1px solid #e6ece8;font-size:14px;color:#1a2420">${esc(it.description || "Service")}</td>
+      <td style="padding:7px 10px;border-bottom:1px solid #e6ece8;font-size:14px;color:#1a2420">${it.title ? `<div style="font-weight:700">${esc(it.title)}</div>` : ""}${esc(it.description || (it.title ? "" : "Service"))}</td>
       <td style="padding:7px 10px;border-bottom:1px solid #e6ece8;font-size:14px;color:#5d6b63;text-align:center;white-space:nowrap">${it.quantity}</td>
       <td style="padding:7px 10px;border-bottom:1px solid #e6ece8;font-size:14px;color:#5d6b63;text-align:right;white-space:nowrap">${money(it.unit_price)}</td>
       <td style="padding:7px 10px;border-bottom:1px solid #e6ece8;font-size:14px;color:#1a2420;text-align:right;white-space:nowrap">${money(it.amount)}</td>
@@ -478,7 +478,7 @@ Deno.serve(async (req) => {
         await sbPatch(`invoices?id=eq.${inv.id}`, patch)
       }
 
-      const items = await sbGet(`invoice_line_items?invoice_id=eq.${inv.id}&select=description,quantity,unit_price,amount&order=position`)
+      const items = await sbGet(`invoice_line_items?invoice_id=eq.${inv.id}&select=title,description,quantity,unit_price,amount&order=position`)
       const s = await getSettings()
       const company = s.company_name || "Valet Waste FL"
       const money = (v: unknown) => "$" + Number(v || 0).toFixed(2)

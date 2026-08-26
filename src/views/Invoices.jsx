@@ -34,7 +34,7 @@ const STATUS_META = {
 }
 const FILTERS = [['all', 'All'], ['draft', 'Draft'], ['sent', 'Sent'], ['paid', 'Paid']]
 const today = () => new Date().toISOString().slice(0, 10)
-const blankLine = () => ({ description: '', quantity: 1, unitPrice: '' })
+const blankLine = () => ({ title: '', description: '', quantity: 1, unitPrice: '' })
 const blankForm = () => ({ customerId: '', issueDate: today(), dueDate: '', notes: '', discount: '', items: [blankLine()] })
 const blankClient = () => ({ name: '', contactName: '', email: '', phone: '', address: '' })
 
@@ -138,13 +138,14 @@ export default function Invoices({ app }) {
     const lines = custProps
       .filter((p) => selProps.includes(p.id))
       .map((p) => ({
-        description: [(p.code ? p.code + ' · ' : '') + p.address, p.service].filter(Boolean).join(' — '),
+        title: (p.code ? p.code + ' · ' : '') + p.address,
+        description: p.service || '',
         quantity: wk,
         unitPrice: p.price != null ? String(p.price) : '',
       }))
     if (!lines.length) return
     setForm((f) => {
-      const isBlank = (it) => !String(it.description || '').trim() && (it.unitPrice === '' || it.unitPrice == null)
+      const isBlank = (it) => !String(it.title || '').trim() && !String(it.description || '').trim() && (it.unitPrice === '' || it.unitPrice == null)
       const kept = f.items.filter((it) => !isBlank(it))
       return { ...f, items: [...kept, ...lines] }
     })
@@ -197,7 +198,7 @@ export default function Invoices({ app }) {
       dueDate: inv.dueDate || '',
       notes: inv.notes || '',
       discount: inv.discount ? String(inv.discount) : '',
-      items: inv.items.length ? inv.items.map((it) => ({ description: it.description, quantity: it.quantity, unitPrice: it.unitPrice })) : [blankLine()],
+      items: inv.items.length ? inv.items.map((it) => ({ title: it.title || '', description: it.description, quantity: it.quantity, unitPrice: it.unitPrice })) : [blankLine()],
     })
     setShowForm(true)
   }
@@ -439,15 +440,18 @@ export default function Invoices({ app }) {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {form.items.map((it, idx) => (
                 <div key={idx} style={{ display: 'grid', gridTemplateColumns: '1fr 56px 80px 64px 24px', gap: 7, alignItems: 'start' }}>
-                  <RichTextEditor
-                    value={it.description}
-                    onChange={(v) => setItem(idx, { description: v })}
-                    placeholder="Description — B, I, U, bullets supported"
-                    rows={2}
-                  />
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                    <input value={it.title || ''} onChange={(e) => setItem(idx, { title: e.target.value })} style={{ ...inp, fontSize: 13, fontWeight: 600 }} placeholder="Title — e.g. Weekly valet trash" />
+                    <RichTextEditor
+                      value={it.description}
+                      onChange={(v) => setItem(idx, { description: v })}
+                      placeholder="Description — B, I, U, bullets supported"
+                      rows={2}
+                    />
+                  </div>
                   <input value={it.quantity} onChange={(e) => setItem(idx, { quantity: e.target.value })} style={{ ...inp, fontSize: 13, textAlign: 'center' }} type="number" step="any" placeholder="Qty" />
                   <input value={it.unitPrice} onChange={(e) => setItem(idx, { unitPrice: e.target.value })} style={{ ...inp, fontSize: 13, textAlign: 'right' }} type="number" step="0.01" placeholder="Price" />
-                  <div style={{ fontFamily: MONO, fontSize: 12.5, textAlign: 'right', color: '#5d6b63', paddingTop: 30 }}>{money(lineAmount(it))}</div>
+                  <div style={{ fontFamily: MONO, fontSize: 12.5, textAlign: 'right', color: '#5d6b63', paddingTop: 66 }}>{money(lineAmount(it))}</div>
                   <button type="button" onClick={() => removeLine(idx)} style={{ background: 'none', border: 'none', color: '#c0492f', fontSize: 16, cursor: 'pointer', padding: 0, paddingTop: 8 }} title="Remove line">×</button>
                 </div>
               ))}
@@ -533,7 +537,10 @@ function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, on
         {inv.items.length === 0 && <div style={{ padding: '12px 0', color: '#9aa69e', fontSize: 12.5 }}>No line items.</div>}
         {inv.items.map((it) => (
           <div key={it.id} style={{ display: 'grid', gridTemplateColumns: '1fr 50px 90px 90px', gap: 8, padding: '9px 10px', borderBottom: '1px solid #f5f6f4', fontSize: 13, alignItems: 'start' }}>
-            <div style={{ color: '#1a2420' }}>{it.description ? <RichText text={it.description} style={{ fontSize: 13, color: '#1a2420' }} /> : '—'}</div>
+            <div style={{ color: '#1a2420' }}>
+              {it.title ? <div style={{ fontWeight: 700, fontSize: 13, color: '#1a2420', marginBottom: 2 }}>{it.title}</div> : null}
+              {it.description ? <RichText text={it.description} style={{ fontSize: 13, color: '#1a2420' }} /> : (it.title ? null : '—')}
+            </div>
             <div style={{ textAlign: 'center', fontFamily: MONO, color: '#5d6b63', paddingTop: 2 }}>{it.quantity}</div>
             <div style={{ textAlign: 'right', fontFamily: MONO, color: '#5d6b63', paddingTop: 2 }}>{money(it.unitPrice)}</div>
             <div style={{ textAlign: 'right', fontFamily: MONO, paddingTop: 2 }}>{money(it.amount)}</div>

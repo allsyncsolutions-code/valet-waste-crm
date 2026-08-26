@@ -33,6 +33,7 @@ function mapInvoice(row) {
     .sort((a, b) => (a.position ?? 0) - (b.position ?? 0))
     .map((li) => ({
       id: li.id,
+      title: li.title || '',
       description: li.description || '',
       quantity: num(li.quantity),
       unitPrice: num(li.unit_price),
@@ -88,9 +89,10 @@ async function writeLineItems(invoiceId, items) {
     .eq('invoice_id', invoiceId)
   if (delErr) throw delErr
   const rows = (items || [])
-    .filter((it) => (it.description || '').trim() || num(it.quantity) || num(it.unitPrice))
+    .filter((it) => (it.title || '').trim() || (it.description || '').trim() || num(it.quantity) || num(it.unitPrice))
     .map((it, i) => ({
       invoice_id: invoiceId,
+      title: (it.title || '').trim() || null,
       description: (it.description || '').trim() || null,
       quantity: num(it.quantity) || 1,
       unit_price: num(it.unitPrice),
