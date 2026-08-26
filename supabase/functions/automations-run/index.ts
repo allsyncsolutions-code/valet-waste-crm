@@ -89,19 +89,8 @@ async function runOutstandingDigest(): Promise<string> {
     lines.join("\n") + more +
     `\nReply with a name or number and I'll text them a payment link.`
 
-  const staff = await sbGet(`profiles?select=full_name,phone,role&phone=not.is.null`)
-  const recipients = staff.filter((s: any) => ["admin", "staff"].includes(s.role || ""))
-  let sent = 0
-  for (const s of recipients) {
-    const r = await fetch(`${SUPABASE_URL}/functions/v1/sms`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "send", to: s.phone, body, purpose: "digest", sentBy: "Trashy Randy" }),
-    })
-    const d = await r.json().catch(() => ({}))
-    if (d?.ok) sent++
-  }
-  return `Digest of ${invoices.length} outstanding invoices texted to ${sent}/${recipients.length} staff.`
+  const n = await notifyStaff(body, "digest", "Morning digest — outstanding invoices")
+  return `Digest of ${invoices.length} outstanding invoices: ${n.texted} texted, ${n.emailed} emailed (of ${n.total} staff).`
 }
 
 // ---- lawn_invoice_weekly_lines ----------------------------------------------
@@ -165,19 +154,8 @@ async function runDraftInvoiceReminder(): Promise<string> {
     `Heads up — ${drafts.length} draft invoice(s) totaling ${fmtMoney(totalDue)} are still unsent ` +
     `(top: ${names[drafts[0].customer_id] || "?"} ${drafts[0].number} ${fmtMoney(drafts[0].total)}). ` +
     `Autopay runs tomorrow and only charges SENT invoices — review and send today's drafts in Invoicing.`
-  const staff = await sbGet(`profiles?select=full_name,phone,role&phone=not.is.null`)
-  const recipients = staff.filter((s: any) => ["admin", "staff"].includes(s.role || ""))
-  let sent = 0
-  for (const s of recipients) {
-    const r = await fetch(`${SUPABASE_URL}/functions/v1/sms`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "send", to: s.phone, body, purpose: "digest", sentBy: "Trashy Randy" }),
-    })
-    const d = await r.json().catch(() => ({}))
-    if (d?.ok) sent++
-  }
-  return `Month-end reminder: ${drafts.length} draft invoice(s), ${fmtMoney(totalDue)} — texted to ${sent}/${recipients.length} staff (texts may be paused).`
+  const n = await notifyStaff(body, "digest", "Month-end reminder — unsent draft invoices")
+  return `Month-end reminder: ${drafts.length} draft invoice(s), ${fmtMoney(totalDue)} — ${n.texted} texted, ${n.emailed} emailed (of ${n.total} staff).`
 }
 
 // ---- autopay_charge_monthly -------------------------------------------------
@@ -266,17 +244,54 @@ function weekdayCountInMonth(ym: string, dow: number): number {
 }
 const DOW: Record<string, number> = { sun: 0, sunday: 0, mon: 1, monday: 1, tue: 2, tues: 2, tuesday: 2, wed: 3, wednesday: 3, thu: 4, thur: 4, thurs: 4, thursday: 4, fri: 5, friday: 5, sat: 6, saturday: 6 }
 
-async function textAdminsRandy(body: string) {
-  const staff = await sbGet(`profiles?select=phone,role&phone=not.is.null&role=eq.admin`)
-  for (const s of staff) {
-    try {
-      await fetch(`${SUPABASE_URL}/functions/v1/sms`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "send", to: s.phone, body, purpose: "autopay", sentBy: "Trashy Randy" }),
-      })
-    } catch (_e) { /* best effort */ }
+// ---- staff notifications with email fallback ---------------------------------
+// Texts via the sms fn; while texting is PAUSED (RingCentral limit, 2026-08-26)
+// — or when a staffer has no phone — the same message goes out by email via
+// SendGrid instead (project-level secret, same one the payments fn uses).
+async function sendStaffEmail(to: string, subject: string, body: string) {
+  const key = Deno.env.get("SENDGRID_API_KEY")
+  if (!key) throw new Error("SENDGRID_API_KEY is not configured.")
+  const from = Deno.env.get("SENDGRID_FROM") || "valetwastefl@allsynccrm.com"
+  const r = await fetch("https://api.sendgrid.com/v3/mail/send", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      personalizations: [{ to: [{ email: to }] }],
+      from: { email: from, name: "Trashy Randy" },
+      subject,
+      content: [{ type: "text/plain", value: body }],
+    }),
+  })
+  if (!r.ok) throw new Error(`SendGrid ${r.status}: ${await r.text()}`)
+}
+
+async function notifyStaff(body: string, purpose: string, subject: string): Promise<{ texted: number; emailed: number; total: number }> {
+  const staff = await sbGet(`profiles?select=full_name,phone,email,role&or=(phone.not.is.null,email.not.is.null)`)
+  const recipients = staff.filter((s: any) => ["admin", "staff"].includes(s.role || ""))
+  let texted = 0
+  let emailed = 0
+  for (const s of recipients) {
+    let sentText = false
+    if (s.phone) {
+      try {
+        const r = await fetch(`${SUPABASE_URL}/functions/v1/sms`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "send", to: s.phone, body, purpose, sentBy: "Trashy Randy" }),
+        })
+        const d = await r.json().catch(() => ({}))
+        if (d?.ok) { texted++; sentText = true }
+      } catch (_e) { /* fall through to email */ }
+    }
+    if (!sentText && s.email) {
+      try { await sendStaffEmail(s.email, subject, body); emailed++ } catch (_e) { /* best effort */ }
+    }
   }
+  return { texted, emailed, total: recipients.length }
+}
+
+async function textAdminsRandy(body: string) {
+  await notifyStaff(body, "autopay", "Autopay results")
 }
 
 async function runAutopayCharge(force = false): Promise<string> {
