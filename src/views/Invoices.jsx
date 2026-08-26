@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { MONO } from '../data.js'
 import { hasSupabase } from '../lib/supabaseClient.js'
-import { loadCustomers, createClient, loadProperties } from '../lib/customersData.js'
+import { loadCustomers, createClient } from '../lib/customersData.js'
+import { supabase } from '../lib/supabaseClient.js'
 import { paymentsStatus, chargeInvoice, scheduleInvoiceSend, listScheduledSends, cancelScheduledSend } from '../lib/paymentsData.js'
 import { loadSettings } from '../lib/settingsData.js'
 import { loadRunner } from '../lib/runnerJs.js'
@@ -61,11 +62,10 @@ export default function Invoices({ app }) {
   const [newClient, setNewClient] = useState(blankClient())
   const [savingClient, setSavingClient] = useState(false)
 
-  // The selected customer's addresses (properties) — pick some/all, choose how
-  // many weeks of service, and drop them onto the invoice as line items.
-  const [custProps, setCustProps] = useState([])
-  const [selProps, setSelProps] = useState([]) // property ids ticked
-  const [weeks, setWeeks] = useState('4')
+  // (Retired 2026-08-26) the old "tick addresses × weeks" builder is gone —
+  // line items now come from the drivers' check-in/out "Add to draft invoice?"
+  // prompt (stop-billing fn): one line per completed stop. Staff can still add
+  // blank lines by hand below for credits/edge cases.
 
   const [busy, setBusy] = useState(false) // detail-pane action in flight
   const [settings, setSettings] = useState(null) // logo/terms/contact for the invoice preview
@@ -117,44 +117,6 @@ export default function Invoices({ app }) {
   const addLine = () => setForm((f) => ({ ...f, items: [...f.items, blankLine()] }))
   const removeLine = (idx) => setForm((f) => ({ ...f, items: f.items.length > 1 ? f.items.filter((_, i) => i !== idx) : f.items }))
   const { subtotal, total } = invoiceTotals(form.items, form.discount)
-
-  // Load the picked customer's addresses whenever the form's customer changes.
-  useEffect(() => {
-    if (!showForm || !form.customerId) { setCustProps([]); setSelProps([]); return }
-    let alive = true
-    loadProperties(form.customerId)
-      .then((r) => {
-        if (!alive) return
-        const withAddr = (r || []).filter((p) => p.address)
-        setCustProps(withAddr)
-        setSelProps(withAddr.map((p) => p.id)) // default: all selected
-      })
-      .catch(() => { if (alive) { setCustProps([]); setSelProps([]) } })
-    return () => { alive = false }
-  }, [form.customerId, showForm])
-
-  const togglePropSel = (id) =>
-    setSelProps((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]))
-
-  // Append the ticked addresses as line items: qty = weeks, price = the
-  // address's per-pickup price. Quantities stay editable afterward.
-  function addSelectedProps() {
-    const wk = Math.max(1, Number(weeks) || 1)
-    const lines = custProps
-      .filter((p) => selProps.includes(p.id))
-      .map((p) => ({
-        title: (p.code ? p.code + ' · ' : '') + p.address,
-        description: p.service || '',
-        quantity: wk,
-        unitPrice: p.price != null ? String(p.price) : '',
-      }))
-    if (!lines.length) return
-    setForm((f) => {
-      const isBlank = (it) => !String(it.title || '').trim() && !String(it.description || '').trim() && (it.unitPrice === '' || it.unitPrice == null)
-      const kept = f.items.filter((it) => !isBlank(it))
-      return { ...f, items: [...kept, ...lines] }
-    })
-  }
 
   // Save a brand-new client created inline, then select it for this invoice.
   async function saveNewClient() {
@@ -507,44 +469,9 @@ export default function Invoices({ app }) {
               </div>
             )}
 
-            {custProps.length > 0 && (
-              <div style={{ background: '#f7faf8', border: '1px solid #cfe0d5', borderRadius: 11, padding: '12px 14px', marginBottom: 4 }}>
-                <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10, marginBottom: 8 }}>
-                  <div style={{ fontWeight: 600, fontSize: 13 }}>Addresses on file ({custProps.length})</div>
-                  <button type="button" onClick={() => setSelProps(selProps.length === custProps.length ? [] : custProps.map((p) => p.id))} style={{ background: 'none', border: 'none', color: '#1f7a4d', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: 0 }}>
-                    {selProps.length === custProps.length ? 'Select none' : 'Select all'}
-                  </button>
-                </div>
-                <div style={{ maxHeight: 180, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 2, marginBottom: 10 }}>
-                  {custProps.map((p) => (
-                    <label key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 6px', borderRadius: 7, cursor: 'pointer', background: selProps.includes(p.id) ? '#eaf4ee' : 'transparent' }}>
-                      <input type="checkbox" checked={selProps.includes(p.id)} onChange={() => togglePropSel(p.id)} style={{ flex: 'none' }} />
-                      <span style={{ flex: 1, minWidth: 0, fontSize: 12.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {p.code ? <b style={{ color: '#7c8a82', marginRight: 5 }}>{p.code}</b> : null}{p.address}
-                        {p.service ? <span style={{ color: '#9aa69e' }}> · {p.service}</span> : null}
-                      </span>
-                      <span style={{ flex: 'none', fontFamily: MONO, fontSize: 12, color: p.price != null ? '#1f7a4d' : '#c08a2e' }}>
-                        {p.price != null ? money(p.price) : 'no price'}
-                      </span>
-                    </label>
-                  ))}
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                  <span style={{ fontSize: 12.5, color: '#5d6b63', fontWeight: 600 }}>Weeks of service:</span>
-                  {[4, 5].map((n) => (
-                    <button key={n} type="button" onClick={() => setWeeks(String(n))} style={{ flex: 'none', cursor: 'pointer', fontSize: 12.5, fontWeight: 600, padding: '5px 11px', borderRadius: 7, border: `1px solid ${weeks === String(n) ? '#1f7a4d' : '#dde2dd'}`, background: weeks === String(n) ? '#e7f1eb' : '#fff', color: weeks === String(n) ? '#1f7a4d' : '#7c8a82' }}>× {n}</button>
-                  ))}
-                  <input value={weeks} onChange={(e) => setWeeks(e.target.value)} type="number" min="1" step="1" style={{ width: 58, border: '1px solid #dde2dd', borderRadius: 7, padding: '5px 8px', fontSize: 13, textAlign: 'center', boxSizing: 'border-box' }} title="Custom number of weeks" />
-                  <div style={{ flex: 1 }} />
-                  <button type="button" onClick={addSelectedProps} disabled={!selProps.length} style={{ flex: 'none', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 13px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', opacity: selProps.length ? 1 : 0.5 }}>
-                    Add {selProps.length} to invoice
-                  </button>
-                </div>
-                <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 8 }}>
-                  Each address becomes a line: qty = weeks, price = its per-pickup rate. You can still edit any quantity or price below after adding.
-                </div>
-              </div>
-            )}
+            <div style={{ fontSize: 11.5, color: '#9aa69e', margin: '4px 0 0' }}>
+              Service lines are added automatically when drivers complete stops (check-in/out → "Add to draft invoice"). Add blank lines by hand below only for credits or one-off adjustments.
+            </div>
 
             <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.1em', color: '#9aa69e', margin: '8px 0 8px', paddingTop: 10, borderTop: '1px solid #eef0ed' }}>LINE ITEMS</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -588,6 +515,58 @@ export default function Invoices({ app }) {
           </form>
         </div>
       )}
+    </div>
+  )
+}
+
+// Service photos for the invoice's stops, grouped by stop (address + date).
+// Fetched render-time from stop_photos so late-added photos show up too.
+function StopPhotos({ stopIds }) {
+  const [groups, setGroups] = useState([])
+  useEffect(() => {
+    let alive = true
+    if (!stopIds.length) { setGroups([]); return }
+    ;(async () => {
+      try {
+        const { data: stops } = await supabase
+          .from('route_stops')
+          .select('id, properties(address), routes(service_date)')
+          .in('id', stopIds)
+        const { data: photos } = await supabase
+          .from('stop_photos')
+          .select('stop_id, path')
+          .in('stop_id', stopIds)
+          .order('created_at', { ascending: true })
+        if (!alive) return
+        const byStop = new Map((stops || []).map((s) => {
+          const d = s.routes?.service_date ? String(s.routes.service_date).slice(0, 10) : null
+          return [s.id, { heading: [s.properties?.address, d].filter(Boolean).join(' — ') || 'Service photos', urls: [] }]
+        }))
+        for (const p of photos || []) {
+          const g = byStop.get(p.stop_id)
+          if (g) g.urls.push(supabase.storage.from('stop-photos').getPublicUrl(p.path).data.publicUrl)
+        }
+        setGroups([...byStop.values()].filter((g) => g.urls.length))
+      } catch (_e) { if (alive) setGroups([]) }
+    })()
+    return () => { alive = false }
+  }, [stopIds.join(',')])
+  if (!groups.length) return null
+  return (
+    <div style={{ marginTop: 14 }}>
+      <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.08em', color: '#9aa69e', margin: '10px 0 8px' }}>SERVICE PHOTOS</div>
+      {groups.map((g, i) => (
+        <div key={i} style={{ marginBottom: 10 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: '#1a2420', marginBottom: 6 }}>{g.heading}</div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 7 }}>
+            {g.urls.map((u, j) => (
+              <a key={j} href={u} target="_blank" rel="noreferrer">
+                <img src={u} alt={g.heading} style={{ width: '100%', borderRadius: 8, border: '1px solid #e6eae6', display: 'block' }} />
+              </a>
+            ))}
+          </div>
+        </div>
+      ))}
     </div>
   )
 }
@@ -666,6 +645,9 @@ function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, on
           <TotalRow label={inv.tipAmount > 0 ? 'Invoice total' : 'Total'} value={money(inv.total)} bold />
           {inv.tipAmount > 0 && <TotalRow label="Charged (with tip)" value={money(inv.total + inv.tipAmount)} bold />}
         </div>
+        {/* service photos — grouped by stop (render-time, same as the email + pay page) */}
+        <StopPhotos stopIds={(inv.items || []).map((it) => it.stopId).filter(Boolean)} />
+
       </div>
 
       {(inv.notes || company.invoice_terms) && (

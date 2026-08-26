@@ -546,7 +546,7 @@ export async function loadDayDispatch(date, line) {
   if (!date) throw new Error('A date is required.')
   let q = supabase
     .from('routes')
-    .select('id, code, name, driver_id, business_line, route_stops(id, seq, status, service, time_window, lat, lng, check_in, check_out, on_my_way_at, excess_flagged, excess_note, tech_pay, nudge_sent, skip_reason, skipped_by, property_id, properties(name, address, notes, lat, lng, price, tech_pay, customer_id, customers(name, phone, customer_tags(tag:tags(id,name,color)))), stop_photos(id))')
+    .select('id, code, name, driver_id, business_line, route_stops(id, seq, status, service, time_window, lat, lng, check_in, check_out, on_my_way_at, excess_flagged, excess_note, tech_pay, nudge_sent, skip_reason, skipped_by, property_id, job_title, job_description, job_price, properties(name, address, notes, lat, lng, price, tech_pay, customer_id, customers(name, phone, customer_tags(tag:tags(id,name,color)))), stop_photos(id))')
     .eq('service_date', date)
   if (line) q = q.eq('business_line', line)
   const { data, error } = await q.order('code', { ascending: true })
@@ -578,6 +578,9 @@ export async function loadDayDispatch(date, line) {
         photoCount: (s.stop_photos || []).length,
         techPay: s.tech_pay ?? s.properties?.tech_pay ?? null,
         price: s.properties?.price ?? null,
+        jobTitle: s.job_title || null,
+        jobDescription: s.job_description || null,
+        jobPrice: s.job_price != null ? Number(s.job_price) : null,
       })),
   }))
 }
@@ -734,7 +737,9 @@ export async function ensureRoute(code, date) {
 // Add a brand-new ad-hoc stop (a one-off pickup) to a date's route: geocodes
 // the address, creates a property for it, and appends it as a stop. Does NOT
 // create a recurring schedule — it only lands on this one date's route.
-export async function addOneOffStop(code, date, { name, address, service, customerId, price } = {}) {
+// jobTitle/jobDescription/jobPrice ride on the stop itself (mig 0043) and are
+// what the driver's check-in/out "add to invoice" popup bills from.
+export async function addOneOffStop(code, date, { name, address, service, customerId, price, jobTitle, jobDescription, jobPrice } = {}) {
   const addr = String(address || '').trim()
   if (!addr) throw new Error('An address is required.')
   if (!date) throw new Error('A date is required.')
@@ -769,6 +774,9 @@ export async function addOneOffStop(code, date, { name, address, service, custom
     seq,
     status: 'pending',
     service: service || prop.service || null,
+    job_title: (jobTitle && jobTitle.trim()) || null,
+    job_description: (jobDescription && jobDescription.trim()) || null,
+    job_price: jobPrice != null && !isNaN(Number(jobPrice)) ? Number(jobPrice) : null,
     lat: prop.lat,
     lng: prop.lng,
   })

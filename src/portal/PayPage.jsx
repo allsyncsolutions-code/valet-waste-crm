@@ -219,6 +219,25 @@ export default function PayPage({ slug, invoiceId }) {
           <div style={{ fontWeight: 800, fontSize: 21 }}>{money(inv.total)}</div>
         </div>
 
+        {/* service photos — grouped by stop, from the invoice's line items */}
+        {(inv.photoGroups || []).length > 0 && (
+          <div style={{ margin: '0 18px', padding: '12px 0 14px', borderTop: '1px solid #f0f2ef' }}>
+            <div style={{ fontSize: 9.5, letterSpacing: '.1em', color: '#9aa69e', margin: '4px 0 8px', fontWeight: 600 }}>SERVICE PHOTOS</div>
+            {inv.photoGroups.map((g, gi) => (
+              <div key={gi} style={{ marginBottom: 12 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: '#1a2420', margin: '6px 0 6px' }}>{g.heading}</div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
+                  {g.urls.map((u, ui) => (
+                    <a key={ui} href={u} target="_blank" rel="noreferrer">
+                      <img src={u} alt={g.heading} style={{ width: '100%', borderRadius: 8, border: '1px solid #e6ece8', display: 'block' }} />
+                    </a>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* notes + terms */}
         {(inv.notes || info.terms) && (
           <div style={{ margin: '0 18px', padding: '0 0 14px', borderTop: '1px solid #f0f2ef' }}>

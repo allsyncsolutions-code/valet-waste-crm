@@ -38,6 +38,7 @@ function mapInvoice(row) {
       quantity: num(li.quantity),
       unitPrice: num(li.unit_price),
       amount: num(li.amount),
+      stopId: li.stop_id || null,
     }))
   return {
     id: row.id,

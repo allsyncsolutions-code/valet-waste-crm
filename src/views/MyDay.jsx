@@ -117,6 +117,35 @@ export default function MyDay({ app }) {
     setBusyStop(null)
   }
 
+  // ---- billing prompt -------------------------------------------------------
+  // What this stop's invoice line would say (keep in sync with the stop-billing
+  // fn + the mobile app's askBill). One-time stops carry their own title/price
+  // (set in Plan Routes); subscription stops bill the property's per-pickup
+  // price under a "Week 2 Fri Pick Up" style title.
+  function billLabel(s) {
+    if (s.jobTitle || s.jobPrice != null) {
+      return { title: s.jobTitle || 'One-time service', price: s.jobPrice != null ? s.jobPrice : s.price, oneTime: true }
+    }
+    const d = new Date(date + 'T12:00:00')
+    const wd = ['Sun', 'Mon', 'Tues', 'Wed', 'Thurs', 'Fri', 'Sat'][d.getDay()]
+    return { title: `Week ${Math.ceil(d.getDate() / 7)} ${wd} Pick Up`, price: s.price, oneTime: false }
+  }
+
+  async function askBill(s) {
+    const { title, price, oneTime } = billLabel(s)
+    if (!(Number(price) > 0)) return // nothing billable — don't nag
+    const ok = window.confirm(
+      `Add to draft invoice?\n\n"${title}" ($${Number(price).toFixed(2)}) for ${s.clientName || 'the client'}` +
+      (oneTime ? '\n\nOne-time job — the invoice email is scheduled for tonight.' : '')
+    )
+    if (!ok) return
+    try {
+      const { data } = await supabase.functions.invoke('stop-billing', { body: { action: 'draft_stop_line', stopId: s.id, byName: driverName(s.driverId) } })
+      if (data?.error) setErr(`Invoice: ${data.detail || data.error}`)
+      else await refresh()
+    } catch (e) { setErr(`Invoice: ${e.message || String(e)}`) }
+  }
+
   async function clockIn(s) {
     // Ask BEFORE checking in: notify the client we've arrived, or check in
     // silently? Either way the check-in itself is recorded as usual.
@@ -132,8 +161,9 @@ export default function MyDay({ app }) {
       if (notify) supabase.functions.invoke('notify-arrival', { body: { stopId: s.id, sentBy: driverName(s.driverId) } }).catch(() => {})
       maybeNudge(s)
       await refresh()
-    } catch (e) { setErr(e.message || String(e)) }
+    } catch (e) { setErr(e.message || String(e)); setBusyStop(null); return }
     setBusyStop(null)
+    askBill(s)
   }
 
   async function markComplete(s) {
@@ -151,8 +181,9 @@ export default function MyDay({ app }) {
       // "Service complete" text — server-gated (only sends if completion texts are ON). Best-effort.
       supabase.functions.invoke('notify-complete', { body: { stopId: s.id, sentBy: driverName(s.driverId) } }).catch(() => {})
       await refresh()
-    } catch (e) { setErr(e.message || String(e)) }
+    } catch (e) { setErr(e.message || String(e)); setBusyStop(null); return }
     setBusyStop(null)
+    askBill(s)
   }
 
   async function undo(s) {
@@ -332,6 +363,12 @@ function JobCard({ s, open, onToggle, busy, photos = [], pending = [], syncing =
               <a href={`https://www.google.com/maps/search/?api=1&query=${dest}`} target="_blank" rel="noreferrer" style={{ color: '#2f6db0' }}>{s.address || '—'}</a>
             </Row>
             <Row label="Service">{s.service || 'Lawn care'}</Row>
+            {(s.jobTitle || s.jobPrice != null) && (
+              <Row label="One-time job">
+                {s.jobTitle || 'One-time service'}{s.jobPrice != null ? ` — $${Number(s.jobPrice).toFixed(2)}` : ''}
+                <span style={{ color: '#9aa69e', fontSize: 11 }}> — billed at check-in/out</span>
+              </Row>
+            )}
             {s.techPay != null && <Row label="Job pay">{`$${Number(s.techPay).toFixed(2)}`}<span style={{ color: '#9aa69e', fontSize: 11 }}> — pays with clock-in + complete + photo</span></Row>}
 
             {/* photos */}

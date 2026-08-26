@@ -53,9 +53,8 @@ import { loadCustomers, updateProperty } from '../lib/customersData.js'
 import { logActivity, currentActorName } from '../lib/activityData.js'
 import Drivers from './Drivers.jsx'
 import { geocodeAll } from '../lib/importData.js'
-import { createInvoice } from '../lib/invoicesData.js'
 
-const BLANK_STOP = { name: '', address: '', service: '', customerId: '', customerName: '', description: '', price: '' }
+const BLANK_STOP = { name: '', address: '', service: '', customerId: '', customerName: '', title: '', description: '', price: '' }
 
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -347,18 +346,8 @@ export default function RoutesView({ app }) {
     try {
       const res = await addOneOffStop(routeCode, routeSel, {
         name: newStop.name, address: addr, service: newStop.service, customerId: custId, price: hasPrice ? price : null,
+        jobTitle: newStop.title, jobDescription: newStop.description, jobPrice: hasPrice ? price : null,
       })
-      if (hasPrice) {
-        await createInvoice({
-          customerId: custId,
-          status: 'draft',
-          items: [{
-            description: (newStop.description || '').trim() || newStop.service.trim() || 'One-off pickup',
-            quantity: 1,
-            unitPrice: price,
-          }],
-        })
-      }
       setShowNewStop(false)
       setNewStop(BLANK_STOP)
       await refresh(routeSel)
@@ -1269,7 +1258,7 @@ export default function RoutesView({ app }) {
               <div onClick={() => !savingStop && setShowNewStop(false)} style={{ cursor: 'pointer', color: '#7c8a82', fontSize: 18 }}>✕</div>
             </div>
             <div style={{ fontSize: 12.5, color: '#7c8a82', marginBottom: 16 }}>
-              Adds a single stop to Route {routeCode} on <b>{prettyDate(routeSel)}</b> only — no recurring schedule. Add a price to also create a draft invoice for the customer.
+              Adds a single stop to Route {routeCode} on <b>{prettyDate(routeSel)}</b> only — no recurring schedule. Title, description, and price are what the driver bills when completing the stop.
             </div>
 
             {/* customer combobox */}
@@ -1317,10 +1306,10 @@ export default function RoutesView({ app }) {
                 <input value={newStop.service} onChange={(e) => setNewStop({ ...newStop, service: e.target.value })} style={mInp} placeholder="e.g. Trash / Recycle" />
               </div>
             </div>
-            <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
-              <div style={{ flex: 2 }}>
-                <label style={mLbl}>Charge description <span style={{ color: '#9aa69e', fontWeight: 400 }}>(for the invoice)</span></label>
-                <input value={newStop.description} onChange={(e) => setNewStop({ ...newStop, description: e.target.value })} style={mInp} placeholder="Defaults to the service / “One-off pickup”" />
+            <div style={{ display: 'flex', gap: 12, marginBottom: 12 }}>
+              <div style={{ flex: 1 }}>
+                <label style={mLbl}>Job title <span style={{ color: '#9aa69e', fontWeight: 400 }}>(for the invoice line)</span></label>
+                <input value={newStop.title} onChange={(e) => setNewStop({ ...newStop, title: e.target.value })} style={mInp} placeholder="e.g. Junk removal — garage cleanout" />
               </div>
               <div style={{ flex: 1 }}>
                 <label style={mLbl}>Price <span style={{ color: '#9aa69e', fontWeight: 400 }}>(optional)</span></label>
@@ -1328,6 +1317,12 @@ export default function RoutesView({ app }) {
                   <span style={{ position: 'absolute', left: 11, top: '50%', transform: 'translateY(-50%)', color: '#7c8a82', fontSize: 15 }}>$</span>
                   <input value={newStop.price} onChange={(e) => setNewStop({ ...newStop, price: e.target.value })} inputMode="decimal" style={{ ...mInp, paddingLeft: 22 }} placeholder="0.00" />
                 </div>
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+              <div style={{ flex: 2 }}>
+                <label style={mLbl}>Charge description <span style={{ color: '#9aa69e', fontWeight: 400 }}>(for the invoice)</span></label>
+                <input value={newStop.description} onChange={(e) => setNewStop({ ...newStop, description: e.target.value })} style={mInp} placeholder="Defaults to the service / “One-off pickup”" />
               </div>
             </div>
             <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>

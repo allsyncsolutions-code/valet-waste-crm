@@ -258,7 +258,32 @@ function invoiceEmailText(c: Record<string, unknown>, s: Record<string, unknown>
   ].filter((l) => l !== "").join("\n")
 }
 
-function invoiceEmailHtml(c: Record<string, unknown>, s: Record<string, unknown>, inv: Record<string, unknown>, items: Array<Record<string, unknown>>, url: string) {
+// Service photos for an invoice, grouped by stop — rendered at SEND time, so
+// photos added before the email goes out are included automatically.
+// Returns [{ heading: "123 Main St — Aug 24", urls: [...] }].
+async function invoiceStopPhotos(invoiceId: string) {
+  const items = await sbGet(`invoice_line_items?invoice_id=eq.${invoiceId}&select=stop_id`)
+  const stopIds = [...new Set(items.map((i: any) => i.stop_id).filter(Boolean))]
+  if (!stopIds.length) return []
+  const idList = stopIds.map((id: string) => enc(String(id))).join(",")
+  const stops = await sbGet(
+    `route_stops?id=in.(${idList})&select=id,properties(address),routes(service_date)`,
+  )
+  const photos = await sbGet(`stop_photos?stop_id=in.(${idList})&select=stop_id,path&order=created_at.asc`)
+  const byStop = new Map<string, { heading: string, urls: string[] }>()
+  for (const s of stops) {
+    const d = s.routes?.service_date ? String(s.routes.service_date).slice(0, 10) : null
+    const heading = [s.properties?.address, d].filter(Boolean).join(" — ")
+    byStop.set(s.id, { heading: heading || "Service photos", urls: [] })
+  }
+  for (const p of photos) {
+    const g = byStop.get(p.stop_id)
+    if (g) g.urls.push(`${SUPABASE_URL}/storage/v1/object/public/stop-photos/${enc(String(p.path))}`)
+  }
+  return [...byStop.values()].filter((g) => g.urls.length > 0)
+}
+
+function invoiceEmailHtml(c: Record<string, unknown>, s: Record<string, unknown>, inv: Record<string, unknown>, items: Array<Record<string, unknown>>, url: string, photoGroups: Array<{ heading: string, urls: string[] }> = []) {
   const company = s.company_name || "Valet Waste FL"
   const money = (v: unknown) => "$" + Number(v || 0).toFixed(2)
   const esc = (t: unknown) => String(t ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" } as Record<string, string>)[ch])
@@ -294,6 +319,15 @@ function invoiceEmailHtml(c: Record<string, unknown>, s: Record<string, unknown>
         <a href="${url}" style="display:inline-block;background:#1f7a4d;color:#fff;text-decoration:none;font-size:15px;font-weight:600;padding:13px 34px;border-radius:9px">Pay Now</a>
         <div style="font-size:12px;color:#7c8a82;margin-top:10px;word-break:break-all">Or paste this link: ${url}</div>
       </div>
+      ${photoGroups.length ? `<div style="margin:22px 0 0;border-top:1px solid #e6ece8;padding-top:18px">
+        <div style="font-size:12px;color:#7c8a82;text-transform:uppercase;letter-spacing:.04em;margin-bottom:12px">Service photos</div>
+        ${photoGroups.map((g) => `<div style="margin-bottom:16px">
+          <div style="font-size:13px;font-weight:700;color:#1a2420;margin-bottom:8px">${esc(g.heading)}</div>
+          <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px">
+            ${g.urls.map((u) => `<a href="${u}" target="_blank"><img src="${u}" alt="${esc(g.heading)}" style="width:100%;border-radius:8px;border:1px solid #e6ece8;display:block" /></a>`).join("")}
+          </div>
+        </div>`).join("")}
+      </div>` : ""}
       ${inv.notes ? `<p style="margin:18px 0 0;font-size:13px;color:#5d6b63"><b>Notes:</b> ${esc(inv.notes)}</p>` : ""}
       ${s.invoice_terms ? `<p style="margin:14px 0 0;font-size:12px;color:#7c8a82;border-top:1px solid #e6ece8;padding-top:14px">${esc(s.invoice_terms)}</p>` : ""}
     </div>
@@ -483,6 +517,7 @@ Deno.serve(async (req) => {
       }
 
       const items = await sbGet(`invoice_line_items?invoice_id=eq.${inv.id}&select=title,description,quantity,unit_price,amount&order=position`)
+      const photoGroups = await invoiceStopPhotos(String(inv.id))
       const s = await getSettings()
       const company = s.company_name || "Valet Waste FL"
       const money = (v: unknown) => "$" + Number(v || 0).toFixed(2)
@@ -490,7 +525,7 @@ Deno.serve(async (req) => {
       await sendInvoiceEmail(
         cust.email,
         subject,
-        invoiceEmailHtml(cust, s, inv, items, url),
+        invoiceEmailHtml(cust, s, inv, items, url, photoGroups),
         invoiceEmailText(cust, s, inv, items, url),
         company,
       )

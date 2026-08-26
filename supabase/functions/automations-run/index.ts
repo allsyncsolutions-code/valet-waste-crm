@@ -114,21 +114,26 @@ async function runLawnInvoiceLines(): Promise<string> {
   )
   if (!stops.length) return `No completed lawn stops on ${yesterday}.`
   const monthStart = yesterday.slice(0, 8) + "01"
+  const wdays = ["Sun", "Mon", "Tues", "Wed", "Thurs", "Fri", "Sat"]
   let added = 0
   let skipped = 0
   for (const s of stops) {
     const p = s.properties
     if (!p?.customer_id || p.price == null) { skipped++; continue }
+    // One line per stop, ever — the stop_id unique index (mig 0043) is the
+    // double-billing guard shared with the drivers' check-in/out popup.
+    const dup = await sbGet(`invoice_line_items?stop_id=eq.${s.id}&select=id&limit=1`)
+    if (dup.length) { skipped++; continue }
     let inv = (await sbGet(
       `invoices?customer_id=eq.${p.customer_id}&status=eq.draft&created_at=gte.${monthStart}&select=id,subtotal,discount&order=created_at.desc&limit=1`,
     ))[0]
     if (!inv) inv = (await sbPost("invoices", { customer_id: p.customer_id, status: "draft", subtotal: 0, total: 0, discount: 0 }))[0]
+    const d = new Date(String(s.routes?.service_date || yesterday) + "T12:00:00Z")
+    const title = `Week ${Math.ceil(d.getUTCDate() / 7)} ${wdays[d.getUTCDay()]} Lawn Care`
     const desc = `Lawn care — ${p.address} — ${yesterday}`
-    const dup = await sbGet(`invoice_line_items?invoice_id=eq.${inv.id}&description=eq.${encodeURIComponent(desc)}&select=id&limit=1`)
-    if (dup.length) { skipped++; continue }
     const last = await sbGet(`invoice_line_items?invoice_id=eq.${inv.id}&select=position&order=position.desc.nullslast&limit=1`)
     await sbPost("invoice_line_items", {
-      invoice_id: inv.id, description: desc, quantity: 1,
+      invoice_id: inv.id, stop_id: s.id, title, description: desc, quantity: 1,
       unit_price: p.price, amount: p.price, position: ((last[0]?.position ?? -1) + 1),
     })
     const subtotal = Number(inv.subtotal || 0) + Number(p.price)
@@ -136,6 +141,43 @@ async function runLawnInvoiceLines(): Promise<string> {
     added++
   }
   return `Added ${added} lawn line item(s) for ${yesterday}${skipped ? `, skipped ${skipped}` : ""}.`
+}
+
+// ---- draft_invoice_monthend_reminder ----------------------------------------
+// Per-stop billing (2026-08-26) means monthly draft invoices accumulate lines
+// all month. On the last day of the month (Eastern), remind staff to review
+// and send the open drafts — autopay charges them on the 1st, but only after
+// they've been sent. Texts staff (via the paused-aware sms fn) and always
+// records the summary in automations.last_result (visible in the app).
+async function runDraftInvoiceReminder(): Promise<string> {
+  const nowEt = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }))
+  const tomorrow = new Date(nowEt.getTime() + 86400000)
+  if (tomorrow.getMonth() === nowEt.getMonth()) {
+    return `Not month-end (ET is ${nowEt.toISOString().slice(0, 10)}) — nothing to do.`
+  }
+  const drafts = await sbGet(`invoices?status=eq.draft&select=id,number,total,customer_id&order=total.desc&limit=50`)
+  if (!drafts.length) return "No open draft invoices — nothing to send."
+  const custIds = [...new Set(drafts.map((i: any) => i.customer_id).filter(Boolean))]
+  const names: Record<string, string> = {}
+  for (const c of await sbGet(`customers?id=in.(${custIds.join(",")})&select=id,name`)) names[c.id] = c.name
+  const totalDue = drafts.reduce((s: number, i: any) => s + Number(i.total || 0), 0)
+  const body =
+    `Heads up — ${drafts.length} draft invoice(s) totaling ${fmtMoney(totalDue)} are still unsent ` +
+    `(top: ${names[drafts[0].customer_id] || "?"} ${drafts[0].number} ${fmtMoney(drafts[0].total)}). ` +
+    `Autopay runs tomorrow and only charges SENT invoices — review and send today's drafts in Invoicing.`
+  const staff = await sbGet(`profiles?select=full_name,phone,role&phone=not.is.null`)
+  const recipients = staff.filter((s: any) => ["admin", "staff"].includes(s.role || ""))
+  let sent = 0
+  for (const s of recipients) {
+    const r = await fetch(`${SUPABASE_URL}/functions/v1/sms`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "send", to: s.phone, body, purpose: "digest", sentBy: "Trashy Randy" }),
+    })
+    const d = await r.json().catch(() => ({}))
+    if (d?.ok) sent++
+  }
+  return `Month-end reminder: ${drafts.length} draft invoice(s), ${fmtMoney(totalDue)} — texted to ${sent}/${recipients.length} staff (texts may be paused).`
 }
 
 // ---- autopay_charge_monthly -------------------------------------------------
@@ -490,6 +532,7 @@ Deno.serve(async (req) => {
       try {
         if (a.kind === "outstanding_digest") result = await runOutstandingDigest()
         if (a.kind === "lawn_invoice_weekly_lines") result = await runLawnInvoiceLines()
+        if (a.kind === "draft_invoice_monthend_reminder") result = await runDraftInvoiceReminder()
         if (a.kind === "autopay_charge_monthly") result = await runAutopayCharge(force && kindFilter === "autopay_charge_monthly")
       } catch (e) {
         result = `Error: ${e instanceof Error ? e.message : String(e)}`
