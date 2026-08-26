@@ -347,6 +347,89 @@ async function runAutopayCharge(force = false): Promise<string> {
   return summary
 }
 
+// ---- scheduled_sends ---------------------------------------------------------
+// Deliver queued invoice sends (sms/email/both) whose Eastern-time moment has
+// arrived. Called every 5 minutes by the scheduled-invoice-sends cron.
+async function runScheduledInvoiceSends(): Promise<string> {
+  const due = await sbGet(
+    `invoice_scheduled_sends?status=eq.pending&send_at=lte.${new Date().toISOString()}&select=id,invoice_id,channel&order=send_at.asc&limit=20`,
+  )
+  if (!due.length) return "No scheduled sends due."
+
+  const settings = (await sbGet(`app_settings?id=eq.1&select=company_name,sms_invoice_template`))[0] || {}
+  const company = settings.company_name || "Valet Waste FL"
+  const DEFAULT_TPL = "Hi {customerName}, invoice {invoiceNumber} for {total} is ready. Pay here: {payLink} — {companyName}"
+
+  let sent = 0
+  let skipped = 0
+  let failed = 0
+  for (const row of due) {
+    try {
+      const inv = (await sbGet(
+        `invoices?id=eq.${row.invoice_id}&select=id,number,status,total,payment_url,customer_id,customers(name,phone,email,portal_slug)`,
+      ))[0]
+      if (!inv || inv.status === "paid" || inv.status === "void") {
+        await sbPatch(`invoice_scheduled_sends?id=eq.${row.id}`, { status: "cancelled", last_error: `invoice ${inv ? inv.status : "deleted"} — nothing to send` })
+        skipped++
+        continue
+      }
+      const cust = inv.customers || {}
+
+      // Mint the pay link on first send (payments fn also marks the invoice sent).
+      let url = inv.payment_url
+      if (!url) {
+        const r = await fetch(`${SUPABASE_URL}/functions/v1/payments`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${SERVICE_KEY}` },
+          body: JSON.stringify({ action: "payment_url", invoice_id: inv.id }),
+        })
+        const d = await r.json().catch(() => ({} as any))
+        if (!d?.url) throw new Error(d?.error || "could not create payment link")
+        url = d.url
+      }
+
+      if ((row.channel === "sms" || row.channel === "both") && cust.phone) {
+        const tpl = settings.sms_invoice_template || DEFAULT_TPL
+        const body = String(tpl).replace(/\{(\w+)\}/g, (m, k) => {
+          const vars: Record<string, string> = {
+            customerName: cust.name || "there",
+            invoiceNumber: String(inv.number),
+            total: "$" + Number(inv.total || 0).toFixed(2),
+            payLink: url,
+            companyName: company,
+          }
+          return vars[k] != null ? vars[k] : m
+        })
+        const r = await fetch(`${SUPABASE_URL}/functions/v1/sms`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${SERVICE_KEY}` },
+          body: JSON.stringify({ action: "send", to: cust.phone, body, customerId: inv.customer_id, purpose: "invoice" }),
+        })
+        const d = await r.json().catch(() => ({}))
+        if (!d?.ok) throw new Error(d?.error || "SMS send failed")
+      }
+
+      if (row.channel === "email" || row.channel === "both") {
+        const r = await fetch(`${SUPABASE_URL}/functions/v1/payments`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${SERVICE_KEY}` },
+          body: JSON.stringify({ action: "email_invoice", invoice_id: inv.id }),
+        })
+        const d = await r.json().catch(() => ({} as any))
+        if (!d?.ok) throw new Error(d?.error || "email send failed")
+      }
+
+      if (inv.status === "draft") await sbPatch(`invoices?id=eq.${inv.id}`, { status: "sent", sent_at: new Date().toISOString() })
+      await sbPatch(`invoice_scheduled_sends?id=eq.${row.id}`, { status: "sent", sent_at: new Date().toISOString() })
+      sent++
+    } catch (e) {
+      failed++
+      await sbPatch(`invoice_scheduled_sends?id=eq.${row.id}`, { status: "failed", last_error: e instanceof Error ? e.message : String(e) })
+    }
+  }
+  return `Scheduled sends: ${sent} delivered, ${skipped} skipped (paid/void), ${failed} failed.`
+}
+
 // ---- HTTP entry -------------------------------------------------------------
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS })
@@ -371,13 +454,19 @@ Deno.serve(async (req) => {
 
   let kindFilter: string | null = null
   let force = false
+  let action: string | null = null
   try {
     const b = await req.json()
+    action = b?.action ?? null
     kindFilter = b?.kind ?? null
     force = b?.force === true // only used by autopay for controlled testing
   } catch (_e) { /* run all */ }
 
   try {
+    if (action === "scheduled_sends") {
+      const result = await runScheduledInvoiceSends()
+      return json({ ok: true, result })
+    }
     let autos = await sbGet(`automations?status=eq.enabled&select=id,kind,name`)
     if (kindFilter) autos = autos.filter((a: any) => a.kind === kindFilter)
     if (!autos.length) return json({ ok: true, ran: [], note: kindFilter ? `No enabled automation '${kindFilter}'.` : "No enabled automations." })

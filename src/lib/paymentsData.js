@@ -32,6 +32,17 @@ export const invoicePaymentUrl = (invoiceId) =>
 export const emailInvoice = (invoiceId) =>
   call({ action: 'email_invoice', invoice_id: invoiceId, origin: window.location.origin })
 
+// Schedule an invoice send (sms/email/both) for a future Eastern-time
+// moment; the automations runner delivers it within ~5 minutes of sendAt.
+export const scheduleInvoiceSend = (invoiceId, channel, sendAtIso) =>
+  call({ action: 'schedule_send', invoice_id: invoiceId, channel, send_at: sendAtIso })
+
+export const listScheduledSends = (invoiceId) =>
+  call({ action: 'scheduled_sends_list', invoice_id: invoiceId })
+
+export const cancelScheduledSend = (id) =>
+  call({ action: 'cancel_scheduled_send', id })
+
 // Run a one-time charge against a tokenized card (from Runner.js). Optionally
 // vault the card for autopay (save_card). Pass useSaved:true to charge the
 // customer's card on file (vault) instead of a freshly tokenized card — used

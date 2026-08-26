@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { MONO } from '../data.js'
 import { hasSupabase } from '../lib/supabaseClient.js'
 import { loadCustomers, createClient, loadProperties } from '../lib/customersData.js'
-import { paymentsStatus, chargeInvoice } from '../lib/paymentsData.js'
+import { paymentsStatus, chargeInvoice, scheduleInvoiceSend, listScheduledSends, cancelScheduledSend } from '../lib/paymentsData.js'
 import { loadSettings } from '../lib/settingsData.js'
 import { loadRunner } from '../lib/runnerJs.js'
 import { RichText, RichTextEditor } from '../components/RichText.jsx'
@@ -12,7 +12,6 @@ import {
   updateInvoice,
   markPaid,
   deleteInvoice,
-  sendInvoiceLink,
   textInvoice,
   emailInvoice,
   subscribeInvoices,
@@ -44,6 +43,7 @@ export default function Invoices({ app }) {
   const [customers, setCustomers] = useState([])
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState(null)
+  const [notice, setNotice] = useState(null)
   const [filter, setFilter] = useState('all')
   const [search, setSearch] = useState('')
   const [selId, setSelId] = useState(null)
@@ -69,6 +69,11 @@ export default function Invoices({ app }) {
 
   const [busy, setBusy] = useState(false) // detail-pane action in flight
   const [settings, setSettings] = useState(null) // logo/terms/contact for the invoice preview
+  const [pendingSends, setPendingSends] = useState([]) // future-dated invoice sends for the selected invoice
+  const [schedOpen, setSchedOpen] = useState(false)
+  const [schedChannel, setSchedChannel] = useState('sms')
+  const [schedDate, setSchedDate] = useState('')
+  const [schedTime, setSchedTime] = useState('09:00')
 
   async function refresh() {
     const rows = await loadInvoices(app.activeLine)
@@ -241,9 +246,73 @@ export default function Invoices({ app }) {
     }
   }
   const onMarkPaid = () => action(() => markPaid(cur.id, cur.number))
-  const onSend = () => action(async () => { await sendInvoiceLink(cur) })
-  const onText = () => action(async () => { await textInvoice(cur) })
-  const onEmail = () => action(async () => { await emailInvoice(cur) })
+  const onSendSms = () => action(async () => { await textInvoice(cur) })
+  const onSendEmail = () => action(async () => { await emailInvoice(cur) })
+  const onSendBoth = () => action(async () => {
+    const errs = []
+    try { await textInvoice(cur) } catch (e) { errs.push(`text: ${e.message || e}`) }
+    try { await emailInvoice(cur) } catch (e) { errs.push(`email: ${e.message || e}`) }
+    if (errs.length === 2) throw new Error(errs.join(' · '))
+    if (errs.length) setErr(`Sent, but the ${errs[0]}`)
+  })
+
+  async function refreshSends(invoiceId) {
+    if (!invoiceId) { setPendingSends([]); return }
+    try {
+      const d = await listScheduledSends(invoiceId)
+      setPendingSends(d?.scheduled || [])
+    } catch (_e) { setPendingSends([]) }
+  }
+  useEffect(() => { refreshSends(cur?.id) }, [cur?.id])
+
+  // Interpret the picked date+time as an America/New_York wall clock and
+  // return the matching UTC instant (handles EST/EDT via two-pass Intl).
+  function etToUtcInstant(dateStr, timeStr) {
+    const [y, mo, d] = dateStr.split('-').map(Number)
+    const [hh, mi] = timeStr.split(':').map(Number)
+    const target = Date.UTC(y, mo - 1, d, hh, mi) // wall clock treated as UTC
+    let ts = target
+    for (let i = 0; i < 3; i++) {
+      const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).formatToParts(new Date(ts))
+      const g = Object.fromEntries(parts.map((p) => [p.type, p.value]))
+      const wallAsUtc = Date.UTC(Number(g.year), Number(g.month) - 1, Number(g.day), Number(g.hour === '24' ? 0 : g.hour), Number(g.minute))
+      const shift = target - wallAsUtc
+      if (shift === 0) break
+      ts += shift
+    }
+    return new Date(ts)
+  }
+
+  function openSchedule() {
+    const d = new Date(Date.now() + 24 * 3600 * 1000)
+    setSchedDate(d.toISOString().slice(0, 10))
+    setSchedTime('09:00')
+    setSchedChannel(cur?.customerPhone ? (cur?.customerEmail ? 'both' : 'sms') : 'email')
+    setSchedOpen(true)
+  }
+
+  async function submitSchedule() {
+    if (!schedDate || !schedTime) { setErr('Pick a date and time for the scheduled send.'); return }
+    const when = etToUtcInstant(schedDate, schedTime)
+    setBusy(true); setErr(null)
+    try {
+      await scheduleInvoiceSend(cur.id, schedChannel, when.toISOString())
+      const fmt = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(when)
+      setErr(null)
+      setNotice(`🗓 Scheduled for ${fmt} ET — we'll ${schedChannel === 'both' ? 'text and email' : schedChannel === 'sms' ? 'text' : 'email'} ${cur.customerName || 'the client'} then.`)
+      setSchedOpen(false)
+      await refreshSends(cur.id)
+    } catch (e) {
+      setErr(e.message || String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const onCancelSend = (id) => action(async () => {
+    await cancelScheduledSend(id)
+    await refreshSends(cur.id)
+  })
   async function onDelete() {
     if (!cur || !window.confirm(`Delete invoice ${cur.number}? This can’t be undone.`)) return
     const id = cur.id
@@ -266,9 +335,15 @@ export default function Invoices({ app }) {
       </div>
 
       {err && <div style={errorBox}>{err}</div>}
+      {notice && (
+        <div style={{ marginBottom: 14, background: '#eef7f1', border: '1px solid #cfe7da', color: '#1f7a4d', borderRadius: 11, padding: '9px 13px', fontSize: 12.5, display: 'flex', gap: 8 }}>
+          <span style={{ flex: 1 }}>{notice}</span>
+          <button onClick={() => setNotice(null)} style={{ background: 'none', border: 'none', color: '#1f7a4d', fontSize: 15, cursor: 'pointer', padding: 0, lineHeight: 1 }}>×</button>
+        </div>
+      )}
       {!paymentsOk && !loading && (
         <div style={{ marginBottom: 14, background: '#fff7e9', border: '1px solid #f0dcb0', color: '#8a6320', borderRadius: 11, padding: '9px 13px', fontSize: 12.5 }}>
-          Run Merchant isn’t connected yet — you can still create and edit invoices, but “Send payment link” needs Run Merchant set up in Settings → Payments.
+          Run Merchant isn’t connected yet — you can still create and edit invoices, but “Send” needs Run Merchant set up in Settings → Payments.
         </div>
       )}
 
@@ -326,7 +401,7 @@ export default function Invoices({ app }) {
               Select an invoice, or create a new one.
             </div>
           )}
-          {cur && <InvoiceDetail inv={cur} settings={settings} paymentsOk={paymentsOk} busy={busy} onEdit={() => openEdit(cur)} onMarkPaid={onMarkPaid} onSend={onSend} onText={onText} onEmail={onEmail} onDelete={onDelete} onTakePayment={payCfg ? () => setTakePay(true) : null} />}
+          {cur && <InvoiceDetail inv={cur} settings={settings} paymentsOk={paymentsOk} busy={busy} onEdit={() => openEdit(cur)} onMarkPaid={onMarkPaid} onSendSms={onSendSms} onSendEmail={onSendEmail} onSendBoth={onSendBoth} onSchedule={openSchedule} pendingSends={pendingSends} onCancelSend={onCancelSend} onDelete={onDelete} onTakePayment={payCfg ? () => setTakePay(true) : null} />}
         </div>
       </div>
 
@@ -337,6 +412,38 @@ export default function Invoices({ app }) {
           onClose={() => setTakePay(false)}
           onPaid={async () => { await refresh().catch(() => {}) }}
         />
+      )}
+
+      {schedOpen && cur && (
+        <div onClick={() => !busy && setSchedOpen(false)} style={overlay}>
+          <div onClick={(e) => e.stopPropagation()} style={{ ...modal, width: 420 }}>
+            <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 4 }}>🗓 Send in the future</div>
+            <div style={{ fontSize: 12, color: '#7c8a82', marginBottom: 16 }}>Invoice {cur.number} · {cur.customerName}</div>
+
+            <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+              {[['sms', '📱 SMS'], ['email', '✉️ Email'], ['both', '📲 Both']].map(([val, label]) => (
+                <button key={val} type="button" onClick={() => setSchedChannel(val)} style={{ flex: 1, cursor: 'pointer', fontSize: 12.5, fontWeight: 600, padding: '8px 6px', borderRadius: 8, border: `1px solid ${schedChannel === val ? '#1f7a4d' : '#dde2dd'}`, background: schedChannel === val ? '#e7f1eb' : '#fff', color: schedChannel === val ? '#1f7a4d' : '#7c8a82' }}>{label}</button>
+              ))}
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 6 }}>
+              <label style={{ fontSize: 11.5, color: '#5d6b63', fontWeight: 600 }}>
+                Date
+                <input type="date" value={schedDate} onChange={(e) => setSchedDate(e.target.value)} style={{ ...inp, marginTop: 4 }} />
+              </label>
+              <label style={{ fontSize: 11.5, color: '#5d6b63', fontWeight: 600 }}>
+                Time (Eastern)
+                <input type="time" value={schedTime} onChange={(e) => setSchedTime(e.target.value)} style={{ ...inp, marginTop: 4 }} />
+              </label>
+            </div>
+            <div style={{ fontSize: 11.5, color: '#9aa69e', marginBottom: 16 }}>Times are Eastern ({Intl.DateTimeFormat().resolvedOptions().timeZone === 'America/New_York' ? 'your local time' : 'converted from your local clock automatically'}). Sends go out within ~5 minutes of the scheduled time.</div>
+
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button type="button" onClick={() => setSchedOpen(false)} style={ghostBtn}>Cancel</button>
+              <button type="button" onClick={submitSchedule} disabled={busy || !schedDate || !schedTime} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: busy || !schedDate || !schedTime ? 0.6 : 1 }}>{busy ? 'Scheduling…' : 'Schedule send'}</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {showForm && (
@@ -482,7 +589,7 @@ export default function Invoices({ app }) {
   )
 }
 
-function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, onSend, onText, onEmail, onDelete, onTakePayment }) {
+function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, onSendSms, onSendEmail, onSendBoth, onSchedule, pendingSends, onCancelSend, onDelete, onTakePayment }) {
   const meta = STATUS_META[inv.status] || STATUS_META.draft
   const company = settings || {}
   const contactBits = [company.company_phone, company.company_email, company.company_address].filter(Boolean)
@@ -584,25 +691,87 @@ function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, on
         </div>
       )}
 
+      {/* scheduled sends */}
+      {pendingSends.length > 0 && (
+        <div style={{ margin: '0 22px 10px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {pendingSends.map((s) => (
+            <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 8, background: '#f5f0e4', border: '1px solid #e7dcc2', borderRadius: 10, padding: '8px 12px', fontSize: 12.5 }}>
+              <span>🗓</span>
+              <div style={{ flex: 1, color: '#8a6320' }}>
+                Scheduled for <b>{new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(s.send_at))} ET</b> · {s.channel === 'both' ? 'text + email' : s.channel === 'sms' ? 'text' : 'email'}
+              </div>
+              <button onClick={() => onCancelSend(s.id)} disabled={busy} style={{ background: 'none', border: 'none', color: '#c0492f', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* actions */}
       <div style={{ display: 'flex', gap: 9, padding: '14px 22px', borderTop: '1px solid #f0f2ef', flexWrap: 'wrap' }}>
         {inv.status === 'draft' && <button onClick={onEdit} disabled={busy} style={ghostBtn}>Edit</button>}
         {inv.status !== 'paid' && paymentsOk && (
-          <button onClick={onSend} disabled={busy} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: busy ? 0.6 : 1 }}>{busy ? 'Working…' : inv.paymentUrl ? 'Resend link' : 'Send payment link'}</button>
+          <SendMenu
+            busy={busy}
+            hasPhone={!!inv.customerPhone}
+            hasEmail={!!inv.customerEmail}
+            onSms={onSendSms}
+            onEmail={onSendEmail}
+            onBoth={onSendBoth}
+          />
+        )}
+        {inv.status !== 'paid' && inv.status !== 'void' && (
+          <button onClick={onSchedule} disabled={busy} style={{ background: '#fff', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: busy ? 0.6 : 1 }}>🗓 Send in the future…</button>
         )}
         {inv.status !== 'paid' && inv.status !== 'void' && onTakePayment && (
           <button onClick={onTakePayment} disabled={busy} style={{ background: '#fff', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: busy ? 0.6 : 1 }}>💳 Take payment</button>
-        )}
-        {inv.status !== 'paid' && (
-          <button onClick={onText} disabled={busy || !inv.customerPhone} title={inv.customerPhone ? '' : 'No phone number on file for this customer'} style={{ background: '#fff', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: inv.customerPhone ? 'pointer' : 'not-allowed', opacity: busy || !inv.customerPhone ? 0.5 : 1 }}>{busy ? 'Working…' : 'Text invoice'}</button>
-        )}
-        {inv.status !== 'paid' && inv.status !== 'void' && (
-          <button onClick={onEmail} disabled={busy || !inv.customerEmail} title={inv.customerEmail ? '' : 'No email on file for this customer'} style={{ background: '#fff', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: inv.customerEmail ? 'pointer' : 'not-allowed', opacity: busy || !inv.customerEmail ? 0.5 : 1 }}>{busy ? 'Working…' : '✉️ Email invoice'}</button>
         )}
         {inv.status !== 'paid' && <button onClick={onMarkPaid} disabled={busy} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: busy ? 0.6 : 1 }}>Mark paid</button>}
         <div style={{ flex: 1 }} />
         <button onClick={onDelete} disabled={busy} style={{ background: '#fff', border: '1px solid #f0c9c2', color: '#c0492f', borderRadius: 9, padding: '10px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Delete</button>
       </div>
+    </div>
+  )
+}
+
+// "Send ▾" split button: paper-plane Send with a dropdown for SMS / email /
+// both. Closes on outside click or Esc.
+function SendMenu({ busy, hasPhone, hasEmail, onSms, onEmail, onBoth }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+  useEffect(() => {
+    if (!open) return
+    function onDoc(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
+    function onKey(e) { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('mousedown', onDoc)
+    document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('mousedown', onDoc); document.removeEventListener('keydown', onKey) }
+  }, [open])
+
+  const item = (label, icon, enabled, onClick, hint) => (
+    <button
+      key={label}
+      disabled={!enabled || busy}
+      title={enabled ? '' : hint}
+      onClick={() => { setOpen(false); onClick() }}
+      style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', background: 'none', border: 'none', textAlign: 'left', padding: '9px 12px', fontSize: 13, fontWeight: 600, color: enabled ? '#1a2420' : '#b6c0ba', cursor: enabled && !busy ? 'pointer' : 'not-allowed' }}
+    >
+      <span style={{ width: 18, textAlign: 'center' }}>{icon}</span>{label}
+    </button>
+  )
+
+  return (
+    <div ref={ref} style={{ position: 'relative', flex: 'none' }}>
+      <button onClick={() => setOpen((o) => !o)} disabled={busy} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: busy ? 0.6 : 1, display: 'flex', alignItems: 'center', gap: 6 }}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M2.01 21 23 12 2.01 3 2 10l15 2-15 2z" /></svg>
+        {busy ? 'Working…' : 'Send'} <span style={{ fontSize: 10, opacity: 0.85 }}>▾</span>
+      </button>
+      {open && (
+        <div style={{ position: 'absolute', top: 'calc(100% + 6px)', left: 0, zIndex: 30, minWidth: 190, background: '#fff', border: '1px solid #e0e7e2', borderRadius: 10, boxShadow: '0 8px 24px rgba(26,36,32,.12)', padding: 5, display: 'flex', flexDirection: 'column' }}>
+          {item('Send SMS', '📱', hasPhone, onSms, 'No phone number on file for this customer')}
+          {item('Send Email', '✉️', hasEmail, onEmail, 'No email on file for this customer')}
+          {item('Send Both', '📲', hasPhone && hasEmail, onBoth, 'Needs both a phone number and an email on file')}
+        </div>
+      )}
     </div>
   )
 }

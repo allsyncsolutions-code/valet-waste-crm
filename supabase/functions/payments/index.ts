@@ -493,6 +493,37 @@ Deno.serve(async (req) => {
       return json({ ok: true, url, to: cust.email })
     }
 
+    if (action === "schedule_send") {
+      // Queue an invoice send (sms/email/both) for a future Eastern-time
+      // moment. The automations-run fn delivers it every 5 minutes.
+      if (!body.invoice_id) return json({ error: "Missing invoice_id." }, 400)
+      const channel = String(body.channel || "")
+      if (!["sms", "email", "both"].includes(channel)) return json({ error: "Pick SMS, email, or both." }, 400)
+      const sendAt = new Date(String(body.send_at || ""))
+      if (isNaN(sendAt.getTime())) return json({ error: "Pick a valid date and time." }, 400)
+      if (sendAt.getTime() < Date.now() - 60_000) return json({ error: "That time is already in the past." }, 400)
+      const inv = (await sbGet(`invoices?id=eq.${enc(String(body.invoice_id))}&select=id,number,status,customer_id`))[0]
+      if (!inv) return json({ error: "Invoice not found." }, 404)
+      if (inv.status === "paid" || inv.status === "void") return json({ error: `Invoice ${inv.number} is already ${inv.status === "paid" ? "paid" : "void"} — nothing to send.` }, 400)
+      const cust = (await sbGet(`customers?id=eq.${inv.customer_id}&select=phone,email`))[0]
+      if ((channel === "sms" || channel === "both") && !cust?.phone) return json({ error: "This customer has no phone number on file." }, 400)
+      if ((channel === "email" || channel === "both") && !cust?.email) return json({ error: "This customer has no email on file." }, 400)
+      const row = (await sbPost("invoice_scheduled_sends", { invoice_id: inv.id, channel, send_at: sendAt.toISOString() }))[0]
+      return json({ ok: true, scheduled: row })
+    }
+
+    if (action === "scheduled_sends_list") {
+      if (!body.invoice_id) return json({ error: "Missing invoice_id." }, 400)
+      const rows = await sbGet(`invoice_scheduled_sends?invoice_id=eq.${enc(String(body.invoice_id))}&status=eq.pending&select=id,channel,send_at&order=send_at.asc`)
+      return json({ ok: true, scheduled: rows })
+    }
+
+    if (action === "cancel_scheduled_send") {
+      if (!body.id) return json({ error: "Missing id." }, 400)
+      await sbPatch(`invoice_scheduled_sends?id=eq.${enc(String(body.id))}`, { status: "cancelled" })
+      return json({ ok: true })
+    }
+
     if (action === "charge_invoice") {
       if (!body.invoice_id) return json({ error: "Missing invoice_id." }, 400)
       const inv = (await sbGet(
