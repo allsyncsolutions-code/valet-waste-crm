@@ -180,13 +180,23 @@ async function runAccessToken(): Promise<{ token: string; mid: string; env: stri
   const mid = s.run_mid || ""
   const env = s.run_env === "uat" ? "uat" : "production"
   if (!mid || !s.run_refresh_token) throw new Error("Run Merchant isn't configured.")
-  const exp = s.run_api_key_expires_at ? new Date(s.run_api_key_expires_at).getTime() : 0
-  if (s.run_api_key && exp - Date.now() > 5 * 60 * 1000) return { token: s.run_api_key, mid, env }
-  // Refresh uses BOTH the api_key and refresh_token (docs are ambiguous about
-  // which goes in the header vs body — try both shapes before failing).
+  const exp = s.run_api_key_expires_at ? new Date(s.run_api_key_expires_at as string).getTime() : 0
+  if (s.run_api_key && exp - Date.now() > 5 * 60 * 1000) return { token: s.run_api_key as string, mid, env }
+  const { token } = await runKeyRefresh(s)
+  return { token, mid, env }
+}
+
+// Shared refresh: both shapes, plus the refresh-token-only shape (a stored
+// api_key can be expired/purged at Run — 2026-08-26 — and that dead key must
+// not block a still-valid refresh token). Persists successors via
+// persistRunTokens (backup row on failure).
+async function runKeyRefresh(s: Record<string, unknown>): Promise<{ token: string }> {
+  const env = s.run_env === "uat" ? "uat" : "production"
+  const rt = String(s.run_refresh_token || "")
   const attempts = s.run_api_key
-    ? [{ bearer: s.run_api_key, token: s.run_refresh_token }, { bearer: s.run_refresh_token, token: s.run_api_key }]
-    : [{ bearer: s.run_refresh_token, token: s.run_refresh_token }]
+    ? [{ bearer: String(s.run_api_key), token: rt }, { bearer: rt, token: String(s.run_api_key) }]
+    : []
+  attempts.push({ bearer: rt, token: rt })
   let d: Record<string, unknown> = {}
   let ok = false
   let status = 0
@@ -200,9 +210,45 @@ async function runAccessToken(): Promise<{ token: string; mid: string; env: stri
     if (r.ok) { ok = true; break }
     status = r.status
   }
-  if (!ok) throw new Error((d?.message as string) || `Run Merchant key refresh failed: ${status}`)
+  if (!ok) throw new Error((d?.message as string) || (d?.error as string) || `Run Merchant key refresh failed: ${status}`)
   await persistRunTokens(d)
-  return { token: d.api_key as string, mid, env }
+  return { token: d.api_key as string }
+}
+
+// Proactive keep-warm refresh (cron every 30 min, mig 0046): refreshes while
+// the stored api_key is STILL VALID (<45 min old) so the bearer is never
+// dead — the lazy on-demand refresh can't recover once Run purges an expired
+// key, which is what killed 2026-08-20/25/26 (outages #1-3).
+async function runRunKeyKeepwarm(): Promise<string> {
+  const s = (await sbGet(`app_settings?id=eq.1&select=run_mid,run_refresh_token,run_api_key,run_api_key_expires_at,run_env`))[0] || {}
+  if (!s.run_mid || !s.run_refresh_token) return "Run Merchant isn't configured — skipped."
+  const exp = s.run_api_key_expires_at ? new Date(s.run_api_key_expires_at as string).getTime() : 0
+  const remaining = exp - Date.now()
+  if (s.run_api_key && remaining > 15 * 60 * 1000) {
+    return `Key still valid (${Math.round(remaining / 60000)} min left) — no refresh needed.`
+  }
+  try {
+    await runKeyRefresh(s)
+    return "Run API key refreshed proactively."
+  } catch (e) {
+    // Only page admins when the key is actually dead or about to die — and at
+    // most every 6h (shared run_creds_alerted_at marker with the portal fn).
+    if (!s.run_api_key || remaining <= 0) {
+      const a = (await sbGet(`app_settings?id=eq.1&select=run_creds_alerted_at`))[0] || {}
+      const last = a.run_creds_alerted_at ? new Date(a.run_creds_alerted_at as string).getTime() : 0
+      if (Date.now() - last > 6 * 3600000) {
+        await sbPatch(`app_settings?id=eq.1`, { run_creds_alerted_at: new Date().toISOString() }).catch(() => {})
+        await notifyStaff(
+        `Run Payments credentials are DEAD — card saves and autopay charges are failing. ` +
+        `Fix: Run Merchant portal → Settings → Developer API → Create, then give the new set to the CRM ` +
+        `(Settings → Payments). Error: ${e instanceof Error ? e.message : String(e)}`,
+        "autopay",
+        "ACTION NEEDED: Run Payments credentials dead",
+      ).catch(() => {})
+      }
+    }
+    return `Refresh failed: ${e instanceof Error ? e.message : String(e)}`
+  }
 }
 
 // A Run refresh consumes the stored refresh token — if this write silently
@@ -535,6 +581,10 @@ Deno.serve(async (req) => {
   try {
     if (action === "scheduled_sends") {
       const result = await runScheduledInvoiceSends()
+      return json({ ok: true, result })
+    }
+    if (action === "refresh_run_key") {
+      const result = await runRunKeyKeepwarm()
       return json({ ok: true, result })
     }
     let autos = await sbGet(`automations?status=eq.enabled&select=id,kind,name`)
