@@ -109,10 +109,15 @@ async function runAccessToken(s: RunSettings): Promise<{ token: string; mid: str
   const exp = s.run_api_key_expires_at ? new Date(s.run_api_key_expires_at).getTime() : 0
   if (s.run_api_key && exp - Date.now() > 5 * 60 * 1000) return { token: s.run_api_key, mid, env }
   // Refresh uses BOTH the api_key and refresh_token (docs are ambiguous about
-  // which goes in the header vs body — try both shapes before failing).
+  // which goes in the header vs body — try both shapes, PLUS the
+  // refresh-token-only shape: a stored api_key can be dead/purged at Run
+  // (seen 2026-08-26: expired key returns "Key not found"), and without the
+  // third shape that dead key would block a still-valid refresh token.
+  const rt = s.run_refresh_token
   const attempts = s.run_api_key
-    ? [{ bearer: s.run_api_key, token: s.run_refresh_token }, { bearer: s.run_refresh_token, token: s.run_api_key }]
-    : [{ bearer: s.run_refresh_token, token: s.run_refresh_token }]
+    ? [{ bearer: s.run_api_key, token: rt }, { bearer: rt, token: s.run_api_key }]
+    : []
+  attempts.push({ bearer: rt, token: rt })
   let d: Record<string, unknown> = {}
   let ok = false
   let status = 0
@@ -126,9 +131,46 @@ async function runAccessToken(s: RunSettings): Promise<{ token: string; mid: str
     if (r.ok) { ok = true; break }
     status = r.status
   }
-  if (!ok) throw new Error((d?.message as string) || `Run Merchant key refresh failed: ${status}`)
+  if (!ok) {
+    // Yell at the admins instead of letting customers see raw 401s — dead
+    // credentials need a new key minted in Run Merchant → Developer API.
+    alertAdminsRunCredsDead(status, d).catch(() => {})
+    throw new Error((d?.message as string) || (d?.error as string) || `Run Merchant key refresh failed: ${status}`)
+  }
   await persistRunTokens(d)
   return { token: d.api_key as string, mid, env }
+}
+
+// Email admins when Run credentials are rejected (SendGrid, project secret).
+// One email per outage, not per attempt: app_settings.run_creds_alerted_at.
+async function alertAdminsRunCredsDead(status: number, d: Record<string, unknown>) {
+  try {
+    const s = (await sbGet(`app_settings?id=eq.1&select=run_creds_alerted_at`))[0] || {}
+    const last = s.run_creds_alerted_at ? new Date(s.run_creds_alerted_at).getTime() : 0
+    if (Date.now() - last < 6 * 3600000) return // already alerted in the last 6h
+    await sbPatch(`app_settings?id=eq.1`, { run_creds_alerted_at: new Date().toISOString() })
+    const key = Deno.env.get("SENDGRID_API_KEY")
+    if (!key) return
+    const from = Deno.env.get("SENDGRID_FROM") || "valetwastefl@allsynccrm.com"
+    const staff = await sbGet(`profiles?select=email,role&email=not.is.null`)
+    const body =
+      `Run Payments credentials were rejected (${status} ${JSON.stringify(d).slice(0, 200)}) — ` +
+      `card saves and autopay charges are FAILING until this is fixed.\n\n` +
+      `Fix: Run Merchant dashboard → Settings → Developer API → Create a new key, then paste it ` +
+      `into CRM Settings → Payments. (Sent automatically; repeats at most every 6 hours.)`
+    for (const p of staff.filter((x: any) => ["admin", "staff"].includes(x.role || ""))) {
+      await fetch("https://api.sendgrid.com/v3/mail/send", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          personalizations: [{ to: [{ email: p.email }] }],
+          from: { email: from, name: "Valet Waste" },
+          subject: "ACTION NEEDED: Run Payments credentials rejected — card saves failing",
+          content: [{ type: "text/plain", value: body }],
+        }),
+      }).catch(() => {})
+    }
+  } catch (_e) { /* alerting never breaks payments */ }
 }
 
 // A Run refresh consumes the stored refresh token — if this write silently
