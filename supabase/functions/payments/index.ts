@@ -13,10 +13,14 @@
 //   payment_url {invoice_id, origin}→ mints/stores the portal pay link for an
 //                                     invoice, returns { url }; marks the
 //                                     invoice 'sent' the first time.
-//   charge_invoice {invoice_id, account_token, expiration, cvn, name?, address?, save_card?}
+//   charge_invoice {invoice_id, account_token, expiration, cvn, name?, address?, save_card?, tip_amount?}
 //                                   → runs a one-time charge via /charge; on
 //                                     approval stores run_trans_id and marks the
 //                                     invoice paid. Optionally vaults the card.
+//                                     tip_amount (dollars, customer-chosen from
+//                                     the portal pay screens) is added on top of
+//                                     invoices.total and persisted as
+//                                     invoices.tip_amount when the charge lands.
 //   email_invoice {invoice_id, origin}
 //                                   → emails the customer an HTML invoice (line
 //                                     items, totals, terms) with a Pay Now button
@@ -531,7 +535,16 @@ Deno.serve(async (req) => {
       ))[0]
       if (!inv) return json({ error: "Invoice not found." }, 404)
       if (inv.status === "paid") return json({ error: "This invoice is already paid." }, 400)
-      const cents = Math.round(Number(inv.total || 0) * 100)
+      // Optional customer-chosen tip (dollars) from the portal pay screens.
+      // Staff take-payment and autopay never send one — they charge the exact
+      // invoice total.
+      let tip = 0
+      if (body.tip_amount !== undefined && body.tip_amount !== null && body.tip_amount !== "") {
+        tip = Math.round(Number(body.tip_amount) * 100) / 100
+        if (!isFinite(tip) || tip < 0) return json({ error: "Invalid tip amount." }, 400)
+        if (tip > 1000) return json({ error: "Tip can't be more than $1,000." }, 400)
+      }
+      const cents = Math.round((Number(inv.total || 0) + tip) * 100)
       if (cents < 50) return json({ error: "Invoice total must be at least $0.50." }, 400)
 
       const settings = await getSettings()
@@ -593,6 +606,7 @@ Deno.serve(async (req) => {
         paid_at: new Date().toISOString(),
         run_paid_at: new Date().toISOString(),
         run_trans_id: String(res.trans_id),
+        tip_amount: tip,
       }
       await sbPatch(`invoices?id=eq.${inv.id}`, patch)
 
@@ -611,7 +625,7 @@ Deno.serve(async (req) => {
         saved = true
       }
 
-      return json({ ok: true, trans_id: res.trans_id, resp_text: res.resp_text, saved })
+      return json({ ok: true, trans_id: res.trans_id, resp_text: res.resp_text, saved, charged: cents / 100, tip })
     }
 
     return json({ error: "Unknown action." }, 400)

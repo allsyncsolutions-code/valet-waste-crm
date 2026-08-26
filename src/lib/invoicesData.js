@@ -59,6 +59,7 @@ function mapInvoice(row) {
     discount: num(row.discount),
     subtotal: num(row.subtotal),
     total: num(row.total),
+    tipAmount: num(row.tip_amount),
     stripePaymentUrl: row.payment_url || row.stripe_payment_url || null,
     paymentUrl: row.payment_url || row.stripe_payment_url || null,
     runTransId: row.run_trans_id || null,

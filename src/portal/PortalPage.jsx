@@ -9,6 +9,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '../lib/supabaseClient.js'
 import { loadRunner, tokenizeCard } from '../lib/runnerJs.js'
+import { TipPicker } from '../components/TipPicker.jsx'
 
 const GREEN = '#1f7a4d'
 const tokenKey = (slug) => `vw_portal_${slug}`
@@ -561,7 +562,10 @@ function InvoicesTab({ data, onPay }) {
         <div key={i} style={{ ...card, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           <div>
             <div style={{ fontWeight: 700, fontSize: 14 }}>{inv.number}</div>
-            <div style={{ fontSize: 12, color: '#7c8a82' }}>{inv.due_date ? `Due ${fmtD(inv.due_date)}` : fmtD(inv.issue_date)}</div>
+            <div style={{ fontSize: 12, color: '#7c8a82' }}>
+              {inv.due_date ? `Due ${fmtD(inv.due_date)}` : fmtD(inv.issue_date)}
+              {inv.status === 'paid' && Number(inv.tip_amount) > 0 ? ` · tipped ${money(inv.tip_amount)}` : ''}
+            </div>
           </div>
           <span style={{ flex: 1 }} />
           <div style={{ fontWeight: 800, fontSize: 15 }}>{money(inv.total)}</div>
@@ -738,6 +742,7 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
   const [err, setErr] = useState('')
   const [runnerReady, setRunnerReady] = useState(false)
   const [saveCard, setSaveCard] = useState(false)
+  const [tip, setTip] = useState(0) // dollars, customer-chosen; charged on top of inv.total
   const runnerRef = useRef(null)
   const formRef = useRef(null)
 
@@ -777,6 +782,7 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
           expiration: t.expiry,
           cvn: t.cvv,
           save_card: saveCard,
+          tip_amount: tip,
         },
       })
       if (error) {
@@ -786,7 +792,8 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
       }
       const res = data
       if (res && res.ok) {
-        setNotice(`✓ Payment of ${money(inv.total)} received — thank you!${res.saved ? ' Your card is saved for autopay.' : ''}`)
+        const charged = Number(res.charged ?? (Number(inv.total || 0) + Number(tip || 0)))
+        setNotice(`✓ Payment of ${money(charged)} received — thank you!${Number(tip) > 0 ? ` (including a ${money(tip)} tip)` : ''}${res.saved ? ' Your card is saved for autopay.' : ''}`)
         await onChanged()
         onDone && onDone()
       } else if (res && res.declined) {
@@ -839,11 +846,12 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
             <span>Save this card for autopay (charged automatically at the start of each month for open invoices).</span>
           </label>
         )}
+        <TipPicker total={inv.total} tip={tip} setTip={setTip} green={GREEN} />
         <button
           disabled={busy || preview || !runnerReady}
           onClick={pay}
           style={{ ...btnPrimary, marginTop: 14, padding: '12px 22px', opacity: (busy || preview || !runnerReady) ? 0.55 : 1 }}
-        >{busy ? 'Processing…' : `Pay ${money(inv.total)}`}</button>
+        >{busy ? 'Processing…' : `Pay ${money(Number(inv.total || 0) + Number(tip || 0))}`}</button>
         <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 10 }}>
           Card details are entered in a secure Run Payments form — we never see or store your card number.
         </div>

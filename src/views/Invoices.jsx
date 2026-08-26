@@ -386,7 +386,10 @@ export default function Invoices({ app }) {
                   <div style={{ fontFamily: MONO, fontSize: 10.5, color: '#9aa69e' }}>{inv.number}</div>
                 </div>
                 <div style={{ textAlign: 'right', flex: 'none' }}>
-                  <div style={{ fontFamily: MONO, fontSize: 13, fontWeight: 600 }}>{money(inv.total)}</div>
+                  <div style={{ fontFamily: MONO, fontSize: 13, fontWeight: 600 }}>
+                    {money(inv.total)}
+                    {inv.tipAmount > 0 && <span style={{ color: '#1f7a4d', fontSize: 11 }}> +{money(inv.tipAmount)}🎁</span>}
+                  </div>
                   <span style={{ fontFamily: MONO, fontSize: 9.5, color: meta.color, background: meta.bg, padding: '1px 6px', borderRadius: 5 }}>{meta.label}</span>
                 </div>
               </div>
@@ -658,8 +661,10 @@ function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, on
         <div style={{ marginLeft: 'auto', width: 220, marginTop: 12 }}>
           <TotalRow label="Subtotal" value={money(inv.subtotal)} />
           {inv.discount > 0 && <TotalRow label="Discount" value={'– ' + money(inv.discount)} />}
+          {inv.tipAmount > 0 && <TotalRow label="Tip" value={'+ ' + money(inv.tipAmount)} />}
           <div style={{ height: 1, background: '#e6eae6', margin: '8px 0' }} />
-          <TotalRow label="Total" value={money(inv.total)} bold />
+          <TotalRow label={inv.tipAmount > 0 ? 'Invoice total' : 'Total'} value={money(inv.total)} bold />
+          {inv.tipAmount > 0 && <TotalRow label="Charged (with tip)" value={money(inv.total + inv.tipAmount)} bold />}
         </div>
       </div>
 

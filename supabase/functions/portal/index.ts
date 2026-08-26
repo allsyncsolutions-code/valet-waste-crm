@@ -310,7 +310,7 @@ async function portalData(cust: any) {
   }
 
   const invoices = await sbGet(
-    `invoices?customer_id=eq.${cust.id}&status=neq.draft&select=id,number,status,total,due_date,issue_date,payment_url,run_trans_id&order=issue_date.desc&limit=36`,
+    `invoices?customer_id=eq.${cust.id}&status=neq.draft&select=id,number,status,total,tip_amount,due_date,issue_date,payment_url,run_trans_id&order=issue_date.desc&limit=36`,
   )
   const balanceDue = invoices
     .filter((i: any) => i.status === "sent")
@@ -425,7 +425,7 @@ Deno.serve(async (req) => {
       const cust = (await sbGet(`customers?portal_slug=eq.${enc(String(slug))}&select=id,name,email,phone`))[0]
       if (!cust) return json({ error: "This payment link isn't valid." }, 404)
       const inv = (await sbGet(
-        `invoices?id=eq.${enc(invoiceId)}&customer_id=eq.${cust.id}&select=id,number,status,total,subtotal,discount,due_date,issue_date,notes,invoice_line_items(description,quantity,unit_price,amount,position)`,
+        `invoices?id=eq.${enc(invoiceId)}&customer_id=eq.${cust.id}&select=id,number,status,total,tip_amount,subtotal,discount,due_date,issue_date,notes,invoice_line_items(description,quantity,unit_price,amount,position)`,
       ))[0]
       if (!inv) return json({ error: "This payment link isn't valid." }, 404)
       const settings = await getSettings()
@@ -448,7 +448,7 @@ Deno.serve(async (req) => {
         customer_phone: cust.phone || null,
         invoice: {
           id: inv.id, number: inv.number, status: inv.status,
-          total: inv.total, subtotal: inv.subtotal, discount: inv.discount,
+          total: inv.total, tip_amount: Number(inv.tip_amount || 0), subtotal: inv.subtotal, discount: inv.discount,
           due_date: inv.due_date, issue_date: inv.issue_date, notes: inv.notes || null, items,
         },
         payment: {

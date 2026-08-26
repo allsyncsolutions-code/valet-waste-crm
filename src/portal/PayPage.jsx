@@ -8,6 +8,7 @@ import { useEffect, useRef, useState } from 'react'
 import { supabase } from '../lib/supabaseClient.js'
 import { loadRunner, tokenizeCard } from '../lib/runnerJs.js'
 import { RichText } from '../components/RichText.jsx'
+import { TipPicker } from '../components/TipPicker.jsx'
 
 const GREEN = '#1f7a4d'
 const money = (v) => `$${Number(v || 0).toFixed(2)}`
@@ -35,6 +36,7 @@ export default function PayPage({ slug, invoiceId }) {
   const [paid, setPaid] = useState(null) // { saved } after a successful charge
   const [runnerReady, setRunnerReady] = useState(false)
   const [saveCard, setSaveCard] = useState(false)
+  const [tip, setTip] = useState(0) // dollars, customer-chosen; charged on top of inv.total
   const runnerRef = useRef(null)
   const formRef = useRef(null)
 
@@ -83,6 +85,7 @@ export default function PayPage({ slug, invoiceId }) {
           expiration: t.expiry,
           cvn: t.cvv,
           save_card: saveCard,
+          tip_amount: tip,
         },
       })
       if (error) {
@@ -92,7 +95,7 @@ export default function PayPage({ slug, invoiceId }) {
       }
       const res = data
       if (res && res.ok) {
-        setPaid({ saved: !!res.saved })
+        setPaid({ saved: !!res.saved, charged: Number(res.charged ?? (Number(inv.total || 0) + Number(tip || 0))) })
       } else if (res && res.declined) {
         setErr(res.resp_text || 'Your card was declined. Please try another card.')
       } else {
@@ -121,12 +124,13 @@ export default function PayPage({ slug, invoiceId }) {
   if (!info) return shell(<div style={{ ...card, textAlign: 'center', color: '#9aa69e' }}>Loading…</div>)
 
   if (paid || inv.status === 'paid') {
+    const charged = paid ? (paid.charged ?? Number(inv.total || 0)) : Number(inv.total || 0) + Number(inv.tip_amount || 0)
     return shell(
       <div style={{ ...card, textAlign: 'center', padding: '28px 20px' }}>
         <div style={{ fontSize: 34 }}>✓</div>
         <div style={{ fontSize: 17, fontWeight: 800, color: GREEN, marginTop: 6 }}>Invoice {inv.number} is paid</div>
         <div style={{ fontSize: 13.5, color: '#5d6b63', marginTop: 8 }}>
-          {paid ? <>Thank you! We've received your payment of <b>{money(inv.total)}</b>.{paid.saved ? ' Your card is saved for autopay.' : ''}</> : 'This invoice has already been paid — nothing else to do.'}
+          {paid ? <>Thank you! We've received your payment of <b>{money(charged)}</b>{Number(tip) > 0 ? ` (including a ${money(tip)} tip — thank you!)` : ''}.{paid.saved ? ' Your card is saved for autopay.' : ''}</> : 'This invoice has already been paid — nothing else to do.'}
         </div>
       </div>,
     )
@@ -254,11 +258,12 @@ export default function PayPage({ slug, invoiceId }) {
             <input type="checkbox" checked={saveCard} onChange={(e) => setSaveCard(e.target.checked)} style={{ marginTop: 3, width: 16, height: 16, accentColor: GREEN }} />
             <span>Save this card for autopay (charged automatically at the start of each month for open invoices).</span>
           </label>
+          <TipPicker total={inv.total} tip={tip} setTip={setTip} green={GREEN} />
           <button
             disabled={busy || !runnerReady}
             onClick={pay}
             style={{ ...btnPrimary, marginTop: 14, width: '100%', opacity: (busy || !runnerReady) ? 0.55 : 1 }}
-          >{busy ? 'Processing…' : `Pay ${money(inv.total)}`}</button>
+          >{busy ? 'Processing…' : `Pay ${money(Number(inv.total || 0) + Number(tip || 0))}`}</button>
           <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 10, textAlign: 'center' }}>
             Card details are entered in a secure Run Payments form — we never see or store your card number.
           </div>
