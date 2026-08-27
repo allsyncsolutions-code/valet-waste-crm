@@ -4,6 +4,8 @@
 // tab's "Run now" (staff user token). Currently implements:
 //   • outstanding_digest — texts staff a summary of unpaid invoices with days
 //     overdue and last-contact date; staff reply to Trashy Randy to act.
+//   • auto_invoice_reminders — up to 5 configurable reminders per open invoice
+//     (trigger timing, sms/email/push channels, merge-field templates).
 //   • lawn_invoice_weekly_lines — itemized per-visit lawn billing.
 //   • autopay_charge_monthly — on the 1st, charge consenting clients' saved
 //     cards for prior-month open invoices + 5th-week-free credit.
@@ -91,6 +93,181 @@ async function runOutstandingDigest(): Promise<string> {
 
   const n = await notifyStaff(body, "digest", "Morning digest — outstanding invoices")
   return `Digest of ${invoices.length} outstanding invoices: ${n.texted} texted, ${n.emailed} emailed (of ${n.total} staff).`
+}
+
+// ---- auto_invoice_reminders ---------------------------------------------------
+// Up to 5 configurable reminders per open invoice; config lives on the
+// automations row (kind 'auto_invoice_reminders').config.reminders — flat
+// items { key, label, type: after_sent|before_due|after_due, days, sms, email,
+// push, template }. Templates merge [customer name] / [invoice link] / etc.
+// Each reminder fires at most once per invoice (invoice_reminder_sends unique
+// key); when several are due the same day only the LAST (most escalated)
+// sends, so a customer never gets two reminder messages in one day.
+const PORTAL_ORIGIN = Deno.env.get("PORTAL_ORIGIN") || "https://valet-waste-crm.vercel.app"
+
+function etToday(): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date())
+}
+function addDays(dateStr: string, days: number): string {
+  const d = new Date(dateStr + "T12:00:00Z")
+  d.setUTCDate(d.getUTCDate() + days)
+  return d.toISOString().slice(0, 10)
+}
+const fmtNiceDay = (v: string | null | undefined) => {
+  if (!v) return ""
+  try { return new Date(String(v).length === 10 ? v + "T12:00:00Z" : v).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }) } catch { return String(v) }
+}
+const escapeHtml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")
+function renderTemplate(tpl: string, f: Record<string, string>): string {
+  let out = tpl
+  for (const [k, v] of Object.entries(f)) out = out.split(`[${k}]`).join(v)
+  return out
+}
+
+async function sendCustomerEmail(to: string, subject: string, text: string, payUrl: string, amount: string, company: string) {
+  const key = Deno.env.get("SENDGRID_API_KEY")
+  if (!key) throw new Error("SENDGRID_API_KEY is not configured.")
+  const from = Deno.env.get("SENDGRID_FROM") || "valetwastefl@allsynccrm.com"
+  const html =
+    `<div style="font-family:system-ui,-apple-system,sans-serif;max-width:520px;margin:0 auto;padding:24px 16px;color:#1a2420">` +
+    `<p style="font-size:15px;line-height:1.65;white-space:pre-wrap">${escapeHtml(text)}</p>` +
+    `<a href="${payUrl}" style="display:inline-block;background:#1f7a4d;color:#fff;text-decoration:none;font-weight:700;font-size:15px;border-radius:9px;padding:12px 24px;margin:10px 0 6px">Pay ${escapeHtml(amount)} now</a>` +
+    `<p style="font-size:12px;color:#7c8a82;line-height:1.6">Or paste this link into your browser:<br>${payUrl}</p>` +
+    `<p style="font-size:12.5px;color:#7c8a82;margin-top:18px">— ${escapeHtml(company)}</p></div>`
+  const r = await fetch("https://api.sendgrid.com/v3/mail/send", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      personalizations: [{ to: [{ email: to }] }],
+      from: { email: from, name: company },
+      subject,
+      content: [{ type: "text/html", value: html }],
+    }),
+  })
+  if (!r.ok) throw new Error(`SendGrid ${r.status}: ${await r.text()}`)
+}
+
+// Expo push to the customer's registered app tokens (customer-keyed rows on
+// push_tokens; staff profile tokens are intentionally not used here).
+async function sendCustomerPush(customerId: string, title: string, body: string, url: string): Promise<number> {
+  const tokens = await sbGet(`push_tokens?customer_id=eq.${customerId}&select=token&limit=20`)
+  let sent = 0
+  for (const t of tokens) {
+    try {
+      const r = await fetch("https://exp.host/--/api/v2/push/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ to: t.token, title, body, sound: "default", data: { url } }),
+      })
+      if (r.ok) sent++
+    } catch (_e) { /* best effort per token */ }
+  }
+  return sent
+}
+
+async function runInvoiceReminders(auto: any): Promise<string> {
+  const rules: any[] = (auto?.config?.reminders || []).filter((r: any) =>
+    ["after_sent", "before_due", "after_due"].includes(r?.type) && Number.isFinite(Number(r?.days)) && String(r?.template || "").trim())
+  if (!rules.length) return "No reminders configured — nothing to run."
+
+  const today = etToday()
+  const invoices = await sbGet(`invoices?status=eq.sent&select=id,number,total,due_date,issue_date,sent_at,customer_id&order=due_date.asc.nullslast&limit=500`)
+  if (!invoices.length) return "No open invoices — nothing to remind."
+
+  const custIds = [...new Set(invoices.map((i: any) => i.customer_id).filter(Boolean))]
+  const customers: Record<string, any> = {}
+  for (const c of await sbGet(`customers?id=in.(${custIds.join(",")})&select=id,name,email,phone,portal_slug`)) customers[c.id] = c
+  const settings = (await sbGet(`app_settings?id=eq.1&select=company_name`))[0] || {}
+  const company = settings.company_name || "Valet Waste FL"
+
+  // Service date per invoice = earliest stop date among its line items
+  // (per-stop billing), falling back to the issue date.
+  const serviceDate: Record<string, string> = {}
+  try {
+    const lines = await sbGet(`invoice_line_items?invoice_id=in.(${invoices.map((i: any) => i.id).join(",")})&select=invoice_id,route_stops(routes(service_date))&limit=2000`)
+    for (const l of lines) {
+      const d = l?.route_stops?.routes?.service_date
+      if (!d) continue
+      if (!serviceDate[l.invoice_id] || d < serviceDate[l.invoice_id]) serviceDate[l.invoice_id] = d
+    }
+  } catch (_e) { /* embedding unavailable → fall back to issue dates */ }
+
+  const already = new Set<string>()
+  for (const s of await sbGet(`invoice_reminder_sends?invoice_id=in.(${invoices.map((i: any) => i.id).join(",")})&select=invoice_id,reminder_key&limit=5000`)) {
+    already.add(`${s.invoice_id}:${s.reminder_key}`)
+  }
+
+  let sent = 0, emailed = 0, texted = 0, pushed = 0, smsFellBack = 0, noContact = 0
+  for (const inv of invoices) {
+    const cust = customers[inv.customer_id]
+    if (!cust || !cust.portal_slug) { noContact++; continue }
+    const due = rules.filter((r, idx) => {
+      if (already.has(`${inv.id}:${r.key || idx}`)) return false
+      const base = r.type === "after_sent" ? String(inv.sent_at || "").slice(0, 10) : inv.due_date
+      if (!base) return false
+      const offset = r.type === "before_due" ? -Number(r.days) : Number(r.days)
+      return today >= addDays(base.slice(0, 10), offset)
+    })
+    if (!due.length) continue
+    const r = due[due.length - 1] // most escalated stage only — one message/day
+    const rKey = r.key || String(rules.indexOf(r))
+
+    const amount = fmtMoney(inv.total)
+    const payUrl = `${PORTAL_ORIGIN}/?portal=${encodeURIComponent(cust.portal_slug)}&pay_invoice=${inv.id}`
+    const text = renderTemplate(String(r.template), {
+      "customer name": cust.name || "there",
+      "invoice number": inv.number || "",
+      "amount": amount,
+      "due date": fmtNiceDay(inv.due_date) || "—",
+      "issue date": fmtNiceDay(inv.issue_date),
+      "service date": fmtNiceDay(serviceDate[inv.id] || inv.issue_date),
+      "invoice link": payUrl,
+      "company name": company,
+    }).trim()
+
+    let e = 0, t = 0, p = 0
+    const emailOn = !!r.email && !!cust.email
+    if (emailOn) {
+      try { await sendCustomerEmail(cust.email, `Reminder: invoice ${inv.number} — ${amount}`, text, payUrl, amount, company); e++ } catch (_err) { /* try other channels */ }
+    }
+    if (r.sms && cust.phone) {
+      try {
+        const res = await fetch(`${SUPABASE_URL}/functions/v1/sms`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "send", to: cust.phone, body: text, customerId: cust.id, purpose: "reminder", sentBy: company }),
+        })
+        const d = await res.json().catch(() => ({}))
+        if (d?.ok) t++
+        else if (!emailOn && cust.email) {
+          // Texting is paused (or failed) and email wasn't selected — fall
+          // back to email so the reminder still goes out (logged as paused
+          // in sms_messages by the sms fn).
+          try { await sendCustomerEmail(cust.email, `Reminder: invoice ${inv.number} — ${amount}`, text, payUrl, amount, company); e++; smsFellBack++ } catch (_err) { /* best effort */ }
+        }
+      } catch (_err) { /* best effort */ }
+    }
+    if (r.push) {
+      try { p = await sendCustomerPush(cust.id, company, text.slice(0, 180), payUrl) } catch (_err) { /* best effort */ }
+    }
+    if (e + t + p > 0) {
+      sent++
+      emailed += e
+      texted += t
+      pushed += p
+      await sbPost("invoice_reminder_sends", { invoice_id: inv.id, reminder_key: rKey, channels: [e ? "email" : null, t ? "sms" : null, p ? "push" : null].filter(Boolean).join(","), detail: `${inv.number} → ${cust.name}` })
+    }
+  }
+
+  const parts: string[] = []
+  if (!sent) return `No reminders due today (${invoices.length} open invoices checked${noContact ? `, ${noContact} without portal contact` : ""}).`
+  parts.push(`${sent} reminder${sent === 1 ? "" : "s"} sent`)
+  const ch: string[] = []
+  if (emailed) ch.push(`${emailed} emailed`)
+  if (texted) ch.push(`${texted} texted`)
+  if (pushed) ch.push(`${pushed} pushed`)
+  if (smsFellBack) ch.push(`${smsFellBack} sms→email fallback`)
+  return `${parts[0]} (${ch.join(", ")}) across ${invoices.length} open invoices.`
 }
 
 // ---- lawn_invoice_weekly_lines ----------------------------------------------
@@ -592,15 +769,16 @@ Deno.serve(async (req) => {
       const result = await runRunKeyKeepwarm()
       return json({ ok: true, result })
     }
-    let autos = await sbGet(`automations?status=eq.enabled&select=id,kind,name`)
+    let autos = await sbGet(`automations?status=eq.enabled&select=id,kind,name,config`)
     if (kindFilter) autos = autos.filter((a: any) => a.kind === kindFilter)
     if (!autos.length) return json({ ok: true, ran: [], note: kindFilter ? `No enabled automation '${kindFilter}'.` : "No enabled automations." })
 
-    const ran: Array<{ kind: string; result: string }> = []
+    const ran: Array<{ kind: string, result: string }> = []
     for (const a of autos) {
       let result = "Unknown automation kind — nothing to run."
       try {
         if (a.kind === "outstanding_digest") result = await runOutstandingDigest()
+        if (a.kind === "auto_invoice_reminders") result = await runInvoiceReminders(a)
         if (a.kind === "lawn_invoice_weekly_lines") result = await runLawnInvoiceLines()
         if (a.kind === "draft_invoice_monthend_reminder") result = await runDraftInvoiceReminder()
         if (a.kind === "autopay_charge_monthly") result = await runAutopayCharge(force && kindFilter === "autopay_charge_monthly")

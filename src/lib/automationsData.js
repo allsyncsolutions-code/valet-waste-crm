@@ -37,3 +37,14 @@ export async function runAutomationsNow(kind) {
   if (data?.error) throw new Error(data.error)
   return data
 }
+
+// Save an automation's config (jsonb) + status in one write — used by the
+// Invoices ⏰ Reminders modal for the auto_invoice_reminders schedule.
+export async function saveAutomationConfig(id, config, status, name) {
+  const { error } = await supabase
+    .from('automations')
+    .update({ config, status, updated_at: new Date().toISOString() })
+    .eq('id', id)
+  if (error) throw error
+  logActivity({ type: 'automation_' + status, summary: `${status === 'enabled' ? 'Enabled' : 'Saved'} automation "${name}"` })
+}
