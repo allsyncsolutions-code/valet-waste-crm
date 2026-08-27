@@ -37,6 +37,7 @@ export default function PayPage({ slug, invoiceId }) {
   const [runnerReady, setRunnerReady] = useState(false)
   const [saveCard, setSaveCard] = useState(false)
   const [tip, setTip] = useState(0) // dollars, customer-chosen; charged on top of inv.total
+  const [formKey, setFormKey] = useState(0) // bump = remount the Runner form
   const runnerRef = useRef(null)
   const formRef = useRef(null)
 
@@ -67,8 +68,19 @@ export default function PayPage({ slug, invoiceId }) {
       runnerRef.current = r
       setRunnerReady(true)
     }).catch((e) => setErr(e.message || String(e)))
-    return () => { cancelled = true }
-  }, [payable, payment.publicKey, payment.mid, payment.env])
+    return () => { cancelled = true; runnerRef.current = null }
+  }, [payable, payment.publicKey, payment.mid, payment.env, formKey])
+
+  // Runner's card fields are SINGLE-USE: after any tokenize() the iframe masks
+  // and consumes what was typed, so a second attempt reads back all-empty
+  // while the form still LOOKS filled. There's no reset() API — the only
+  // reliable recovery is remounting the container (formKey bump) so a fresh
+  // Runner form is injected.
+  function resetCardForm() {
+    runnerRef.current = null
+    setRunnerReady(false)
+    setFormKey((k) => k + 1)
+  }
 
   async function pay() {
     if (!runnerRef.current || !inv) return
@@ -76,7 +88,10 @@ export default function PayPage({ slug, invoiceId }) {
     setErr('')
     try {
       const t = await tokenizeCard(runnerRef.current)
-      if (!t || (!t.account_token && !t.token)) { throw new Error(`Card entry incomplete.${t ? ` Card form said: ${JSON.stringify(t).slice(0, 300)}` : ' No response from the card form — hard-refresh the page and try again.'}`) }
+      if (!t || (!t.account_token && !t.token)) {
+        console.warn('[pay] empty tokenize response:', t)
+        throw new Error("We couldn't read the card details. Please re-enter your card information and try again.")
+      }
       const { data, error } = await supabase.functions.invoke('payments', {
         body: {
           action: 'charge_invoice',
@@ -97,12 +112,15 @@ export default function PayPage({ slug, invoiceId }) {
       if (res && res.ok) {
         setPaid({ saved: !!res.saved, charged: Number(res.charged ?? (Number(inv.total || 0) + Number(tip || 0))) })
       } else if (res && res.declined) {
-        setErr(res.resp_text || 'Your card was declined. Please try another card.')
+        resetCardForm()
+        setErr(`${res.resp_text ? `${res.resp_text} — ` : ''}please re-enter your card details and try again.`)
       } else {
+        resetCardForm()
         setErr((res && res.error) || 'Payment could not be completed.')
       }
     } catch (e) {
       setErr(e.message || String(e))
+      resetCardForm()
     }
     setBusy(false)
   }
@@ -270,7 +288,7 @@ export default function PayPage({ slug, invoiceId }) {
               React's reconciler (removeChild NotFoundError → blank page). The
               loading hint lives OUTSIDE the container as a sibling. */}
           <div ref={formRef}>
-            <div id="run-standalone-form" style={{ minHeight: 64, marginBottom: 4 }} />
+            <div key={formKey} id="run-standalone-form" style={{ minHeight: 64, marginBottom: 4 }} />
           </div>
           {!runnerReady && <div style={{ color: '#9aa69e', fontSize: 12.5, padding: '0 2px 8px' }}>Loading secure card form…</div>}
           <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, color: '#3c4a42', lineHeight: 1.5, cursor: 'pointer', marginTop: 8 }}>

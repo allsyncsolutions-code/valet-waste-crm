@@ -25,6 +25,13 @@ export function loadRunner() {
 // field state, so a tokenize() fired the instant our button is clicked (which
 // blurs the iframe) can read the fields as empty. Wait for the debounce to
 // settle, and retry once — only then is an empty result a real "incomplete".
+//
+// NOTE: the iframe fields are SINGLE-USE. After any tokenize() call (success,
+// decline, or empty read) Runner masks and consumes what was typed, so every
+// later tokenize returns {"account_token":"","expiry":"","bank_account":null,
+// "risk_info":null,"card_info":{}} while the form still LOOKS filled. There
+// is no reset() API — callers must remount the container element and re-init
+// a fresh Runner before the next attempt (see resetCardForm in PayPage etc).
 export async function tokenizeCard(runner, { settleMs = 800, retryMs = 1200 } = {}) {
   const once = () => new Promise((resolve) => runner.tokenize(resolve))
   await new Promise((r) => setTimeout(r, settleMs))

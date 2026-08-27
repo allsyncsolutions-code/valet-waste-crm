@@ -591,6 +591,7 @@ function PaymentsTab({ data, token, preview, onChanged, setNotice }) {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [runnerReady, setRunnerReady] = useState(false)
+  const [formKey, setFormKey] = useState(0) // bump = remount the Runner form
   const runnerRef = useRef(null)
   const formRef = useRef(null)
 
@@ -612,8 +613,16 @@ function PaymentsTab({ data, token, preview, onChanged, setNotice }) {
       runnerRef.current = r
       setRunnerReady(true)
     }).catch((e) => setErr(e.message || String(e)))
-    return () => { cancelled = true }
-  }, [preview, payment.available, payment.publicKey, payment.mid, payment.env])
+    return () => { cancelled = true; runnerRef.current = null }
+  }, [preview, payment.available, payment.publicKey, payment.mid, payment.env, formKey])
+
+  // Runner's fields are single-use (a tokenize consumes them even when the
+  // save fails) — remount the container to recover; there's no reset() API.
+  function resetCardForm() {
+    runnerRef.current = null
+    setRunnerReady(false)
+    setFormKey((k) => k + 1)
+  }
 
   async function saveCard() {
     if (preview || !runnerRef.current) return
@@ -622,7 +631,10 @@ function PaymentsTab({ data, token, preview, onChanged, setNotice }) {
     setErr('')
     try {
       const res = await tokenizeCard(runnerRef.current)
-      if (!res || (!res.account_token && !res.token)) { throw new Error(`Card entry incomplete.${res ? ` Card form said: ${JSON.stringify(res).slice(0, 300)}` : ' No response from the card form — hard-refresh the page and try again.'}`) }
+      if (!res || (!res.account_token && !res.token)) {
+        console.warn('[save-card] empty tokenize response:', res)
+        throw new Error("We couldn't read the card details. Please re-enter your card information and try again.")
+      }
       await portalApi({
         action: 'save_card', token,
         account_token: res.account_token || res.token,
@@ -632,7 +644,7 @@ function PaymentsTab({ data, token, preview, onChanged, setNotice }) {
       })
       setNotice(`✓ Your card is saved — autopay is on and your 5th pickup week is free.`)
       await onChanged()
-    } catch (e) { setErr(e.message || String(e)) }
+    } catch (e) { setErr(e.message || String(e)); resetCardForm() }
     setBusy(false)
   }
 
@@ -676,7 +688,7 @@ function PaymentsTab({ data, token, preview, onChanged, setNotice }) {
                 {/* Runner.js owns #run-form's children — React must not render
                     inside it (breaks reconciliation → removeChild crash). */}
                 <div ref={formRef}>
-                  <div id="run-form" style={{ minHeight: 64, marginBottom: 4 }} />
+                  <div key={formKey} id="run-form" style={{ minHeight: 64, marginBottom: 4 }} />
                 </div>
                 {!runnerReady && <div style={{ color: '#9aa69e', fontSize: 12.5, padding: '0 2px 8px' }}>Loading secure card form…</div>}
                 <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13.5, color: '#3c4a42', lineHeight: 1.5, cursor: 'pointer', marginTop: 8 }}>
@@ -743,6 +755,7 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
   const [runnerReady, setRunnerReady] = useState(false)
   const [saveCard, setSaveCard] = useState(false)
   const [tip, setTip] = useState(0) // dollars, customer-chosen; charged on top of inv.total
+  const [formKey, setFormKey] = useState(0) // bump = remount the Runner form
   const runnerRef = useRef(null)
   const formRef = useRef(null)
 
@@ -763,8 +776,16 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
       runnerRef.current = r
       setRunnerReady(true)
     }).catch((e) => setErr(e.message || String(e)))
-    return () => { cancelled = true }
-  }, [preview, payment.available, payment.publicKey, payment.mid, payment.env])
+    return () => { cancelled = true; runnerRef.current = null }
+  }, [preview, payment.available, payment.publicKey, payment.mid, payment.env, formKey])
+
+  // Runner's fields are single-use (a tokenize consumes them) — remount the
+  // container to recover; there's no reset() API.
+  function resetCardForm() {
+    runnerRef.current = null
+    setRunnerReady(false)
+    setFormKey((k) => k + 1)
+  }
 
   async function pay() {
     if (preview || !runnerRef.current || !inv) return
@@ -772,7 +793,10 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
     setErr('')
     try {
       const t = await tokenizeCard(runnerRef.current)
-      if (!t || (!t.account_token && !t.token)) { throw new Error(`Card entry incomplete.${t ? ` Card form said: ${JSON.stringify(t).slice(0, 300)}` : ' No response from the card form — hard-refresh the page and try again.'}`) }
+      if (!t || (!t.account_token && !t.token)) {
+        console.warn('[portal-pay] empty tokenize response:', t)
+        throw new Error("We couldn't read the card details. Please re-enter your card information and try again.")
+      }
       // charge_invoice lives in the `payments` edge function (not portal).
       const { data, error } = await supabase.functions.invoke('payments', {
         body: {
@@ -797,12 +821,15 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
         await onChanged()
         onDone && onDone()
       } else if (res && res.declined) {
-        setErr(res.resp_text || 'Your card was declined. Please try another card.')
+        resetCardForm()
+        setErr(`${res.resp_text ? `${res.resp_text} — ` : ''}please re-enter your card details and try again.`)
       } else {
+        resetCardForm()
         setErr((res && res.error) || 'Payment could not be completed.')
       }
     } catch (e) {
       setErr(e.message || String(e))
+      resetCardForm()
     }
     setBusy(false)
   }
@@ -837,7 +864,7 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
         {/* Runner.js owns #run-pay-form's children — React must not render
             inside it (breaks reconciliation → removeChild crash). */}
         <div ref={formRef}>
-          <div id="run-pay-form" style={{ minHeight: 64, marginBottom: 4 }} />
+          <div key={formKey} id="run-pay-form" style={{ minHeight: 64, marginBottom: 4 }} />
         </div>
         {!runnerReady && <div style={{ color: '#9aa69e', fontSize: 12.5, padding: '0 2px 8px' }}>Loading secure card form…</div>}
         {!payment.saved && (

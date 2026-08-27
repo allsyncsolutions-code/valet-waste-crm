@@ -5,7 +5,7 @@ import { loadCustomers, createClient } from '../lib/customersData.js'
 import { supabase } from '../lib/supabaseClient.js'
 import { paymentsStatus, chargeInvoice, scheduleInvoiceSend, listScheduledSends, cancelScheduledSend } from '../lib/paymentsData.js'
 import { loadSettings } from '../lib/settingsData.js'
-import { loadRunner } from '../lib/runnerJs.js'
+import { loadRunner, tokenizeCard } from '../lib/runnerJs.js'
 import { RichText, RichTextEditor } from '../components/RichText.jsx'
 import {
   loadInvoices,
@@ -871,6 +871,7 @@ function TakePaymentModal({ inv, cfg, onClose, onPaid }) {
   const [err, setErr] = useState('')
   const [done, setDone] = useState(false)
   const [runnerReady, setRunnerReady] = useState(false)
+  const [formKey, setFormKey] = useState(0) // bump = remount the Runner form
   const runnerRef = useRef(null)
 
   useEffect(() => {
@@ -890,16 +891,26 @@ function TakePaymentModal({ inv, cfg, onClose, onPaid }) {
       runnerRef.current = r
       setRunnerReady(true)
     }).catch((e) => setErr(e.message || String(e)))
-    return () => { cancelled = true }
-  }, [cfg?.public_key, cfg?.mid, cfg?.env])
+    return () => { cancelled = true; runnerRef.current = null }
+  }, [cfg?.public_key, cfg?.mid, cfg?.env, formKey])
+
+  // Runner's fields are single-use (a tokenize consumes them even when the
+  // charge fails) — remount the container to recover; there's no reset() API.
+  function resetCardForm() {
+    runnerRef.current = null
+    setRunnerReady(false)
+    setFormKey((k) => k + 1)
+  }
 
   function finish(res) {
     if (res && res.ok) {
       setDone(true)
       onPaid && onPaid()
     } else if (res && res.declined) {
-      setErr(res.resp_text || 'The card was declined.')
+      resetCardForm()
+      setErr(res.resp_text || 'The card was declined — re-enter the card details and try again.')
     } else {
+      resetCardForm()
       setErr((res && res.error) || 'Payment could not be completed.')
     }
   }
@@ -919,22 +930,25 @@ function TakePaymentModal({ inv, cfg, onClose, onPaid }) {
     setBusy(true)
     setErr('')
     try {
-      const res = await new Promise((resolve, reject) => {
-        runnerRef.current.tokenize(async (t) => {
-          if (!t || (!t.account_token && !t.token)) { reject(new Error('Card entry incomplete.')); return }
-          try {
-            resolve(await chargeInvoice({
-              invoiceId: inv.id,
-              accountToken: t.account_token || t.token,
-              expiration: t.expiry,
-              cvn: t.cvv,
-              name: inv.customerName,
-            }))
-          } catch (e) { reject(e) }
-        })
-      })
-      finish(res)
-    } catch (e) { setErr(e.message || String(e)) }
+      const t = await tokenizeCard(runnerRef.current)
+      if (!t || (!t.account_token && !t.token)) {
+        console.warn('[take-payment] empty tokenize response:', t)
+        resetCardForm()
+        setErr("Couldn't read the card details — please re-enter them and try again.")
+        setBusy(false)
+        return
+      }
+      finish(await chargeInvoice({
+        invoiceId: inv.id,
+        accountToken: t.account_token || t.token,
+        expiration: t.expiry,
+        cvn: t.cvn || t.cvv,
+        name: inv.customerName,
+      }))
+    } catch (e) {
+      setErr(e.message || String(e))
+      resetCardForm()
+    }
     setBusy(false)
   }
 
@@ -971,7 +985,7 @@ function TakePaymentModal({ inv, cfg, onClose, onPaid }) {
 
             {/* Runner.js owns #run-take-form's children — keep React out of it
                 (rendering inside breaks reconciliation → removeChild crash). */}
-            <div id="run-take-form" style={{ minHeight: 64, marginBottom: 6 }} />
+            <div key={formKey} id="run-take-form" style={{ minHeight: 64, marginBottom: 6 }} />
             {!runnerReady && <div style={{ color: '#9aa69e', fontSize: 12.5, padding: '0 2px 8px' }}>Loading secure card form…</div>}
             <div style={{ display: 'flex', gap: 9, marginTop: 10 }}>
               <button onClick={onClose} disabled={busy} style={cancelBtn}>Cancel</button>
