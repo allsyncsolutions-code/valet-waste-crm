@@ -47,6 +47,9 @@ export default function Invoices({ app }) {
   const [notice, setNotice] = useState(null)
   const [filter, setFilter] = useState('all')
   const [search, setSearch] = useState('')
+  const [datePreset, setDatePreset] = useState('all') // all | thisMonth | lastMonth | thisYear | custom
+  const [dateFrom, setDateFrom] = useState('')
+  const [dateTo, setDateTo] = useState('')
   const [selId, setSelId] = useState(null)
   const [paymentsOk, setPaymentsOk] = useState(false)
   const [payCfg, setPayCfg] = useState(null) // Runner.js config for "Take payment"
@@ -95,20 +98,43 @@ export default function Invoices({ app }) {
     return () => unsub && unsub()
   }, [app.activeLine])
 
+  // Date filter — paid invoices count by their PAID date, everything else by
+  // issue date, so "This month" reads as "collected/billed this month".
+  const range = useMemo(() => {
+    const now = new Date()
+    const dstr = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+    if (datePreset === 'thisMonth') return [dstr(new Date(now.getFullYear(), now.getMonth(), 1)), dstr(now)]
+    if (datePreset === 'lastMonth') return [dstr(new Date(now.getFullYear(), now.getMonth() - 1, 1)), dstr(new Date(now.getFullYear(), now.getMonth(), 0))]
+    if (datePreset === 'thisYear') return [dstr(new Date(now.getFullYear(), 0, 1)), dstr(now)]
+    if (datePreset === 'custom') return [dateFrom || '', dateTo || '']
+    return ['', '']
+  }, [datePreset, dateFrom, dateTo])
+
+  const dateFiltered = useMemo(() => {
+    const [from, to] = range
+    if (!from && !to) return invoices
+    return invoices.filter((i) => {
+      const d = (i.status === 'paid' && i.paidAt ? String(i.paidAt) : i.issueDate || i.createdAt || '').slice(0, 10)
+      return !!d && (!from || d >= from) && (!to || d <= to)
+    })
+  }, [invoices, range])
+
   const list = useMemo(() => {
-    let rows = filter === 'all' ? invoices : invoices.filter((i) => i.status === filter)
+    let rows = filter === 'all' ? dateFiltered : dateFiltered.filter((i) => i.status === filter)
     const q = search.trim().toLowerCase()
     if (q) rows = rows.filter((i) =>
       (i.customerName || '').toLowerCase().includes(q) ||
       (i.number || '').toLowerCase().includes(q)
     )
     return rows
-  }, [invoices, filter, search])
+  }, [dateFiltered, filter, search])
   const cur = invoices.find((i) => i.id === selId) || null
 
-  const outstanding = round2(invoices.filter((i) => i.status === 'sent').reduce((s, i) => s + i.total, 0))
-  const paidTotal = round2(invoices.filter((i) => i.status === 'paid').reduce((s, i) => s + i.total, 0))
-  const draftCount = invoices.filter((i) => i.status === 'draft').length
+  const outstanding = round2(dateFiltered.filter((i) => i.status === 'sent').reduce((s, i) => s + i.total, 0))
+  const paidTotal = round2(dateFiltered.filter((i) => i.status === 'paid').reduce((s, i) => s + i.total, 0))
+  const tipsTotal = round2(dateFiltered.filter((i) => i.status === 'paid').reduce((s, i) => s + (i.tipAmount || 0), 0))
+  const tippedCount = dateFiltered.filter((i) => i.status === 'paid' && i.tipAmount > 0).length
+  const draftCount = dateFiltered.filter((i) => i.status === 'draft').length
 
   // ---- form helpers ----
   const setF = (patch) => setForm((f) => ({ ...f, ...patch }))
@@ -287,10 +313,11 @@ export default function Invoices({ app }) {
 
   return (
     <div style={{ maxWidth: 1240, margin: '0 auto' }}>
-      {/* summary */}
+      {/* summary — all cards follow the date filter above the list */}
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 14 }}>
-        <SummaryCard label="Outstanding" value={money(outstanding)} sub={`${invoices.filter((i) => i.status === 'sent').length} sent`} accent="#b07a1e" />
-        <SummaryCard label="Collected" value={money(paidTotal)} sub={`${invoices.filter((i) => i.status === 'paid').length} paid`} accent="#1f7a4d" />
+        <SummaryCard label="Outstanding" value={money(outstanding)} sub={`${dateFiltered.filter((i) => i.status === 'sent').length} sent`} accent="#b07a1e" />
+        <SummaryCard label="Collected" value={money(paidTotal)} sub={`${dateFiltered.filter((i) => i.status === 'paid').length} paid`} accent="#1f7a4d" />
+        <SummaryCard label="Tips collected 🎁" value={money(tipsTotal)} sub={tippedCount ? `${tippedCount} tipped` : 'no tips yet'} accent="#6b4fa0" />
         <SummaryCard label="Drafts" value={String(draftCount)} sub="not sent yet" accent="#7c8a82" />
         <div style={{ flex: 1 }} />
         <button onClick={openCreate} style={{ alignSelf: 'center', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 10, padding: '11px 17px', fontSize: 13.5, fontWeight: 600, cursor: 'pointer' }}>+ New invoice</button>
@@ -323,19 +350,38 @@ export default function Invoices({ app }) {
               <button onClick={() => setSearch('')} title="Clear search" style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: '#9aa69e', fontSize: 16, cursor: 'pointer', padding: 0, lineHeight: 1 }}>×</button>
             )}
           </div>
-          <div style={{ display: 'flex', gap: 5, padding: '4px 4px 8px', flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: 5, padding: '4px 4px 8px', flexWrap: 'wrap', alignItems: 'center' }}>
             {FILTERS.map(([id, label]) => {
               const on = filter === id
-              const n = id === 'all' ? invoices.length : invoices.filter((i) => i.status === id).length
+              const n = id === 'all' ? dateFiltered.length : dateFiltered.filter((i) => i.status === id).length
               return (
                 <button key={id} onClick={() => setFilter(id)} style={{ background: on ? '#1f7a4d' : '#f3f5f2', color: on ? '#fff' : '#5d6b63', border: 'none', borderRadius: 8, padding: '6px 11px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>{label} {n ? `· ${n}` : ''}</button>
               )
             })}
+            <span style={{ flex: 1 }} />
+            <select
+              value={datePreset}
+              onChange={(e) => setDatePreset(e.target.value)}
+              style={{ ...inp, width: 'auto', fontSize: 12, fontWeight: 600, padding: '6px 8px', color: datePreset === 'all' ? '#5d6b63' : '#1f7a4d', background: datePreset === 'all' ? '#f3f5f2' : '#e7f1eb', cursor: 'pointer' }}
+            >
+              <option value="all">All dates</option>
+              <option value="thisMonth">This month</option>
+              <option value="lastMonth">Last month</option>
+              <option value="thisYear">This year</option>
+              <option value="custom">Custom range…</option>
+            </select>
+            {datePreset === 'custom' && (
+              <>
+                <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} style={{ ...inp, width: 132, fontSize: 12, padding: '6px 8px', color: '#5d6b63' }} />
+                <span style={{ color: '#9aa69e', fontSize: 11 }}>to</span>
+                <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} style={{ ...inp, width: 132, fontSize: 12, padding: '6px 8px', color: '#5d6b63' }} />
+              </>
+            )}
           </div>
 
           {loading && <div style={empty}>Loading invoices…</div>}
           {!loading && !invoices.length && <div style={empty}>No invoices yet. Create your first with “New invoice”.</div>}
-          {!loading && !!invoices.length && !list.length && <div style={empty}>{search.trim() ? `No invoices match “${search.trim()}”.` : `No ${filter} invoices.`}</div>}
+          {!loading && !!invoices.length && !list.length && <div style={empty}>{search.trim() ? `No invoices match “${search.trim()}”.` : datePreset !== 'all' ? 'No invoices in this date range.' : `No ${filter} invoices.`}</div>}
 
           {list.map((inv) => {
             const on = inv.id === selId
