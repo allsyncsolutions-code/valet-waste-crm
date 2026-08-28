@@ -18,8 +18,9 @@
 //   remove_card {token}          → delete vault payment account + clear autopay
 //   quote_respond {token, quote_id, response, note} → approve/decline a quote,
 //                                  Randy texts admins
-//   request_service {token, kind, property_ids, message} → log request, Randy
-//                                  texts admins
+//   request_service {token, kind, property_ids, message} → log request; staff
+//                                  get instant email + app push (see
+//                                  alertNewPortalRequest) and Randy texts admins
 //   admin_data {customer_id}     → staff-JWT-authorized copy of `data` for the
 //                                  CRM's Client Portal preview tab
 //   admin_invite {customer_id}   → staff-JWT-authorized: email the client their
@@ -221,6 +222,93 @@ async function textAdmins(body: string) {
     }
   } catch (_e) { /* SMS is best-effort */ }
   return sent
+}
+
+// ---- Staff alerts for new portal requests (email + app push) -----------------
+// Texting is paused (RingCentral, 2026-08-26), so new-request alerts go out
+// as email + Expo push the moment a client submits. Config (recipients,
+// channels, on/off) lives on the automations row 'new_request_alerts' — that
+// status is the kill switch for this instant path too.
+const REQUEST_ALERT_EMAILS_DEFAULT = ["david@allsynccrm.com", "valetwastefl@gmail.com"]
+
+function requestAlertConfig(autoRow: any) {
+  const c = autoRow?.config || {}
+  const emails = Array.isArray(c.emails) ? c.emails.map((e: unknown) => String(e).trim()).filter(Boolean) : []
+  return {
+    emails: emails.length ? emails : REQUEST_ALERT_EMAILS_DEFAULT,
+    email: c.email !== false,
+    push: c.push !== false,
+  }
+}
+
+async function sendStaffAlertEmail(to: string, subject: string, text: string) {
+  const key = Deno.env.get("SENDGRID_API_KEY")
+  if (!key) throw new Error("SENDGRID_API_KEY is not configured.")
+  const r = await fetch("https://api.sendgrid.com/v3/mail/send", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      personalizations: [{ to: [{ email: to }] }],
+      from: { email: SENDGRID_FROM, name: "Trashy Randy" },
+      subject,
+      content: [{ type: "text/plain", value: text }],
+    }),
+  })
+  if (!r.ok) throw new Error(`SendGrid ${r.status}: ${await r.text()}`)
+}
+
+async function pushStaffDevices(title: string, body: string): Promise<number> {
+  const tokens = await sbGet(`push_tokens?profile_id=not.is.null&select=token&limit=50`)
+  let sent = 0
+  for (const t of tokens) {
+    try {
+      const r = await fetch("https://exp.host/--/api/v2/push/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ to: t.token, title, body, sound: "default" }),
+      })
+      const d = await r.json().catch(() => ({} as any))
+      if (r.ok && d?.data?.[0]?.status === "ok") sent++
+    } catch (_e) { /* best effort per device */ }
+  }
+  return sent
+}
+
+// Sends email + push for a freshly inserted portal_requests row and stamps
+// notified_at when anything got out. Best-effort: if every channel fails the
+// row stays un-notified and the */5 new_request_alerts automation retries.
+async function alertNewPortalRequest(reqId: string, customerName: string, kindLabel: string, addrTxt: string, message: string) {
+  try {
+    const autoRow = (await sbGet(`automations?kind=eq.new_request_alerts&select=status,config`).catch(() => []))[0]
+    if (autoRow && autoRow.status !== "enabled") return // kill switch — poll handles nothing either (it checks the same status)
+    const cfg = requestAlertConfig(autoRow)
+
+    const whenEt = new Date().toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+    const subject = `📥 New portal request — ${customerName} (${kindLabel})`
+    const text = [
+      `${customerName} just submitted a new request in their client portal.`,
+      ``,
+      `Type: ${kindLabel}`,
+      addrTxt ? `Property: ${addrTxt.replace(/^ @ /, "")}` : null,
+      `When: ${whenEt} (Eastern)`,
+      message ? `Message: "${message}"` : `Message: (none — just the request)`,
+      ``,
+      `It's waiting in the CRM under Clients → ${customerName} → Activity.`,
+    ].filter((l) => l !== null).join("\n")
+
+    let sent = 0
+    if (cfg.email) {
+      for (const to of cfg.emails) {
+        try { await sendStaffAlertEmail(to, subject, text); sent++ } catch (_e) { /* best effort per address */ }
+      }
+    }
+    if (cfg.push) {
+      try { sent += await pushStaffDevices(`📥 New portal request`, `${customerName} — ${kindLabel}${addrTxt}`) } catch (_e) { /* no tokens / Expo down */ }
+    }
+    if (sent > 0) await sbPatch(`portal_requests?id=eq.${reqId}`, { notified_at: new Date().toISOString() })
+  } catch (_e) {
+    // Never fail the customer's submission because staff alerting broke.
+  }
 }
 
 // ---- SendGrid ----------------------------------------------------------------
@@ -716,7 +804,8 @@ Deno.serve(async (req) => {
       const kind = ["extra_pickup", "junk_removal", "lawn_care", "billing", "other"].includes(body.kind) ? body.kind : "other"
       const message = String(body.message || "").slice(0, 1000)
       const propertyIds = Array.isArray(body.property_ids) ? body.property_ids.slice(0, 50) : []
-      await sbPost("portal_requests", { customer_id: cust.id, kind, message: message || null, property_ids: propertyIds })
+      const inserted = await sbPost("portal_requests", { customer_id: cust.id, kind, message: message || null, property_ids: propertyIds })
+      const reqId = inserted?.[0]?.id
       let addrTxt = ""
       if (propertyIds.length) {
         const ps = await sbGet(`properties?id=in.(${propertyIds.join(",")})&customer_id=eq.${cust.id}&select=address&limit=5`)
@@ -725,7 +814,11 @@ Deno.serve(async (req) => {
       const kindLabel: Record<string, string> = {
         extra_pickup: "an EXTRA PICKUP", junk_removal: "JUNK REMOVAL", lawn_care: "LAWN CARE", billing: "help with BILLING", other: "service",
       }
+      const alertLabel: Record<string, string> = {
+        extra_pickup: "Extra pickup", junk_removal: "Junk removal", lawn_care: "Lawn care", billing: "Billing question", other: "Service request",
+      }
       await textAdmins(`📥 ${cust.name} requested ${kindLabel[kind]}${addrTxt} via their portal.${message ? ` "${message.slice(0, 220)}"` : ""} — Trashy Randy`)
+      if (reqId) await alertNewPortalRequest(String(reqId), cust.name || "A client", alertLabel[kind] || "Service request", addrTxt, message)
       return json({ ok: true })
     }
 

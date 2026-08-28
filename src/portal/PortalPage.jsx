@@ -921,7 +921,7 @@ function RequestTab({ data, token, preview, onChanged }) {
         <div style={{ ...card, textAlign: 'center' }}>
           <div style={{ fontSize: 28 }}>✅</div>
           <div style={{ fontWeight: 700, fontSize: 15, marginTop: 6 }}>Request sent!</div>
-          <div style={{ fontSize: 13, color: '#7c8a82', marginTop: 4 }}>Our team just got a text about it and will follow up shortly.</div>
+          <div style={{ fontSize: 13, color: '#7c8a82', marginTop: 4 }}>Our team has been notified and will follow up shortly.</div>
           <button onClick={() => setDone(false)} style={{ ...btnGhost, marginTop: 14 }}>Send another request</button>
         </div>
       ) : (

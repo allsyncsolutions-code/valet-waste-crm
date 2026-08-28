@@ -147,6 +147,30 @@ async function sendCustomerEmail(to: string, subject: string, text: string, payU
   if (!r.ok) throw new Error(`SendGrid ${r.status}: ${await r.text()}`)
 }
 
+// Expo push to staff devices (profile-keyed rows on push_tokens — the mobile
+// app registers these on staff sign-in). Surfaces per-device errors so run
+// results / tests can show why a push didn't land.
+async function sendStaffPush(title: string, body: string, url?: string): Promise<{ sent: number; errors: string[] }> {
+  const tokens = await sbGet(`push_tokens?profile_id=not.is.null&select=token&limit=50`)
+  let sent = 0
+  const errors: string[] = []
+  for (const t of tokens) {
+    try {
+      const r = await fetch("https://exp.host/--/api/v2/push/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ to: t.token, title, body, sound: "default", ...(url ? { data: { url } } : {}) }),
+      })
+      const d = await r.json().catch(() => ({} as any))
+      if (r.ok && d?.data?.[0]?.status === "ok") sent++
+      else errors.push(String(d?.data?.[0]?.message || d?.errors?.[0]?.code || `Expo ${r.status}`).slice(0, 140))
+    } catch (e) {
+      errors.push(String(e).slice(0, 140))
+    }
+  }
+  return { sent, errors }
+}
+
 // Expo push to the customer's registered app tokens (customer-keyed rows on
 // push_tokens; staff profile tokens are intentionally not used here).
 async function sendCustomerPush(customerId: string, title: string, body: string, url: string): Promise<number> {
@@ -728,6 +752,119 @@ async function runScheduledInvoiceSends(): Promise<string> {
   return `Scheduled sends: ${sent} delivered, ${skipped} skipped (paid/void), ${failed} failed.`
 }
 
+// ---- new request alerts --------------------------------------------------------
+// Whenever a client submits a request in their portal, staff get an email +
+// app push. The portal fn notifies instantly at submit time and stamps
+// portal_requests.notified_at; this poll (every 5 min) is the backstop that
+// retries anything un-notified (failed send, other insert paths). Texting is
+// paused (RingCentral, 2026-08-26), so email + push carry these alerts.
+const REQUEST_KIND_LABEL: Record<string, string> = {
+  extra_pickup: "Extra pickup", junk_removal: "Junk removal", lawn_care: "Lawn care", billing: "Billing question", other: "Service request",
+}
+
+function requestAlertConfig(auto: any) {
+  const c = auto?.config || {}
+  const emails = Array.isArray(c.emails) ? c.emails.map((e: unknown) => String(e).trim()).filter(Boolean) : []
+  return { emails, email: c.email !== false, push: c.push !== false }
+}
+
+async function sendNewRequestAlerts(
+  cfg: { emails: string[]; email: boolean; push: boolean },
+  subject: string,
+  textBody: string,
+  pushTitle: string,
+  pushBody: string,
+): Promise<{ emailed: number; pushed: number; pushErrors: string[] }> {
+  let emailed = 0
+  if (cfg.email) {
+    for (const to of cfg.emails) {
+      try { await sendStaffEmail(to, subject, textBody); emailed++ } catch (_e) { /* best effort per address */ }
+    }
+  }
+  let pushed = 0
+  let pushErrors: string[] = []
+  if (cfg.push) {
+    try {
+      const r = await sendStaffPush(pushTitle, pushBody)
+      pushed = r.sent
+      pushErrors = r.errors
+    } catch (_e) { /* no tokens / Expo down — email may still have gone out */ }
+  }
+  return { emailed, pushed, pushErrors }
+}
+
+async function runNewRequestAlerts(auto: any): Promise<string> {
+  const cfg = requestAlertConfig(auto)
+  // Recent un-notified requests only. The 90s grace window means rows the
+  // portal fn just inserted (it notifies + stamps synchronously) are never
+  // double-sent by this poll; rows older than 48h are abandoned.
+  const cutoff = Date.now() - 48 * 3600 * 1000
+  const grace = Date.now() - 90 * 1000
+  const rows = (await sbGet(`portal_requests?notified_at=is.null&order=created_at.asc&limit=25&select=id,customer_id,kind,message,property_ids,created_at`))
+    .filter((r: any) => { const t = new Date(r.created_at).getTime(); return t >= cutoff && t < grace })
+  if (!rows.length) return "No new requests waiting."
+
+  const custIds = [...new Set(rows.map((r: any) => r.customer_id))]
+  const custs = await sbGet(`customers?id=in.(${custIds.join(",")})&select=id,name`)
+  const nameOf: Record<string, string> = {}
+  for (const c of custs) nameOf[c.id] = c.name || "A client"
+
+  const propIds = [...new Set(rows.flatMap((r: any) => Array.isArray(r.property_ids) ? r.property_ids : []))]
+  const addrOf: Record<string, string> = {}
+  if (propIds.length) {
+    const ps = await sbGet(`properties?id=in.(${propIds.join(",")})&select=id,address`)
+    for (const p of ps) if (p.address) addrOf[p.id] = p.address
+  }
+
+  let alerted = 0
+  let emailed = 0
+  let pushed = 0
+  const errs: string[] = []
+  for (const r of rows) {
+    const label = REQUEST_KIND_LABEL[r.kind] || "Service request"
+    const name = nameOf[r.customer_id] || "A client"
+    const addresses = (Array.isArray(r.property_ids) ? r.property_ids : []).map((id: string) => addrOf[id]).filter(Boolean).join("; ")
+    const whenEt = new Date(r.created_at).toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+    const subject = `📥 New portal request — ${name} (${label})`
+    const text = [
+      `${name} just submitted a new request in their client portal.`,
+      ``,
+      `Type: ${label}`,
+      addresses ? `Property: ${addresses}` : null,
+      `When: ${whenEt} (Eastern)`,
+      r.message ? `Message: "${r.message}"` : `Message: (none — just the request)`,
+      ``,
+      `It's waiting in the CRM under Clients → ${name} → Activity.`,
+    ].filter((l) => l !== null).join("\n")
+    const pushBody = `${name} — ${label}${addresses ? ` @ ${addresses.split(";")[0].trim()}` : ""}`
+    const out = await sendNewRequestAlerts(cfg, subject, text, `📥 New portal request`, pushBody)
+    if (out.emailed > 0 || out.pushed > 0) {
+      alerted++
+      emailed += out.emailed
+      pushed += out.pushed
+      await sbPatch(`portal_requests?id=eq.${r.id}`, { notified_at: new Date().toISOString() })
+    } else if (out.pushErrors.length) errs.push(...out.pushErrors.slice(0, 2))
+  }
+  return `Alerted ${alerted} new request${alerted === 1 ? "" : "s"} (${emailed} emails, ${pushed} pushes).${errs.length ? ` Push errors: ${errs.join("; ")}` : ""}`
+}
+
+// Explicit user-initiated test (⚙️ modal / cron_token): exercises the same
+// email + push senders with a clearly labeled TEST message. Touches no
+// portal_requests rows.
+async function runNewRequestAlertTest(auto: any | undefined): Promise<string> {
+  const cfg = requestAlertConfig(auto)
+  if (!cfg.emails.length) cfg.emails = ["david@allsynccrm.com", "valetwastefl@gmail.com"]
+  const out = await sendNewRequestAlerts(
+    cfg,
+    `🔔 TEST — new request alerts are working`,
+    `This is a test of the New request alerts automation.\n\nIf you got this email (and a push on your phone), staff alerts for client portal requests are live.\n\n— Trashy Randy`,
+    `🔔 TEST — request alerts`,
+    `New request alerts are working. No action needed.`,
+  )
+  if (!out.emailed && !out.pushed) return `TEST FAILED — nothing delivered.${out.pushErrors.length ? ` Push errors: ${out.pushErrors.join("; ")}` : " Check SENDGRID_API_KEY."}`
+  return `TEST OK — ${out.emailed} email(s) to ${cfg.emails.join(", ")}, ${out.pushed} push(es).${out.pushErrors.length ? ` Push errors: ${out.pushErrors.join("; ")}` : ""}`
+}
+
 // ---- HTTP entry -------------------------------------------------------------
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS })
@@ -769,6 +906,11 @@ Deno.serve(async (req) => {
       const result = await runRunKeyKeepwarm()
       return json({ ok: true, result })
     }
+    if (action === "test_new_request_alert") {
+      const row = (await sbGet(`automations?kind=eq.new_request_alerts&select=id,kind,name,config`))[0]
+      const result = await runNewRequestAlertTest(row)
+      return json({ ok: true, result })
+    }
     let autos = await sbGet(`automations?status=eq.enabled&select=id,kind,name,config`)
     if (kindFilter) autos = autos.filter((a: any) => a.kind === kindFilter)
     if (!autos.length) return json({ ok: true, ran: [], note: kindFilter ? `No enabled automation '${kindFilter}'.` : "No enabled automations." })
@@ -781,6 +923,7 @@ Deno.serve(async (req) => {
         if (a.kind === "auto_invoice_reminders") result = await runInvoiceReminders(a)
         if (a.kind === "lawn_invoice_weekly_lines") result = await runLawnInvoiceLines()
         if (a.kind === "draft_invoice_monthend_reminder") result = await runDraftInvoiceReminder()
+        if (a.kind === "new_request_alerts") result = await runNewRequestAlerts(a)
         if (a.kind === "autopay_charge_monthly") result = await runAutopayCharge(force && kindFilter === "autopay_charge_monthly")
       } catch (e) {
         result = `Error: ${e instanceof Error ? e.message : String(e)}`

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { MONO } from '../data.js'
-import { loadAutomations, setAutomationStatus, deleteAutomation, runAutomationsNow, saveAutomationConfig } from '../lib/automationsData.js'
+import { loadAutomations, setAutomationStatus, deleteAutomation, runAutomationsNow, saveAutomationConfig, testNewRequestAlerts } from '../lib/automationsData.js'
 
 const fmt = (ts) => { try { return new Date(ts).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) } catch { return ts } }
 
@@ -27,6 +27,7 @@ export default function Automations({ app }) {
   const [busyId, setBusyId] = useState(null)
   const [runMsg, setRunMsg] = useState('')
   const [cfgOpen, setCfgOpen] = useState(false)
+  const [alertCfgOpen, setAlertCfgOpen] = useState(false)
 
   async function refresh() {
     setLoading(true)
@@ -96,6 +97,9 @@ export default function Automations({ app }) {
                   </div>
                 )}
                 <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+                  {a.kind === 'new_request_alerts' && (
+                    <button onClick={() => setAlertCfgOpen(true)} disabled={busyId === a.id} style={{ background: '#fff', border: '1px solid #1f7a4d55', color: '#1f7a4d', borderRadius: 8, padding: '6px 12px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>⚙️ Edit alerts</button>
+                  )}
                   {a.kind === 'auto_invoice_reminders' && (
                     <button onClick={() => setCfgOpen(true)} disabled={busyId === a.id} style={{ background: '#fff', border: '1px solid #1f7a4d55', color: '#1f7a4d', borderRadius: 8, padding: '6px 12px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>⚙️ Edit reminders</button>
                   )}
@@ -118,6 +122,9 @@ export default function Automations({ app }) {
 
       {cfgOpen && (
         <ReminderScheduleModal onClose={() => setCfgOpen(false)} onSaved={refresh} />
+      )}
+      {alertCfgOpen && (
+        <RequestAlertsModal onClose={() => setAlertCfgOpen(false)} onSaved={refresh} />
       )}
     </div>
   )
@@ -276,6 +283,127 @@ function ReminderScheduleModal({ onClose, onSaved }) {
           <button onClick={onClose} disabled={saving} style={cancelBtn}>Close</button>
           <button onClick={runNow} disabled={saving || !autoRow} style={ghostBtn}>Run check now</button>
           <button onClick={save} disabled={saving || !autoRow} style={{ ...primaryBtn, opacity: saving ? 0.6 : 1 }}>{saving ? 'Saving…' : 'Save'}</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ---- New-request alert editor ---------------------------------------------------
+// Edits the new_request_alerts automation: who gets emailed and which channels
+// fire. The portal fn alerts instantly when a client submits a request; this
+// row's ON/OFF status is the kill switch for BOTH that instant path and the
+// every-5-minute retry poll. "Send test" delivers a real labeled test email +
+// push so David can confirm his phone is wired up.
+const DEFAULT_ALERT_EMAILS = ['david@allsynccrm.com', 'valetwastefl@gmail.com']
+
+function RequestAlertsModal({ onClose, onSaved }) {
+  const [emails, setEmails] = useState(null) // null = loading
+  const [useEmail, setUseEmail] = useState(true)
+  const [usePush, setUsePush] = useState(true)
+  const [enabled, setEnabled] = useState(false)
+  const [autoRow, setAutoRow] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [err, setErr] = useState('')
+  const [msg, setMsg] = useState('')
+
+  useEffect(() => {
+    loadAutomations().then((all) => {
+      const row = all.find((a) => a.kind === 'new_request_alerts')
+      if (!row) { setErr('Automation row not found in the database.'); setEmails([]); return }
+      setAutoRow(row)
+      setEnabled(row.status === 'enabled')
+      const c = row.config || {}
+      const list = Array.isArray(c.emails) && c.emails.length ? c.emails : DEFAULT_ALERT_EMAILS
+      setEmails(list.map(String))
+      setUseEmail(c.email !== false)
+      setUsePush(c.push !== false)
+    }).catch((e) => { setErr(e.message || String(e)); setEmails([]) })
+  }, [])
+
+  const setEmail = (i, v) => setEmails((es) => es.map((x, k) => (k === i ? v : x)))
+  const addEmail = () => setEmails((es) => (es.length >= 6 ? es : [...es, '']))
+  const removeEmail = (i) => setEmails((es) => (es.length > 1 ? es.filter((_, k) => k !== i) : es))
+
+  const cleanEmails = () => (emails || []).map((e) => e.trim()).filter(Boolean)
+
+  async function save() {
+    const clean = cleanEmails()
+    if (!clean.length) { setErr('Keep at least one email address.'); return }
+    if (!useEmail && !usePush) { setErr('Pick at least one channel (Email or Push).'); return }
+    setSaving(true); setErr(''); setMsg('')
+    try {
+      await saveAutomationConfig(autoRow.id, { emails: clean, email: useEmail, push: usePush }, enabled ? 'enabled' : 'paused', 'New request alerts')
+      setMsg(`Saved ✓ — alerts are ${enabled ? 'ON' : 'paused'}.`)
+      onSaved && onSaved()
+    } catch (e) { setErr(e.message || String(e)) }
+    setSaving(false)
+  }
+
+  async function sendTest() {
+    if (!cleanEmails().length) { setErr('Add at least one email address before testing.'); return }
+    setTesting(true); setErr(''); setMsg('Sending test…')
+    try {
+      if (autoRow) { // save what's on screen first so the test uses it
+        await saveAutomationConfig(autoRow.id, { emails: cleanEmails(), email: useEmail, push: usePush }, enabled ? 'enabled' : 'paused', 'New request alerts')
+        onSaved && onSaved()
+      }
+      const d = await testNewRequestAlerts()
+      setMsg(`Test: ${d?.result || 'sent'}`)
+    } catch (e) { setErr(e.message || String(e)) }
+    setTesting(false)
+  }
+
+  const chipBtn = (active) => ({
+    border: '1px solid #dde2dd', background: active ? '#e7f1eb' : '#fff', color: active ? '#1f7a4d' : '#5d6b63',
+    borderRadius: 7, padding: '5px 10px', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+  })
+
+  return (
+    <div onClick={() => !saving && !testing && onClose()} style={overlay}>
+      <div onClick={(e) => e.stopPropagation()} style={{ ...modal, width: 520, maxHeight: '88vh', overflowY: 'auto' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+          <div style={{ fontWeight: 700, fontSize: 16 }}>📥 New request alerts</div>
+          <span style={{ flex: 1 }} />
+          <button
+            onClick={() => setEnabled((v) => !v)}
+            style={{ background: enabled ? '#1f7a4d' : '#eef1ee', color: enabled ? '#fff' : '#5d6b63', border: 'none', borderRadius: 20, padding: '6px 14px', fontSize: 12.5, fontWeight: 700, cursor: 'pointer' }}
+          >{enabled ? 'ON' : 'OFF'}</button>
+        </div>
+        <div style={{ fontSize: 12, color: '#7c8a82', marginBottom: 14, lineHeight: 1.5 }}>
+          The moment a client submits a request in their portal, staff get an email and an app push. Texting is paused, so these are the channels that carry it. A safety poll re-sends anything that failed, every 5 minutes.
+        </div>
+
+        {err && <div style={errorBox}>{err}</div>}
+        {msg && <div style={{ marginBottom: 12, background: '#eef7f1', border: '1px solid #cfe7da', color: '#1f7a4d', borderRadius: 11, padding: '9px 13px', fontSize: 12.5 }}>{msg}</div>}
+
+        <div style={{ fontSize: 12, fontWeight: 700, color: '#5d6b63', marginBottom: 7 }}>Alert these emails</div>
+        {emails === null ? <div style={empty}>Loading…</div> : emails.map((e, i) => (
+          <div key={i} style={{ display: 'flex', gap: 7, marginBottom: 7, alignItems: 'center' }}>
+            <input value={e} onChange={(ev) => setEmail(i, ev.target.value)} placeholder="name@email.com" style={{ ...inp, flex: 1 }} />
+            {emails.length > 1 && (
+              <button onClick={() => removeEmail(i)} title="Remove" style={{ background: 'none', border: 'none', color: '#c0492f', fontSize: 15, cursor: 'pointer', padding: '2px 6px' }}>✕</button>
+            )}
+          </div>
+        ))}
+        {emails !== null && emails.length < 6 && (
+          <button onClick={addEmail} disabled={saving} style={{ ...ghostBtn, borderStyle: 'dashed', marginBottom: 14 }}>+ Add email ({emails.length}/6)</button>
+        )}
+
+        <div style={{ fontSize: 12, fontWeight: 700, color: '#5d6b63', marginBottom: 7 }}>Channels</div>
+        <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
+          <button onClick={() => setUseEmail((v) => !v)} style={chipBtn(useEmail)}>✉️ Email</button>
+          <button onClick={() => setUsePush((v) => !v)} style={chipBtn(usePush)}>🔔 Push (app)</button>
+        </div>
+        <div style={{ fontSize: 11, color: '#9aa69e', marginBottom: 14, lineHeight: 1.55 }}>
+          Push goes to phones signed into the staff app — make sure the app is signed in and notifications are allowed for it. Emails come from Trashy Randy via SendGrid.
+        </div>
+
+        <div style={{ display: 'flex', gap: 9 }}>
+          <button onClick={onClose} disabled={saving || testing} style={cancelBtn}>Close</button>
+          <button onClick={sendTest} disabled={saving || testing || !autoRow} style={ghostBtn}>{testing ? 'Testing…' : 'Send test now'}</button>
+          <button onClick={save} disabled={saving || testing || !autoRow} style={{ ...primaryBtn, opacity: saving ? 0.6 : 1 }}>{saving ? 'Saving…' : 'Save'}</button>
         </div>
       </div>
     </div>

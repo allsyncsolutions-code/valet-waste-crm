@@ -38,6 +38,18 @@ export async function runAutomationsNow(kind) {
   return data
 }
 
+// Send a clearly-labeled TEST of the new-request staff alert (real email +
+// push to the configured recipients). Touches no portal_requests rows and
+// works even while the automation is paused — it's a plumbing check.
+export async function testNewRequestAlerts() {
+  const { data, error } = await supabase.functions.invoke('automations-run', {
+    body: { action: 'test_new_request_alert' },
+  })
+  if (error) throw error
+  if (data?.error) throw new Error(data.error)
+  return data
+}
+
 // Save an automation's config (jsonb) + status in one write — used by the
 // Invoices ⏰ Reminders modal for the auto_invoice_reminders schedule.
 export async function saveAutomationConfig(id, config, status, name) {
