@@ -162,8 +162,9 @@ async function sendStaffPush(title: string, body: string, url?: string): Promise
         body: JSON.stringify({ to: t.token, title, body, sound: "default", ...(url ? { data: { url } } : {}) }),
       })
       const d = await r.json().catch(() => ({} as any))
-      if (r.ok && d?.data?.[0]?.status === "ok") sent++
-      else errors.push(String(d?.data?.[0]?.message || d?.errors?.[0]?.code || `Expo ${r.status}`).slice(0, 140))
+      const rec: any = Array.isArray(d?.data) ? d?.data?.[0] : d?.data // single-message pushes return an object, not an array
+      if (r.ok && rec?.status === "ok") sent++
+      else errors.push(String(rec?.message || rec?.details || d?.errors?.[0]?.code || `Expo ${r.status}`).slice(0, 140))
     } catch (e) {
       errors.push(String(e).slice(0, 140))
     }

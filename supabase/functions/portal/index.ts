@@ -268,7 +268,8 @@ async function pushStaffDevices(title: string, body: string): Promise<number> {
         body: JSON.stringify({ to: t.token, title, body, sound: "default" }),
       })
       const d = await r.json().catch(() => ({} as any))
-      if (r.ok && d?.data?.[0]?.status === "ok") sent++
+      const rec: any = Array.isArray(d?.data) ? d?.data?.[0] : d?.data // single-message pushes return an object, not an array
+      if (r.ok && rec?.status === "ok") sent++
     } catch (_e) { /* best effort per device */ }
   }
   return sent
