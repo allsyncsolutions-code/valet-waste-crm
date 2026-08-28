@@ -5,6 +5,8 @@ import { loadCustomers, subscribeCustomers } from '../lib/customersData.js'
 import { loadInvoices, subscribeInvoices, round2 } from '../lib/invoicesData.js'
 import { loadPropertyPickups, subscribeSchedules, freqLabel } from '../lib/schedulesData.js'
 import { scheduleHitsDate, loadDayOverrides } from '../lib/routesData.js'
+import { loadOpenRequests, subscribeOpenRequests } from '../lib/requestsData.js'
+import RequestTriage from '../components/RequestTriage.jsx'
 
 // Local YYYY-MM-DD for "today" (matches how routes key their service_date).
 const todayKey = () => {
@@ -33,6 +35,8 @@ export default function Dashboard({ app }) {
   const [overrides, setOverrides] = useState(null) // one-time day changes for today
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState(null)
+  const [openRequests, setOpenRequests] = useState(null) // null = still loading
+  const [triageOpen, setTriageOpen] = useState(false)
 
   async function refresh() {
     const [c, i, s, ov] = await Promise.all([
@@ -57,7 +61,13 @@ export default function Dashboard({ app }) {
     const unsubC = subscribeCustomers(reload)
     const unsubI = subscribeInvoices(reload)
     const unsubS = subscribeSchedules(reload)
-    return () => { clearTimeout(t); unsubC && unsubC(); unsubI && unsubI(); unsubS && unsubS() }
+    // Open client requests (portal tickets) — realtime, plus a light poll in
+    // case an insert lands before the channel settles.
+    const reloadRequests = () => { loadOpenRequests().then(setOpenRequests).catch(() => {}) }
+    reloadRequests()
+    const unsubR = subscribeOpenRequests(reloadRequests)
+    const poll = setInterval(reloadRequests, 60000)
+    return () => { clearTimeout(t); unsubC && unsubC(); unsubI && unsubI(); unsubS && unsubS(); unsubR && unsubR(); clearInterval(poll) }
   }, [app.activeLine])
 
   const stats = useMemo(() => {
@@ -83,6 +93,21 @@ export default function Dashboard({ app }) {
   return (
     <div style={{ maxWidth: 1200, margin: '0 auto' }}>
       {err && <div style={errorBox}>{err}</div>}
+
+      {/* Open client requests — a ticket queue on the dashboard until handled */}
+      {!loading && openRequests?.length > 0 && (
+        <div onClick={() => setTriageOpen(true)} style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12, background: '#fdecea', border: '1px solid #f3b7b0', borderRadius: 12, padding: '13px 16px', cursor: 'pointer' }}>
+          <div style={{ width: 30, height: 30, borderRadius: 8, background: '#f6c1ba', color: '#9a2c1e', display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 'none', fontWeight: 700 }}>{openRequests.length}</div>
+          <div style={{ flex: 1, fontSize: 13, color: '#9a2c1e', lineHeight: 1.4 }}>
+            <b>{openRequests.length} client request{openRequests.length > 1 ? 's' : ''} waiting</b> — {openRequests.map((r) => r.name).slice(0, 3).join(', ')}{openRequests.length > 3 ? ` +${openRequests.length - 3} more` : ''}
+            <span style={{ color: '#b3261e' }}> · oldest {Math.max(0, Math.floor((Date.now() - new Date(openRequests[openRequests.length - 1].createdAt).getTime()) / 86400000))}d</span>
+          </div>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: '#9a2c1e' }}>Review →</div>
+        </div>
+      )}
+      {triageOpen && (
+        <RequestTriage requests={openRequests || []} onChanged={() => { loadOpenRequests().then(setOpenRequests).catch(() => {}) }} onClose={() => setTriageOpen(false)} app={app} />
+      )}
 
       {loading && <div style={empty}>Loading dashboard…</div>}
 

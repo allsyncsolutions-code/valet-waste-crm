@@ -7,6 +7,9 @@
 //   • auto_invoice_reminders — up to 5 configurable reminders per open invoice
 //     (trigger timing, sms/email/push channels, merge-field templates).
 //   • lawn_invoice_weekly_lines — itemized per-visit lawn billing.
+//   • new_request_alerts — backstop poll re-alerting un-notified portal requests.
+//   • request_digest — Mondays: email staff every client request from the last
+//     14 days (open + handled) so nothing sits unnoticed.
 //   • autopay_charge_monthly — on the 1st, charge consenting clients' saved
 //     cards for prior-month open invoices + 5th-week-free credit.
 //
@@ -866,6 +869,51 @@ async function runNewRequestAlertTest(auto: any | undefined): Promise<string> {
   return `TEST OK — ${out.emailed} email(s) to ${cfg.emails.join(", ")}, ${out.pushed} push(es).${out.pushErrors.length ? ` Push errors: ${out.pushErrors.join("; ")}` : ""}`
 }
 
+// ---- request digest ---------------------------------------------------------
+// Emails staff a summary of every client portal request from the last N days
+// (config.days, default 14) — client, type, message, open/handled — so nothing
+// sits unnoticed. Suggested cadence: Mondays (delivered by the daily 7:30 tick,
+// same pattern as autopay's 1st-of-month check); "Run now" / the
+// send_request_digest action sends immediately any day.
+async function runRequestDigest(auto: any, force = false): Promise<string> {
+  const cfg = auto?.config || {}
+  const emails = (Array.isArray(cfg.emails) ? cfg.emails : []).map((e: unknown) => String(e).trim()).filter(Boolean)
+  const to = emails.length ? emails : ["david@allsynccrm.com", "valetwastefl@gmail.com"]
+  const days = Number(cfg.days) > 0 ? Number(cfg.days) : 14
+
+  const et = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }))
+  if (!force && et.getDay() !== 1) return `Not Monday (ET is ${et.toISOString().slice(0, 10)}) — digest skipped.`
+
+  const since = new Date(Date.now() - days * 86400000).toISOString()
+  const rows = await sbGet(
+    `portal_requests?created_at=gte.${since}&order=created_at.desc&limit=100&select=id,customer_id,kind,message,status,created_at,resolved_at,resolved_by,notified_at,customers(name)`,
+  )
+  if (!rows.length) return `No client requests in the last ${days} days — nothing to send.`
+
+  const openCount = rows.filter((r: any) => r.status !== "done").length
+  const lines = rows.map((r: any, i: number) => {
+    const label = REQUEST_KIND_LABEL[r.kind] || "Service request"
+    const whenEt = new Date(r.created_at).toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+    const state = r.status === "done"
+      ? `HANDLED${r.resolved_by ? ` by ${r.resolved_by}` : ""}${r.resolved_at ? ` (${new Date(r.resolved_at).toLocaleDateString("en-US", { month: "numeric", day: "numeric" })})` : ""}`
+      : r.status === "scheduled" ? "STILL OPEN — scheduled" : "STILL OPEN"
+    const msg = r.message ? `"${String(r.message).slice(0, 220)}"` : "(no message)"
+    return `${i + 1}) ${r.customers?.name || "A client"} — ${label} — ${whenEt} ET\n   ${state}\n   ${msg}`
+  })
+  const subject = `📋 Client requests — last ${days} days (${openCount} open of ${rows.length})`
+  const body =
+    `Every client portal request from the last ${days} days:\n\n` +
+    lines.join("\n\n") +
+    `\n\n${openCount > 0 ? `${openCount} still need handling — close them on the Dashboard: open requests banner → Review.` : "All handled — nothing waiting. 🎉"}`
+
+  let emailed = 0
+  for (const addr of to) {
+    try { await sendStaffEmail(addr, subject, body); emailed++ } catch (_e) { /* best effort per address */ }
+  }
+  if (!emailed) throw new Error("Digest delivery failed for every recipient (SendGrid).")
+  return `Digest emailed to ${emailed} recipient(s): ${rows.length} request(s) in the last ${days} days, ${openCount} still open.`
+}
+
 // ---- HTTP entry -------------------------------------------------------------
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS })
@@ -912,6 +960,12 @@ Deno.serve(async (req) => {
       const result = await runNewRequestAlertTest(row)
       return json({ ok: true, result })
     }
+    if (action === "send_request_digest") {
+      // One-off digest right now, regardless of the row's status or the day.
+      const row = (await sbGet(`automations?kind=eq.request_digest&select=id,kind,name,config`))[0]
+      const result = await runRequestDigest(row || {}, true)
+      return json({ ok: true, result })
+    }
     let autos = await sbGet(`automations?status=eq.enabled&select=id,kind,name,config`)
     if (kindFilter) autos = autos.filter((a: any) => a.kind === kindFilter)
     if (!autos.length) return json({ ok: true, ran: [], note: kindFilter ? `No enabled automation '${kindFilter}'.` : "No enabled automations." })
@@ -925,6 +979,7 @@ Deno.serve(async (req) => {
         if (a.kind === "lawn_invoice_weekly_lines") result = await runLawnInvoiceLines()
         if (a.kind === "draft_invoice_monthend_reminder") result = await runDraftInvoiceReminder()
         if (a.kind === "new_request_alerts") result = await runNewRequestAlerts(a)
+        if (a.kind === "request_digest") result = await runRequestDigest(a, force && kindFilter === "request_digest")
         if (a.kind === "autopay_charge_monthly") result = await runAutopayCharge(force && kindFilter === "autopay_charge_monthly")
       } catch (e) {
         result = `Error: ${e instanceof Error ? e.message : String(e)}`

@@ -4,6 +4,7 @@ import { listTags, createTag, updateTag, deleteTag, tagUsageCounts, subscribeTag
 import { loadSettings, saveDepot, geocodeAddress, subscribeSettings, saveSmsTemplates, saveRandyTone, saveNotifyOnComplete, saveInvoiceSettings, RANDY_TONES } from '../lib/settingsData.js'
 import { RichTextEditor, RichText } from '../components/RichText.jsx'
 import { paymentsStatus, savePaymentsCredentials, revealRequest, revealVerify } from '../lib/paymentsData.js'
+import { gmailStatus, gmailSaveCredentials, gmailStartConnect, gmailDisconnect, gmailTestSend } from '../lib/gmailData.js'
 import { platformBillingStatus, platformBillingCheckout, platformBillingPortal } from '../lib/platformBillingData.js'
 import { getSmsConfig, saveSmsConfig, sendTestSms, listSmsSubscriptions, ensureSmsSubscription } from '../lib/smsData.js'
 import Import from './Import.jsx'
@@ -36,6 +37,10 @@ export default function Settings({ app }) {
   const [depotSaving, setDepotSaving] = useState(false)
   const [pay, setPay] = useState({ loading: true, data: null, busy: false, err: null, msg: null })
   const [creds, setCreds] = useState({ mid: '', public_key: '', api_key: '', refresh_token: '', env: 'production', webhook_secret: '' })
+  // Gmail connection for replying to client requests (Settings → Email card).
+  const [gmail, setGmail] = useState({ loading: true, data: null, busy: false, err: null, msg: null })
+  const [gmailCreds, setGmailCreds] = useState({ client_id: '', client_secret: '' })
+  const [gmailTestTo, setGmailTestTo] = useState('david@allsynccrm.com')
   // Key reveal flow: null = closed; {step:'email'|'code'} = modal open; revealed plaintext after verify.
   const [reveal, setReveal] = useState(null)
   const [revealed, setRevealed] = useState(null)
@@ -146,10 +151,51 @@ export default function Settings({ app }) {
   }
   useEffect(() => {
     refreshPay()
-    // returning from the portal pay screen — clean the ?paid= param
+    refreshGmail()
+    // returning from the portal pay screen / Gmail connect — clean the params
     const params = new URLSearchParams(window.location.search)
-    if (params.get('paid') || params.get('setup')) window.history.replaceState({}, '', window.location.pathname)
+    if (params.get('gmail_connected')) setGmail((s) => ({ ...s, msg: 'Connected ✓ — replies will send from this Gmail.' }))
+    if (params.get('gmail_error')) setGmail((s) => ({ ...s, err: `Google connect failed: ${params.get('gmail_error')}` }))
+    if (params.get('paid') || params.get('setup') || params.get('gmail_connected') || params.get('gmail_error')) {
+      window.history.replaceState({}, '', window.location.pathname)
+    }
   }, [])
+
+  async function refreshGmail() {
+    try {
+      const d = await gmailStatus()
+      setGmail((s) => ({ ...s, loading: false, data: d, err: null }))
+    } catch (e) {
+      setGmail((s) => ({ ...s, loading: false, err: e.message || String(e) }))
+    }
+  }
+
+  async function saveGmailCreds(e) {
+    e.preventDefault()
+    if (!gmailCreds.client_id.trim() && !gmailCreds.client_secret.trim()) return
+    setGmail((s) => ({ ...s, busy: true, err: null, msg: null }))
+    try {
+      await gmailSaveCredentials(gmailCreds.client_id.trim(), gmailCreds.client_secret.trim())
+      setGmailCreds({ client_id: '', client_secret: '' })
+      await refreshGmail()
+      setGmail((s) => ({ ...s, msg: 'Saved ✓ — now hit Connect Gmail and sign in as the company Gmail.' }))
+    } catch (e2) {
+      setGmail((s) => ({ ...s, err: e2.message || String(e2) }))
+    }
+    setGmail((s) => ({ ...s, busy: false }))
+  }
+
+  async function connectGmail() {
+    setGmail((s) => ({ ...s, busy: true, err: null, msg: null }))
+    try {
+      const d = await gmailStartConnect()
+      if (d?.url) window.open(d.url, '_blank')
+      setGmail((s) => ({ ...s, msg: 'Finish the Google sign-in in the new tab — this page updates when you\'re back.' }))
+    } catch (e) {
+      setGmail((s) => ({ ...s, err: e.message || String(e) }))
+    }
+    setGmail((s) => ({ ...s, busy: false }))
+  }
   async function saveCreds(e) {
     e.preventDefault()
     setPay((s) => ({ ...s, busy: true, err: null, msg: null }))
@@ -572,6 +618,70 @@ export default function Settings({ app }) {
               )}
             </div>
           </div>
+        )}
+      </div>
+
+      {/* email — Gmail (reply to client requests) */}
+      <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '20px 22px', marginBottom: 16 }}>
+        <div style={{ fontWeight: 700, fontSize: 16 }}>Email — reply to clients from Gmail</div>
+        <div style={{ fontSize: 12.5, color: '#7c8a82', marginTop: 3, marginBottom: 16 }}>
+          Connect the company Gmail (valetwastefl@gmail.com) so staff can reply to client portal requests by email right from the Dashboard — replies send from that inbox and land in its Sent folder.
+        </div>
+        {gmail.err && <div style={{ background: '#fdecea', border: '1px solid #f3b7b0', color: '#9a2c1e', borderRadius: 10, padding: '9px 12px', fontSize: 12.5, marginBottom: 14 }}>{gmail.err}</div>}
+        {gmail.msg && <div style={{ background: '#eef7f1', border: '1px solid #cfe7da', color: '#1f7a4d', borderRadius: 10, padding: '9px 12px', fontSize: 12.5, marginBottom: 14 }}>{gmail.msg}</div>}
+
+        {gmail.loading ? (
+          <div style={{ color: '#9aa69e', fontSize: 13, marginBottom: 16 }}>Checking connection…</div>
+        ) : (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
+            <span style={{ width: 10, height: 10, borderRadius: '50%', background: gmail.data?.connected ? '#22b06b' : gmail.data?.configured ? '#c08a2e' : '#c08a2e', flex: 'none' }} />
+            <div style={{ flex: 1, minWidth: 180, fontWeight: 600, fontSize: 13.5 }}>
+              {gmail.data?.connected
+                ? `Connected as ${gmail.data.email}`
+                : gmail.data?.configured ? 'Ready — hit Connect Gmail below' : 'Not set up (one-time Google setup below)'}
+            </div>
+            <button onClick={refreshGmail} style={{ background: '#fff', border: '1px solid #e6eae6', color: '#5d6b63', borderRadius: 9, padding: '8px 12px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>Refresh</button>
+            {gmail.data?.configured && !gmail.data?.connected && (
+              <button onClick={connectGmail} disabled={gmail.busy} style={{ background: '#1f7a4d', border: 'none', color: '#fff', borderRadius: 9, padding: '8px 14px', fontSize: 12.5, fontWeight: 700, cursor: 'pointer', opacity: gmail.busy ? 0.6 : 1 }}>Connect Gmail</button>
+            )}
+            {gmail.data?.connected && (
+              <button onClick={async () => { if (!window.confirm('Disconnect Gmail? Replies will be disabled until you reconnect.')) return; setGmail((s) => ({ ...s, busy: true })); try { await gmailDisconnect(); await refreshGmail(); setGmail((s) => ({ ...s, msg: 'Disconnected.' })) } catch (e) { setGmail((s) => ({ ...s, err: e.message || String(e) })) } setGmail((s) => ({ ...s, busy: false })) }} disabled={gmail.busy} style={{ background: '#fff', border: '1px solid #c0492f55', color: '#c0492f', borderRadius: 9, padding: '8px 14px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>Disconnect</button>
+            )}
+          </div>
+        )}
+
+        {gmail.data?.connected && (
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 16, flexWrap: 'wrap' }}>
+            <input value={gmailTestTo} onChange={(e) => setGmailTestTo(e.target.value)} placeholder="send a test to…" style={{ ...inp, flex: 1, minWidth: 200 }} />
+            <button
+              onClick={async () => { setGmail((s) => ({ ...s, busy: true, err: null, msg: null })); try { await gmailTestSend(gmailTestTo.trim()); setGmail((s) => ({ ...s, msg: `Test sent ✓ — check ${gmailTestTo.trim()}.` })) } catch (e) { setGmail((s) => ({ ...s, err: e.message || String(e) })) } setGmail((s) => ({ ...s, busy: false })) }}
+              disabled={gmail.busy || !gmailTestTo.trim()}
+              style={{ flex: 'none', background: '#fff', border: '1px solid #1f7a4d55', color: '#1f7a4d', borderRadius: 9, padding: '9px 14px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}
+            >Send test email</button>
+          </div>
+        )}
+
+        {!gmail.data?.connected && (
+          <>
+            <div style={{ background: '#f7f9f7', border: '1px solid #e6eae6', borderRadius: 10, padding: '12px 14px', fontSize: 12.5, color: '#5d6b63', marginBottom: 14, lineHeight: 1.65 }}>
+              <b>One-time Google setup</b> (console.cloud.google.com, signed in as the company Google account):
+              <div style={{ margin: '6px 0 0 14px' }}>
+                1. APIs &amp; Services → <b>OAuth consent screen</b> → External → add yourself as a test user → publish to "In production" (test-mode tokens die after 7 days).<br />
+                2. APIs &amp; Services → <b>Library</b> → enable the <b>Gmail API</b>.<br />
+                3. APIs &amp; Services → <b>Credentials</b> → Create credentials → <b>OAuth client ID</b> → Web application, and add this exact Authorized redirect URI:<br />
+                <span style={{ fontFamily: MONO, fontSize: 11.5, background: '#eef1ee', borderRadius: 6, padding: '2px 7px', display: 'inline-block', marginTop: 4, userSelect: 'all' }}>{gmail.data?.redirect_uri || '…'}</span><br />
+                4. Paste the Client ID + Secret below, Save, then Connect Gmail.
+              </div>
+            </div>
+            <form onSubmit={saveGmailCreds}>
+              <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 11 }}>
+                <SField label="Google Client ID"><input value={gmailCreds.client_id} onChange={(e) => setGmailCreds((c) => ({ ...c, client_id: e.target.value }))} style={inp} placeholder={gmail.data?.configured ? 'Saved — enter new to replace' : '…apps.googleusercontent.com'} /></SField>
+                <SField label="Google Client Secret"><input type="password" value={gmailCreds.client_secret} onChange={(e) => setGmailCreds((c) => ({ ...c, client_secret: e.target.value }))} style={inp} placeholder={gmail.data?.configured ? 'Saved — enter new to replace' : 'GOCSPX-…'} /></SField>
+              </div>
+              <button type="submit" disabled={gmail.busy || (!gmailCreds.client_id.trim() && !gmailCreds.client_secret.trim())} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: gmail.busy ? 0.6 : 1 }}>{gmail.busy ? 'Saving…' : 'Save'}</button>
+              <span style={{ fontSize: 11.5, color: '#9aa69e', marginLeft: 12 }}>Saving new credentials clears any existing connection.</span>
+            </form>
+          </>
         )}
       </div>
 
