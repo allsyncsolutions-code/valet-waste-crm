@@ -21,6 +21,7 @@ Request approval before doing any of the following:
 - Sending or changing customer-facing email, SMS, phone, push-notification, consent, opt-out, marketing, or messaging behavior.
 - Introducing a breaking public API change, changing a major user workflow, or making a product/business decision not specified by the owner.
 - Performing any action that can cause data loss, duplicated charges, duplicated messages, security exposure, compliance risk, or material customer impact.
+- Modifying `AGENTS.md`, `CLAUDE.md`, or any other agent-instruction file in this repository. Agents may not rewrite their own guardrails; changes to this workflow itself always require owner approval.
 
 ## Work allowed without approval
 You may proceed without asking for approval when the change is reversible and does not alter public behavior, security, data, cost, deployment, or customer communications. Examples:
@@ -86,7 +87,7 @@ Proposed next action:
 State exactly what you will do after approval.
 ```
 
-Replace every ALL-CAPS placeholder with the actual project details. Keep the email concise but complete. Never include passwords, API keys, tokens, full `.env` files, or unnecessary customer personal data.
+Replace every ALL-CAPS placeholder with the actual project details. Keep the email concise but complete. Set the email's `Reply-To` header to `dev-agents@allsynccrm.com` so the owner's reply returns to the approval mailbox no matter which address the question was sent from. Never include passwords, API keys, tokens, full `.env` files, or unnecessary customer personal data.
 
 ## Valid owner decisions
 Only treat an answer as approval when it begins with one of these exact prefixes:
