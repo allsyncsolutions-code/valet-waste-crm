@@ -10,6 +10,28 @@ For any decision that requires owner approval, send a structured email to:
 
 Do not make a high-impact decision merely because an implementation seems reasonable. Pause, send the required question, and wait for an explicit decision.
 
+## Sending the ask (agents have no mail client)
+CLI agents cannot send email directly. Send the approval question with one curl against the `agent-mail` edge function — it files the question, emails `dev-agents@allsynccrm.com` from the company Outlook mailbox, and pushes the owner's phone:
+
+```bash
+curl -s -X POST "https://ozoonpwuyusvksmydkuu.supabase.co/functions/v1/agent-mail" \
+  -H "Authorization: Bearer $(cat ~/.valetwaste/agent-ask.key)" \
+  -H "Content-Type: application/json" \
+  --data-binary @- <<'JSON'
+{"action":"send","subject":"[AGENT-QUESTION][BLOCKING][Valet Waste][GitHub PR #12] Short decision title","body":"AGENT-QUESTION v1\nQuestion-ID: aq_20260831_example\nProject: Valet Waste\n…fill the full template below…"}
+JSON
+```
+
+Before sending:
+
+- Open the pull request (or issue) first — `gh pr create` / `gh issue create` — and use its number in the subject and body. The owner's decision is posted back as a comment on it.
+- Fill the entire email template below; the `Question-ID` must be unique per question (`aq_YYYYMMDD_unique-id`).
+- The endpoint is idempotent per `Question-ID` (a retried curl never emails twice) and rate-limited to 10 questions per hour.
+
+If `~/.valetwaste/agent-ask.key` is missing, or the endpoint answers that Outlook isn't connected or the ask key isn't configured, stop and tell the owner in the session — that is the one case where a human-relayed email is still needed. Never write the key's value into the repository, logs, or an email body.
+
+The owner replies to the email starting `APPROVE:`, `REJECT`, or `CLARIFY`; `agent-mail` posts that reply to the linked PR/issue automatically. Poll for it with `gh pr view NUMBER --comments` (or `gh issue view NUMBER --comments`) every few minutes while you wait. Do not end the waiting period on your own initiative.
+
 ## Decisions that require approval
 Request approval before doing any of the following:
 
@@ -87,7 +109,7 @@ Proposed next action:
 State exactly what you will do after approval.
 ```
 
-Replace every ALL-CAPS placeholder with the actual project details. Keep the email concise but complete. Set the email's `Reply-To` header to `dev-agents@allsynccrm.com` so the owner's reply returns to the approval mailbox no matter which address the question was sent from. Never include passwords, API keys, tokens, full `.env` files, or unnecessary customer personal data.
+Replace every ALL-CAPS placeholder with the actual project details. Keep the email concise but complete. The ask endpoint sets the email's `Reply-To` header to `dev-agents@allsynccrm.com` automatically, so the owner's reply returns to the approval mailbox no matter which address the question was sent from. Never include passwords, API keys, tokens, full `.env` files, or unnecessary customer personal data.
 
 ## Valid owner decisions
 Only treat an answer as approval when it begins with one of these exact prefixes:

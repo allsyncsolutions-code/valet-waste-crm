@@ -17,6 +17,10 @@
 // POST action=save_credentials(staff) → store client id/secret/tenant/GitHub token
 // POST action=start           (staff) → Microsoft consent URL (stores CSRF state)
 // POST action=disconnect      (staff) → forget the connection
+// POST action=send     (ask-key/staff) → the ask endpoint: an agent's one curl
+//                                        files its AGENT-QUESTION (emails
+//                                        dev-agents@ + staff push) — closes the
+//                                        "agents have no mail client" gap
 // POST action=poll     (cron/staff)   → scan the mailbox (the cron tick)
 //
 // Setup (one-time, David): Entra app registration ("Chronos") → Authentication →
@@ -75,7 +79,7 @@ async function sbPost(path: string, body: unknown, prefer = "return=minimal") {
 
 async function settings() {
   const rows = await sbGet(
-    `app_settings?id=eq.1&select=company_name,agentmail_client_id,agentmail_client_secret,agentmail_tenant,agentmail_refresh_token,agentmail_email,agentmail_connected_by,agentmail_connected_at,agentmail_access_token,agentmail_token_expires_at,agentmail_oauth_state,agentmail_github_token,agentmail_last_poll_at`,
+    `app_settings?id=eq.1&select=company_name,agentmail_client_id,agentmail_client_secret,agentmail_tenant,agentmail_refresh_token,agentmail_email,agentmail_connected_by,agentmail_connected_at,agentmail_access_token,agentmail_token_expires_at,agentmail_oauth_state,agentmail_github_token,agentmail_ask_key,agentmail_last_poll_at`,
   )
   return rows[0] || {}
 }
@@ -99,6 +103,16 @@ async function auth(req: Request): Promise<{ ok: true; email?: string } | { ok: 
 
 function tenant(s: Record<string, any>) {
   return (s.agentmail_tenant || "").trim() || "allsynccrm.com"
+}
+
+// Constant-time-ish compare for the ask key: compare SHA-256 digests, never
+// the raw strings (avoids leaking length/prefix through timing).
+async function safeEqual(a: string, b: string): Promise<boolean> {
+  const enc = new TextEncoder()
+  const digest = async (x: string) =>
+    Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(x))))
+  const [da, db] = [await digest(a), await digest(b)]
+  return da.length === db.length && da.every((v, i) => v === db[i])
 }
 
 // Mint a fresh Graph access token. Microsoft ROTATES refresh tokens — always
@@ -305,40 +319,45 @@ async function poll(s: Record<string, any>): Promise<Record<string, unknown>> {
 
     if (isQuestion) {
       const qid = (text.match(QID_RE) || [null])[0] || `aq_${(m.internetMessageId || m.id).replace(/[^A-Za-z0-9]/g, "").slice(0, 24)}`
-      const prFromSubject = subject.match(/GitHub PR #(\d+)/i)?.[1]
-      const issueFromSubject = subject.match(/GitHub Issue #(\d+)/i)?.[1]
-      const pr = field(text, "Pull-Request") || prFromSubject
-      const issue = field(text, "Issue") || issueFromSubject
-      try {
-        await sbPost(`agent_questions`, {
-          question_id: qid,
-          project: field(text, "Project"),
-          repo: field(text, "Repository"),
-          branch: field(text, "Branch"),
-          source: field(text, "Source"),
-          return_channel: field(text, "Return-Channel") || "github-pr-comment",
-          pr_number: pr && /^\d+$/.test(pr) ? Number(pr) : null,
-          issue_number: issue && /^\d+$/.test(issue) ? Number(issue) : null,
-          subject,
-          body: text.slice(0, 20000),
-          from_email: fromEmail,
-          message_id: msgKey,
-          conversation_id: m.conversationId || null,
-          received_at: m.receivedDateTime || new Date().toISOString(),
-        })
-        questions++
-        const title = subject.replace(/\[[^\]]*\]/g, "").trim().slice(0, 80) || qid
-        await sendStaffPush(
-          `🤖 Agent question — ${field(text, "Source") || "coding agent"}`,
-          `${title}\nReply to the email starting APPROVE:, REJECT or CLARIFY.`,
-        )
-        await sbPost(`activity_log`, {
-          type: "agent_question",
-          actor: field(text, "Source") || "agent",
-          summary: `Blocking question ${qid}: ${title}`,
-        }).catch(() => {})
-      } catch (e) {
-        notes.push(`question ${qid}: ${String(e).slice(0, 120)}`)
+      // action=send already files the questions it mails (a self-addressed send
+      // lands a copy in this inbox) — never double-file or double-push.
+      const alreadyFiled = await sbGet(`agent_questions?question_id=eq.${encodeURIComponent(qid)}&select=id`).catch(() => [])
+      if (!alreadyFiled.length) {
+        const prFromSubject = subject.match(/GitHub PR #(\d+)/i)?.[1]
+        const issueFromSubject = subject.match(/GitHub Issue #(\d+)/i)?.[1]
+        const pr = field(text, "Pull-Request") || prFromSubject
+        const issue = field(text, "Issue") || issueFromSubject
+        try {
+          await sbPost(`agent_questions`, {
+            question_id: qid,
+            project: field(text, "Project"),
+            repo: field(text, "Repository"),
+            branch: field(text, "Branch"),
+            source: field(text, "Source"),
+            return_channel: field(text, "Return-Channel") || "github-pr-comment",
+            pr_number: pr && /^\d+$/.test(pr) ? Number(pr) : null,
+            issue_number: issue && /^\d+$/.test(issue) ? Number(issue) : null,
+            subject,
+            body: text.slice(0, 20000),
+            from_email: fromEmail,
+            message_id: msgKey,
+            conversation_id: m.conversationId || null,
+            received_at: m.receivedDateTime || new Date().toISOString(),
+          })
+          questions++
+          const title = subject.replace(/\[[^\]]*\]/g, "").trim().slice(0, 80) || qid
+          await sendStaffPush(
+            `🤖 Agent question — ${field(text, "Source") || "coding agent"}`,
+            `${title}\nReply to the email starting APPROVE:, REJECT or CLARIFY.`,
+          )
+          await sbPost(`activity_log`, {
+            type: "agent_question",
+            actor: field(text, "Source") || "agent",
+            summary: `Blocking question ${qid}: ${title}`,
+          }).catch(() => {})
+        } catch (e) {
+          notes.push(`question ${qid}: ${String(e).slice(0, 120)}`)
+        }
       }
       await markRead(token, m.id)
     } else {
@@ -547,6 +566,7 @@ Deno.serve(async (req) => {
         email: s.agentmail_refresh_token ? s.agentmail_email || "(connected)" : null,
         connected_at: s.agentmail_connected_at || null,
         github_token_set: !!s.agentmail_github_token,
+        ask_key_set: !!s.agentmail_ask_key,
         last_poll_at: s.agentmail_last_poll_at || null,
         pending: pending.length,
         redirect_uri: REDIRECT_URI,
@@ -561,6 +581,7 @@ Deno.serve(async (req) => {
       if (typeof body.client_secret === "string" && body.client_secret.trim()) patch.agentmail_client_secret = body.client_secret.trim()
       if (typeof body.tenant === "string" && body.tenant.trim()) patch.agentmail_tenant = body.tenant.trim()
       if (typeof body.github_token === "string" && body.github_token.trim()) patch.agentmail_github_token = body.github_token.trim()
+      if (typeof body.ask_key === "string" && body.ask_key.trim()) patch.agentmail_ask_key = body.ask_key.trim()
       if (!Object.keys(patch).length) return json({ error: "Enter something to save." }, 400)
       // New OAuth credentials invalidate any existing connection (GitHub token doesn't).
       if (patch.agentmail_client_id || patch.agentmail_client_secret) {
@@ -605,6 +626,119 @@ Deno.serve(async (req) => {
         agentmail_oauth_state: null,
       })
       return json({ ok: true })
+    }
+
+    if (action === "send") {
+      // The ask endpoint — how a CLI agent with no mail client files its
+      // AGENT-QUESTION (AGENTS.md documents the curl). Bearer = the ask key
+      // from app_settings, or a signed-in staff session for testing.
+      const s = await settings()
+      const token = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "")
+      const askKey = String(s.agentmail_ask_key || "").trim()
+      let viaKey = false
+      if (askKey && token && (await safeEqual(token, askKey))) {
+        viaKey = true
+      } else {
+        const a = await auth(req)
+        if (!a.ok) {
+          return json({ error: askKey ? "Bad ask key." : "Ask key not configured — see AGENTS.md." }, askKey ? 401 : 503)
+        }
+      }
+
+      const subject = String(body?.subject || "").trim()
+      const text = String(body?.body || "")
+      if (!/^\[AGENT-QUESTION\]\[BLOCKING\]/i.test(subject)) {
+        return json({ error: "Subject must follow AGENTS.md: [AGENT-QUESTION][BLOCKING][Valet Waste][GitHub PR #N or Issue #N] Short decision title" }, 400)
+      }
+      if (subject.length > 240) return json({ error: "Subject too long (max 240 chars)." }, 400)
+      if (!/^AGENT-QUESTION v1\s*$/m.test(text)) return json({ error: 'Body must contain the "AGENT-QUESTION v1" header line.' }, 400)
+      if (text.length < 100) return json({ error: "Body too short — use the full AGENT-QUESTION v1 template from AGENTS.md." }, 400)
+      if (text.length > 20000) return json({ error: "Body too long (max 20000 chars)." }, 400)
+      const qid = (text.match(QID_RE) || [null])[0]
+      if (!qid) return json({ error: "Body must contain a Question-ID: aq_YYYYMMDD_unique-id line." }, 400)
+      const repo = field(text, "Repository") || ""
+      if (!REPO_ALLOWLIST.test(repo)) {
+        return json({ error: `Repository "${repo || "(none)"}" isn't allowlisted (${REPO_ALLOWLIST}).` }, 400)
+      }
+      const pr = field(text, "Pull-Request") || subject.match(/GitHub PR #(\d+)/i)?.[1] || null
+      const issue = field(text, "Issue") || subject.match(/GitHub Issue #(\d+)/i)?.[1] || null
+      if (!pr && !issue) {
+        return json({ error: "Open the PR or issue first and reference its number — the owner's decision is posted back as a comment on it." }, 400)
+      }
+
+      // Idempotent per Question-ID: a retried curl must never email twice.
+      const existing = await sbGet(`agent_questions?question_id=eq.${encodeURIComponent(qid)}&select=id,status`).catch(() => [])
+      if (existing[0] && existing[0].status !== "error") {
+        return json({ ok: true, question_id: qid, dedupe: true, status: existing[0].status, note: "Already filed — not emailed again." })
+      }
+      // Rate limit: a looping agent must not flood the owner.
+      const hourAgo = new Date(Date.now() - 3600e3).toISOString()
+      const recent = await sbGet(`agent_questions?created_at=gt.${hourAgo}&select=id`).catch(() => [])
+      if (recent.length >= 10) return json({ error: "Rate limit reached (10 questions/hour). Stop and tell the owner in the session." }, 429)
+
+      const gtoken = await accessToken(s) // throws a friendly error if Outlook isn't connected
+      const r = await fetch(`${GRAPH}/me/sendMail`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${gtoken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: {
+            subject,
+            body: { contentType: "text", content: text },
+            toRecipients: [{ emailAddress: { address: "dev-agents@allsynccrm.com" } }],
+            replyTo: [{ emailAddress: { address: "dev-agents@allsynccrm.com" } }],
+          },
+          saveToSentItems: true,
+        }),
+      })
+      if (!r.ok && r.status !== 202) {
+        throw new Error(`Graph sendMail failed: ${r.status} ${(await r.text().catch(() => "")).slice(0, 200)}`)
+      }
+
+      // Best effort: grab the just-sent message's conversationId so replies
+      // match even when they don't quote the Question-ID.
+      let conversationId: string | null = null
+      try {
+        const ls = await fetch(
+          `${GRAPH}/me/mailFolders/sentitems/messages?$orderby=receivedDateTime desc&$top=1&$select=subject,conversationId`,
+          { headers: { Authorization: `Bearer ${gtoken}` } },
+        )
+        const last = ((await ls.json())?.value || [])[0]
+        if (last && String(last.subject || "") === subject) conversationId = last.conversationId || null
+      } catch (_e) { /* fall back to Question-ID matching */ }
+
+      const row: Record<string, unknown> = {
+        question_id: qid,
+        project: field(text, "Project"),
+        repo,
+        branch: field(text, "Branch"),
+        source: field(text, "Source") || (viaKey ? "coding agent" : "staff"),
+        return_channel: field(text, "Return-Channel") || "github-pr-comment",
+        pr_number: pr && /^\d+$/.test(pr) ? Number(pr) : null,
+        issue_number: issue && /^\d+$/.test(issue) ? Number(issue) : null,
+        subject,
+        body: text.slice(0, 20000),
+        from_email: s.agentmail_email || "agent-mail",
+        message_id: null,
+        conversation_id: conversationId,
+        received_at: new Date().toISOString(),
+        status: "pending",
+        error: null,
+      }
+      if (existing[0]) await sbPatch(`agent_questions?id=eq.${existing[0].id}`, row)
+      else await sbPost(`agent_questions`, row)
+
+      const title = subject.replace(/\[[^\]]*\]/g, "").trim().slice(0, 80) || qid
+      const pushed = await sendStaffPush(
+        `🤖 Agent question — ${field(text, "Source") || "coding agent"}`,
+        `${title}\nReply to the email starting APPROVE:, REJECT or CLARIFY.`,
+      )
+      await sbPost(`activity_log`, {
+        type: "agent_question",
+        actor: field(text, "Source") || "agent",
+        summary: `Blocking question ${qid} (ask endpoint): ${title}`,
+      }).catch(() => {})
+
+      return json({ ok: true, question_id: qid, mail: "sent", pushed })
     }
 
     if (action === "poll") {
