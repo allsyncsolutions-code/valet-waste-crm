@@ -6,7 +6,10 @@
 // 2-minute cron poll:
 //   • new [AGENT-QUESTION] email  → stored in agent_questions + staff push
 //   • David's reply starting APPROVE:/REJECT/CLARIFY → validated, matched by
-//     Question-ID / conversation, posted to the linked GitHub PR or issue
+//     Question-ID / conversation, posted to the linked GitHub PR or issue.
+//     Replies are matched from BOTH the inbox and Sent Items — dev-agents@ is
+//     an alias on David's mailbox, so a plain Reply goes to the agent's From
+//     address and only ever shows up in Sent.
 //   • informal replies ("looks good") → bounced back, never forwarded
 //
 // GET  (no action)  → OAuth callback: Microsoft redirects here with ?code&state
@@ -391,13 +394,84 @@ async function poll(s: Record<string, any>): Promise<Record<string, unknown>> {
     await sbPost(`agent_mail_seen`, { message_id: msgKey }).catch(() => {})
   }
 
+  // ---- Sent Items: a plain Reply to an agent question goes to the agent's
+  // From address (dev-agents@ is an alias), so David's decisions usually only
+  // appear in Sent — match them there too (covers Outlook and Perplexity
+  // sending through his mailbox).
+  const r2 = await fetch(
+    `${GRAPH}/me/mailFolders/sentitems/messages?$filter=${filter}&$orderby=receivedDateTime asc&$top=50&$select=${select}`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  )
+  const d2 = await r2.json().catch(() => ({}))
+  const sentMessages: any[] = r2.ok ? (d2?.value || []) : []
+  for (const m of sentMessages) {
+    const msgKey = String(m.internetMessageId || m.id)
+    const seen = await sbGet(`agent_mail_seen?message_id=eq.${encodeURIComponent(msgKey)}&select=message_id`).catch(() => [])
+    if (seen.length) continue
+    const subject = String(m.subject || "")
+    // A question email that originated from this mailbox lives in Sent too —
+    // never treat the question itself as a reply.
+    if (/\[AGENT-QUESTION\]/i.test(subject) && !/^\s*re\s*:/i.test(subject)) {
+      await sbPost(`agent_mail_seen`, { message_id: msgKey }).catch(() => {})
+      continue
+    }
+    const text = bodyText(m)
+    let q: any = null
+    const qid = (text.match(QID_RE) || [null])[0]
+    if (qid) {
+      const rows = await sbGet(`agent_questions?question_id=eq.${encodeURIComponent(qid)}&select=*`).catch(() => [])
+      q = rows[0] || null
+    }
+    if (!q && m.conversationId) {
+      const rows = await sbGet(
+        `agent_questions?conversation_id=eq.${encodeURIComponent(m.conversationId)}&status=in.(pending,error)&order=created_at.desc&limit=1&select=*`,
+      ).catch(() => [])
+      q = rows[0] || null
+    }
+    if (q && ["pending", "error"].includes(q.status) && msgKey !== q.message_id) {
+      const parsed = parseDecision(text)
+      if (parsed) {
+        const now = new Date().toISOString()
+        try {
+          const url = await postGithubComment(s, q, parsed.decision, parsed.body)
+          await sbPatch(`agent_questions?id=eq.${q.id}`, {
+            status: "posted", decision: parsed.decision, decision_body: parsed.body,
+            decision_message_id: msgKey, answered_at: now, posted_at: now,
+            github_comment_url: url, error: null,
+          })
+          decisions++
+          const target = q.pr_number ? `PR #${q.pr_number}` : `issue #${q.issue_number}`
+          await sendStaffPush(`✅ ${parsed.decision} posted`, `${q.question_id} → ${q.repo} ${target}`)
+        } catch (e) {
+          const why = e instanceof Error ? e.message : String(e)
+          await sbPatch(`agent_questions?id=eq.${q.id}`, {
+            status: "answered", decision: parsed.decision, decision_body: parsed.body,
+            decision_message_id: msgKey, answered_at: now, error: why,
+          }).catch(() => {})
+          await sendStaffPush(`⚠️ Decision saved but not posted`, `${q.question_id}: ${why.slice(0, 120)}`)
+          notes.push(`post ${q.question_id}: ${why.slice(0, 120)}`)
+        }
+      } else {
+        bounces++
+        await sendStaffPush(
+          `⚠️ Reply not delivered to agent`,
+          `Your reply to ${q.question_id} must start with APPROVE:, REJECT or CLARIFY on the first line — it's still waiting.`,
+        )
+      }
+      await sbPost(`agent_mail_seen`, { message_id: msgKey }).catch(() => {})
+    } else if (q) {
+      await sbPost(`agent_mail_seen`, { message_id: msgKey }).catch(() => {})
+    }
+    // sent mail with no matching question: skipped, not recorded
+  }
+
   await sbPatch(`app_settings?id=eq.1`, { agentmail_last_poll_at: new Date().toISOString() }).catch(() => {})
   // Prune the dedupe table (>14 days old).
   await fetch(`${SUPABASE_URL}/rest/v1/agent_mail_seen?seen_at=lt.${new Date(Date.now() - 14 * 86400e3).toISOString()}`, {
     method: "DELETE", headers: restHeaders,
   }).catch(() => {})
 
-  return { ok: true, scanned: messages.length, questions, decisions, bounces, ...(notes.length ? { notes } : {}) }
+  return { ok: true, scanned: messages.length + sentMessages.length, questions, decisions, bounces, ...(notes.length ? { notes } : {}) }
 }
 
 // ---------------------------------------------------------------------------
