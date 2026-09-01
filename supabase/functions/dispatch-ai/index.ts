@@ -3217,6 +3217,17 @@ async function runTool(name: string, input: any): Promise<unknown> {
   }
 }
 
+// Prompt caching: one ephemeral breakpoint on the LAST tool caches the entire
+// stable prefix — system prompt + all ~66 tool definitions (~17K tokens) — so
+// repeat calls within the TTL read it at ~10% of list price instead of
+// re-billing the whole block on every request and every agent-loop iteration.
+// The prefix must stay BYTE-IDENTICAL between requests: volatile context
+// (pins / pending actions / SMS mode) is injected into the last user message
+// in the handler, never into `system`.
+const CACHED_TOOLS = tools.map((t: any, i: number) =>
+  i === tools.length - 1 ? { ...t, cache_control: { type: "ephemeral" } } : t
+)
+
 async function callAnthropic(messages: unknown[], apiKey: string, system: string) {
   const r = await fetch(ANTHROPIC_URL, {
     method: "POST",
@@ -3225,7 +3236,7 @@ async function callAnthropic(messages: unknown[], apiKey: string, system: string
       "anthropic-version": "2023-06-01",
       "content-type": "application/json",
     },
-    body: JSON.stringify({ model: MODEL, max_tokens: 4096, system, tools, messages }),
+    body: JSON.stringify({ model: MODEL, max_tokens: 4096, system, tools: CACHED_TOOLS, messages }),
   })
   const data = await r.json()
   if (!r.ok) throw new Error(data?.error?.message || `Anthropic ${r.status}`)
@@ -3244,16 +3255,18 @@ Deno.serve(async (req) => {
     // presenting the service role key itself — it never reaches the browser.
     const token = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "")
     const isSystemCaller = !!token && token === SERVICE_KEY
+    let callerLabel = "unknown"
     if (!isSystemCaller) {
       const ures = token
         ? await fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${token}` } })
         : null
       if (!ures || !ures.ok) return json({ text: "Please sign in to use Trashy Randy.", actions: [] }, 401)
       const callerId = (await ures.json())?.id
-      const prof = callerId ? await sbGet(`profiles?id=eq.${enc(callerId)}&select=role`) : []
+      const prof = callerId ? await sbGet(`profiles?id=eq.${enc(callerId)}&select=role,full_name,email`) : []
       if (!["admin", "staff"].includes(prof?.[0]?.role)) {
         return json({ text: "Trashy Randy is only available to staff accounts.", actions: [] }, 403)
       }
+      callerLabel = prof?.[0]?.full_name || prof?.[0]?.email || "staff"
     }
 
     const apiKey = Deno.env.get("ANTHROPIC_API_KEY")
@@ -3280,25 +3293,47 @@ Deno.serve(async (req) => {
     const nowEt = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", dateStyle: "short" }).format(new Date())
     const dowEt = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", weekday: "long" }).format(new Date())
     system += `\n\nCURRENT DATE: ${nowEt} (a ${dowEt}). Resolve EVERY date the user gives you — including month + day like "Aug 24" or "March 3", and relatives like "today", "tomorrow", "next Monday" — against THIS date and year, then pass tools the exact YYYY-MM-DD. Never assume a different year.`
+
+    // Volatile context rides on the LAST USER MESSAGE, not the system prompt —
+    // the system+tools block must stay byte-identical across requests or the
+    // prompt cache (CACHED_TOOLS) never hits. The last user message changes
+    // every turn anyway, so this prefix costs nothing extra to cache.
+    let volatileCtx = ""
     // Pinned context + pending risky action echo back from the client (they
     // die with the request otherwise — the #1 cause of "found it, then lost it").
     if (Array.isArray(incomingPins) && incomingPins.length) {
-      system += `\n\nPINNED CONTEXT (resolved in recent turns — still current unless the conversation clearly moved on): ${JSON.stringify(incomingPins).slice(0, 1500)}\n"it", "that one", "that stop", "there", "do it" refer to a pinned record — pass its stop_id/property_id directly; do NOT search again.`
+      volatileCtx += `\n\nPINNED CONTEXT (resolved in recent turns — still current unless the conversation clearly moved on): ${JSON.stringify(incomingPins).slice(0, 1500)}\n"it", "that one", "that stop", "there", "do it" refer to a pinned record — pass its stop_id/property_id directly; do NOT search again.`
     }
     if (pending_action && pending_action.tool) {
-      system += `\n\nPENDING ACTION awaiting the user's yes/no: ${JSON.stringify(pending_action).slice(0, 1200)}\nIf they confirm (yes / do it / go ahead / yeah), call ${pending_action.tool} with EXACTLY this input — never re-resolve or re-search. If they decline or ask for something else, drop it silently and don't re-offer.`
+      volatileCtx += `\n\nPENDING ACTION awaiting the user's yes/no: ${JSON.stringify(pending_action).slice(0, 1200)}\nIf they confirm (yes / do it / go ahead / yeah), call ${pending_action.tool} with EXACTLY this input — never re-resolve or re-search. If they decline or ask for something else, drop it silently and don't re-offer.`
     }
     if (isSystemCaller && sms?.staff_name) {
-      system += `\n\nSMS MODE: You are replying by TEXT MESSAGE to ${sms.staff_name}, a staff member texting the company's business number from their phone. Rules: reply in plain conversational text only (no markdown, no bullet lists, no headers); keep it under 450 characters; keep the language clean and professional regardless of your tone setting — this is a real SMS from the business number. Your reply text is automatically delivered back to them as a text, so do NOT use the send_sms tool to answer them; only use send_sms if they ask you to text someone ELSE.`
+      callerLabel = `sms: ${sms.staff_name}`
+      volatileCtx += `\n\nSMS MODE: You are replying by TEXT MESSAGE to ${sms.staff_name}, a staff member texting the company's business number from their phone. Rules: reply in plain conversational text only (no markdown, no bullet lists, no headers); keep it under 450 characters; keep the language clean and professional regardless of your tone setting — this is a real SMS from the business number. Your reply text is automatically delivered back to them as a text, so do NOT use the send_sms tool to answer them; only use send_sms if they ask you to text someone ELSE.`
+    }
+    if (volatileCtx && messages.length && messages[messages.length - 1].role === "user") {
+      const last = messages[messages.length - 1]
+      messages[messages.length - 1] = { role: "user", content: volatileCtx.trim() + "\n\n" + last.content }
     }
 
     const actions: Array<{ tool: string; result: unknown }> = []
     const newPins: unknown[] = []
     let pendingOut: { tool: string; input: any } | null = null
     let finalText = ""
+    // Per-request token accounting (0053) — Anthropic's usage fields are
+    // mutually exclusive: input/output exclude cache read/write.
+    const usage = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0 }
+    let iterCount = 0
+    const turnsIn = messages.length
 
     for (let i = 0; i < 8; i++) {
       const res = await callAnthropic(messages, apiKey, system)
+      iterCount++
+      const u: any = res.usage || {}
+      usage.input += Number(u.input_tokens || 0)
+      usage.output += Number(u.output_tokens || 0)
+      usage.cacheWrite += Number(u.cache_creation_input_tokens || 0)
+      usage.cacheRead += Number(u.cache_read_input_tokens || 0)
       finalText = (res.content || [])
         .filter((b: any) => b.type === "text")
         .map((b: any) => b.text)
@@ -3336,6 +3371,21 @@ Deno.serve(async (req) => {
       }
       messages.push({ role: "user", content: results })
     }
+
+    // Best-effort telemetry (0053): who talked to Randy, how big the request
+    // was, and whether the prompt cache hit. Never blocks the reply.
+    try {
+      await sbPost("ai_usage", {
+        caller: callerLabel,
+        sms: isSystemCaller,
+        turns: turnsIn,
+        iterations: iterCount,
+        input_tokens: usage.input,
+        output_tokens: usage.output,
+        cache_write_tokens: usage.cacheWrite,
+        cache_read_tokens: usage.cacheRead,
+      })
+    } catch (_) { /* telemetry is non-critical */ }
 
     return json({ text: finalText || "Done.", actions, pins: newPins, pending_action: pendingOut })
   } catch (e) {
