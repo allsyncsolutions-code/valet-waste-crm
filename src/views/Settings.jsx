@@ -5,6 +5,7 @@ import { loadSettings, saveDepot, geocodeAddress, subscribeSettings, saveSmsTemp
 import { RichTextEditor, RichText } from '../components/RichText.jsx'
 import { paymentsStatus, savePaymentsCredentials, revealRequest, revealVerify } from '../lib/paymentsData.js'
 import { gmailStatus, gmailSaveCredentials, gmailStartConnect, gmailDisconnect, gmailTestSend } from '../lib/gmailData.js'
+import { agentMailStatus, agentMailSaveCredentials, agentMailStartConnect, agentMailDisconnect, agentMailPollNow, agentQuestionsRecent } from '../lib/agentMailData.js'
 import { platformBillingStatus, platformBillingCheckout, platformBillingPortal } from '../lib/platformBillingData.js'
 import { getSmsConfig, saveSmsConfig, sendTestSms, listSmsSubscriptions, ensureSmsSubscription } from '../lib/smsData.js'
 import Import from './Import.jsx'
@@ -41,6 +42,11 @@ export default function Settings({ app }) {
   const [gmail, setGmail] = useState({ loading: true, data: null, busy: false, err: null, msg: null })
   const [gmailCreds, setGmailCreds] = useState({ client_id: '', client_secret: '' })
   const [gmailTestTo, setGmailTestTo] = useState('david@allsynccrm.com')
+  // Agent approvals — Outlook return channel for coding-agent questions.
+  const [amail, setAmail] = useState({ loading: true, data: null, busy: false, err: null, msg: null })
+  const [amailCreds, setAmailCreds] = useState({ client_id: '', client_secret: '', tenant: '' })
+  const [amailGh, setAmailGh] = useState('')
+  const [amailQs, setAmailQs] = useState([])
   // Key reveal flow: null = closed; {step:'email'|'code'} = modal open; revealed plaintext after verify.
   const [reveal, setReveal] = useState(null)
   const [revealed, setRevealed] = useState(null)
@@ -152,11 +158,14 @@ export default function Settings({ app }) {
   useEffect(() => {
     refreshPay()
     refreshGmail()
+    refreshAgentMail()
     // returning from the portal pay screen / Gmail connect — clean the params
     const params = new URLSearchParams(window.location.search)
     if (params.get('gmail_connected')) setGmail((s) => ({ ...s, msg: 'Connected ✓ — replies will send from this Gmail.' }))
     if (params.get('gmail_error')) setGmail((s) => ({ ...s, err: `Google connect failed: ${params.get('gmail_error')}` }))
-    if (params.get('paid') || params.get('setup') || params.get('gmail_connected') || params.get('gmail_error')) {
+    if (params.get('agentmail_connected')) setAmail((s) => ({ ...s, msg: 'Connected ✓ — the mailbox is being watched for agent questions.' }))
+    if (params.get('agentmail_error')) setAmail((s) => ({ ...s, err: `Microsoft connect failed: ${params.get('agentmail_error')}` }))
+    if (params.get('paid') || params.get('setup') || params.get('gmail_connected') || params.get('gmail_error') || params.get('agentmail_connected') || params.get('agentmail_error')) {
       window.history.replaceState({}, '', window.location.pathname)
     }
   }, [])
@@ -168,6 +177,61 @@ export default function Settings({ app }) {
     } catch (e) {
       setGmail((s) => ({ ...s, loading: false, err: e.message || String(e) }))
     }
+  }
+
+  async function refreshAgentMail() {
+    try {
+      const d = await agentMailStatus()
+      setAmail((s) => ({ ...s, loading: false, data: d, err: null }))
+    } catch (e) {
+      setAmail((s) => ({ ...s, loading: false, err: e.message || String(e) }))
+    }
+    try { setAmailQs(await agentQuestionsRecent(5)) } catch (_e) { /* table may not exist yet */ }
+  }
+
+  async function saveAmailCreds(e) {
+    e.preventDefault()
+    const fields = {}
+    if (amailCreds.client_id.trim()) fields.client_id = amailCreds.client_id.trim()
+    if (amailCreds.client_secret.trim()) fields.client_secret = amailCreds.client_secret.trim()
+    if (amailCreds.tenant.trim()) fields.tenant = amailCreds.tenant.trim()
+    if (!Object.keys(fields).length) return
+    setAmail((s) => ({ ...s, busy: true, err: null, msg: null }))
+    try {
+      await agentMailSaveCredentials(fields)
+      setAmailCreds({ client_id: '', client_secret: '', tenant: '' })
+      await refreshAgentMail()
+      setAmail((s) => ({ ...s, msg: 'Saved ✓ — now hit Connect Outlook and sign in as the mailbox behind dev-agents@.' }))
+    } catch (e2) {
+      setAmail((s) => ({ ...s, err: e2.message || String(e2) }))
+    }
+    setAmail((s) => ({ ...s, busy: false }))
+  }
+
+  async function saveAmailGh() {
+    if (!amailGh.trim()) return
+    setAmail((s) => ({ ...s, busy: true, err: null, msg: null }))
+    try {
+      await agentMailSaveCredentials({ github_token: amailGh.trim() })
+      setAmailGh('')
+      await refreshAgentMail()
+      setAmail((s) => ({ ...s, msg: 'GitHub token saved ✓ — decisions can now post to PRs.' }))
+    } catch (e) {
+      setAmail((s) => ({ ...s, err: e.message || String(e) }))
+    }
+    setAmail((s) => ({ ...s, busy: false }))
+  }
+
+  async function connectAmail() {
+    setAmail((s) => ({ ...s, busy: true, err: null, msg: null }))
+    try {
+      const d = await agentMailStartConnect()
+      window.open(d.url, '_blank')
+      setAmail((s) => ({ ...s, msg: 'Finish the Microsoft sign-in in the new tab — this page updates when you\'re back.' }))
+    } catch (e) {
+      setAmail((s) => ({ ...s, err: e.message || String(e) }))
+    }
+    setAmail((s) => ({ ...s, busy: false }))
   }
 
   async function saveGmailCreds(e) {
@@ -682,6 +746,90 @@ export default function Settings({ app }) {
               <span style={{ fontSize: 11.5, color: '#9aa69e', marginLeft: 12 }}>Saving new credentials clears any existing connection.</span>
             </form>
           </>
+        )}
+      </div>
+
+      {/* agent approvals — Outlook return channel for coding agents */}
+      <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '20px 22px', marginBottom: 16 }}>
+        <div style={{ fontWeight: 700, fontSize: 16 }}>🤖 Agent approvals — Outlook return channel</div>
+        <div style={{ fontSize: 12.5, color: '#7c8a82', marginTop: 3, marginBottom: 16 }}>
+          Coding agents (Claude Code / ZCode / Kimi) email blocking questions to dev-agents@allsynccrm.com per AGENTS.md. Connect the Outlook mailbox behind that address — new questions push your phone, and email replies starting <b>APPROVE:</b>, <b>REJECT</b> or <b>CLARIFY</b> are posted back to the GitHub PR/issue automatically (mailbox checked every 2 minutes).
+        </div>
+        {amail.err && <div style={{ background: '#fdecea', border: '1px solid #f3b7b0', color: '#9a2c1e', borderRadius: 10, padding: '9px 12px', fontSize: 12.5, marginBottom: 14 }}>{amail.err}</div>}
+        {amail.msg && <div style={{ background: '#eef7f1', border: '1px solid #cfe7da', color: '#1f7a4d', borderRadius: 10, padding: '9px 12px', fontSize: 12.5, marginBottom: 14 }}>{amail.msg}</div>}
+
+        {amail.loading ? (
+          <div style={{ color: '#9aa69e', fontSize: 13, marginBottom: 16 }}>Checking connection…</div>
+        ) : (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
+            <span style={{ width: 10, height: 10, borderRadius: '50%', background: amail.data?.connected ? '#22b06b' : '#c08a2e', flex: 'none' }} />
+            <div style={{ flex: 1, minWidth: 180, fontWeight: 600, fontSize: 13.5 }}>
+              {amail.data?.connected
+                ? `Connected as ${amail.data.email}`
+                : amail.data?.configured ? 'Ready — hit Connect Outlook below' : 'Not set up (one-time Microsoft setup below)'}
+              {amail.data?.connected && (
+                <span style={{ fontWeight: 500, fontSize: 11.5, color: amail.data?.github_token_set ? '#7c8a82' : '#c0492f', marginLeft: 8 }}>
+                  {amail.data?.github_token_set ? 'GitHub token ✓' : 'GitHub token missing — decisions can\'t post'}
+                </span>
+              )}
+            </div>
+            <button onClick={refreshAgentMail} style={{ background: '#fff', border: '1px solid #e6eae6', color: '#5d6b63', borderRadius: 9, padding: '8px 12px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>Refresh</button>
+            {amail.data?.connected && (
+              <button onClick={async () => { setAmail((s) => ({ ...s, busy: true, err: null, msg: null })); try { const d = await agentMailPollNow(); setAmail((s) => ({ ...s, msg: `Checked ✓ — ${d.scanned ?? 0} new emails, ${d.questions ?? 0} questions, ${d.decisions ?? 0} decisions posted.` })); await refreshAgentMail() } catch (e) { setAmail((s) => ({ ...s, err: e.message || String(e) })) } setAmail((s) => ({ ...s, busy: false })) }} disabled={amail.busy} style={{ background: '#fff', border: '1px solid #1f7a4d55', color: '#1f7a4d', borderRadius: 9, padding: '8px 12px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', opacity: amail.busy ? 0.6 : 1 }}>Check now</button>
+            )}
+            {amail.data?.configured && !amail.data?.connected && (
+              <button onClick={connectAmail} disabled={amail.busy} style={{ background: '#1f7a4d', border: 'none', color: '#fff', borderRadius: 9, padding: '8px 14px', fontSize: 12.5, fontWeight: 700, cursor: 'pointer', opacity: amail.busy ? 0.6 : 1 }}>Connect Outlook</button>
+            )}
+            {amail.data?.connected && (
+              <button onClick={async () => { if (!window.confirm('Disconnect Outlook? Agent questions will stop flowing until you reconnect.')) return; setAmail((s) => ({ ...s, busy: true })); try { await agentMailDisconnect(); await refreshAgentMail(); setAmail((s) => ({ ...s, msg: 'Disconnected.' })) } catch (e) { setAmail((s) => ({ ...s, err: e.message || String(e) })) } setAmail((s) => ({ ...s, busy: false })) }} disabled={amail.busy} style={{ background: '#fff', border: '1px solid #c0492f55', color: '#c0492f', borderRadius: 9, padding: '8px 14px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>Disconnect</button>
+            )}
+          </div>
+        )}
+
+        {!amail.data?.connected && !amail.loading && (
+          <>
+            <div style={{ background: '#f7f9f7', border: '1px solid #e6eae6', borderRadius: 10, padding: '12px 14px', fontSize: 12.5, color: '#5d6b63', marginBottom: 14, lineHeight: 1.65 }}>
+              <b>One-time Microsoft setup</b> (entra.microsoft.com, signed in as david@allsynccrm.com — the "Chronos" app registration already has the right Mail permissions):
+              <div style={{ margin: '6px 0 0 14px' }}>
+                1. App registrations → Chronos → <b>Overview</b> → copy the <b>Application (client) ID</b>.<br />
+                2. <b>Authentication</b> → Add a platform → <b>Web</b> → add this exact Redirect URI:<br />
+                <span style={{ fontFamily: MONO, fontSize: 11.5, background: '#eef1ee', borderRadius: 6, padding: '2px 7px', display: 'inline-block', marginTop: 4, userSelect: 'all' }}>{amail.data?.redirect_uri || '…'}</span><br />
+                3. <b>Certificates &amp; secrets</b> → New client secret → copy the <b>Value</b> (shown once).<br />
+                4. Paste both below, Save, then Connect Outlook and sign in as the mailbox that receives dev-agents@ mail.
+              </div>
+            </div>
+            <form onSubmit={saveAmailCreds} style={{ marginBottom: 16 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 11 }}>
+                <SField label="Entra Client ID"><input value={amailCreds.client_id} onChange={(e) => setAmailCreds((c) => ({ ...c, client_id: e.target.value }))} style={inp} placeholder={amail.data?.configured ? 'Saved — enter new to replace' : 'xxxxxxxx-xxxx-…'} /></SField>
+                <SField label="Client Secret (Value)"><input type="password" value={amailCreds.client_secret} onChange={(e) => setAmailCreds((c) => ({ ...c, client_secret: e.target.value }))} style={inp} placeholder={amail.data?.configured ? 'Saved — enter new to replace' : 'secret value…'} /></SField>
+              </div>
+              <button type="submit" disabled={amail.busy || (!amailCreds.client_id.trim() && !amailCreds.client_secret.trim() && !amailCreds.tenant.trim())} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: amail.busy ? 0.6 : 1, marginTop: 11 }}>{amail.busy ? 'Saving…' : 'Save'}</button>
+              <span style={{ fontSize: 11.5, color: '#9aa69e', marginLeft: 12 }}>Saving new credentials clears any existing connection.</span>
+            </form>
+          </>
+        )}
+
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: amailQs.length ? 16 : 0, flexWrap: 'wrap' }}>
+          <input type="password" value={amailGh} onChange={(e) => setAmailGh(e.target.value)} placeholder={amail.data?.github_token_set ? 'GitHub token saved — paste new to replace' : 'GitHub fine-grained token (PR/issue comments on both repos)…'} style={{ ...inp, flex: 1, minWidth: 220 }} />
+          <button onClick={saveAmailGh} disabled={amail.busy || !amailGh.trim()} style={{ flex: 'none', background: '#fff', border: '1px solid #1f7a4d55', color: '#1f7a4d', borderRadius: 9, padding: '9px 14px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>Save token</button>
+        </div>
+
+        {amailQs.length > 0 && (
+          <div style={{ borderTop: '1px solid #eef1ee', paddingTop: 12 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: '#7c8a82', marginBottom: 8 }}>Recent agent questions</div>
+            {amailQs.map((q) => (
+              <div key={q.id} style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 12.5, padding: '5px 0', flexWrap: 'wrap' }}>
+                <span style={{
+                  flex: 'none', fontSize: 10.5, fontWeight: 700, borderRadius: 6, padding: '2px 7px',
+                  background: q.status === 'posted' ? '#eef7f1' : q.status === 'pending' ? '#fdf6e7' : '#fdecea',
+                  color: q.status === 'posted' ? '#1f7a4d' : q.status === 'pending' ? '#8a6a1e' : '#9a2c1e',
+                }}>{q.status === 'posted' ? (q.decision || 'POSTED') : q.status.toUpperCase()}</span>
+                <span style={{ fontFamily: MONO, fontSize: 11, color: '#9aa69e', flex: 'none' }}>{q.question_id}</span>
+                <span style={{ flex: 1, minWidth: 160, color: '#3a463f' }}>{(q.subject || '').replace(/\[[^\]]*\]/g, '').trim() || '(no title)'}</span>
+                <span style={{ flex: 'none', color: '#9aa69e', fontSize: 11 }}>{q.source || ''}{q.pr_number ? ` · PR #${q.pr_number}` : q.issue_number ? ` · #${q.issue_number}` : ''}</span>
+              </div>
+            ))}
+          </div>
         )}
       </div>
 
