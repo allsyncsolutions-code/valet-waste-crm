@@ -101,8 +101,9 @@ export default function MyDay({ app }) {
     setErr('')
     try {
       await markStopOnMyWay(s.id)
-      if (s.clientPhone) {
-        // Fire the client text; a failure never blocks the status.
+      if (s.clientPhone && s.notifyOnService !== false) {
+        // Fire the client text; a failure never blocks the status. Contacts who
+        // opted out of visit notifications (notify_on_service=false) are skipped.
         supabase.functions.invoke('sms', { body: {
           action: 'send',
           to: s.clientPhone,
@@ -111,59 +112,35 @@ export default function MyDay({ app }) {
           sentBy: driverName(s.driverId),
         } }).catch(() => {})
       }
-      logActivity({ type: 'on_my_way', summary: `${driverName(s.driverId)} en route to ${s.address || s.name}${s.clientPhone ? ' (client texted)' : ''}`, entityType: 'route_stop', entityId: s.id })
+      logActivity({ type: 'on_my_way', summary: `${driverName(s.driverId)} en route to ${s.address || s.name}${s.clientPhone && s.notifyOnService !== false ? ' (client texted)' : ''}`, entityType: 'route_stop', entityId: s.id })
       await refresh()
     } catch (e) { setErr(e.message || String(e)) }
     setBusyStop(null)
   }
 
-  // ---- billing prompt -------------------------------------------------------
-  // What this stop's invoice line would say (keep in sync with the stop-billing
-  // fn + the mobile app's askBill). One-time stops carry their own title/price
-  // (set in Plan Routes); subscription stops bill the property's per-pickup
-  // price under a "Week 2 Fri Pick Up" style title.
-  function billLabel(s) {
-    if (s.jobTitle || s.jobPrice != null) {
-      return { title: s.jobTitle || 'One-time service', price: s.jobPrice != null ? s.jobPrice : s.price, oneTime: true }
-    }
-    const d = new Date(date + 'T12:00:00')
-    const wd = ['Sun', 'Mon', 'Tues', 'Wed', 'Thurs', 'Fri', 'Sat'][d.getDay()]
-    return { title: `Week ${Math.ceil(d.getDate() / 7)} ${wd} Pick Up`, price: s.price, oneTime: false }
-  }
-
-  async function askBill(s) {
-    const { title, price, oneTime } = billLabel(s)
-    if (!(Number(price) > 0)) return // nothing billable — don't nag
-    const ok = window.confirm(
-      `Add to draft invoice?\n\n"${title}" ($${Number(price).toFixed(2)}) for ${s.clientName || 'the client'}` +
-      (oneTime ? '\n\nOne-time job — the invoice email is scheduled for tonight.' : '')
-    )
-    if (!ok) return
+  // Auto-bill on completion: the line drafts itself (idempotent per stop — the
+  // stop-billing fn quietly skips priceless stops). No more popup per stop.
+  async function autoBill(s) {
     try {
       const { data } = await supabase.functions.invoke('stop-billing', { body: { action: 'draft_stop_line', stopId: s.id, byName: driverName(s.driverId) } })
       if (data?.error) setErr(`Invoice: ${data.detail || data.error}`)
-      else await refresh()
     } catch (e) { setErr(`Invoice: ${e.message || String(e)}`) }
   }
 
   async function clockIn(s) {
-    // Ask BEFORE checking in: notify the client we've arrived, or check in
-    // silently? Either way the check-in itself is recorded as usual.
-    const notify = window.confirm(`Notify client that you've arrived at ${s.address || s.name}?\n\nOK = yes, text them · Cancel = no text (still checks in)`)
     setBusyStop(s.id)
     setErr('')
     try {
       const gps = await getGps()
       await checkInStop(s.id, gps)
       logActivity({ type: 'check_in', summary: `Checked in at ${s.address || s.name}`, entityType: 'route_stop', entityId: s.id })
-      // Tell the property contact we've arrived — only if the tech said yes.
-      // Server still decides whether to actually send. Best-effort.
-      if (notify) supabase.functions.invoke('notify-arrival', { body: { stopId: s.id, sentBy: driverName(s.driverId) } }).catch(() => {})
+      // Always tell the property contact we've arrived — the SERVER decides
+      // whether to actually send (suppression, opt-outs, at-most-once). Best-effort.
+      supabase.functions.invoke('notify-arrival', { body: { stopId: s.id, sentBy: driverName(s.driverId) } }).catch(() => {})
       maybeNudge(s)
       await refresh()
     } catch (e) { setErr(e.message || String(e)); setBusyStop(null); return }
     setBusyStop(null)
-    askBill(s)
   }
 
   async function markComplete(s) {
@@ -180,10 +157,10 @@ export default function MyDay({ app }) {
       logActivity({ type: 'check_out', summary: `Completed ${s.address || s.name}`, entityType: 'route_stop', entityId: s.id })
       // "Service complete" text — server-gated (only sends if completion texts are ON). Best-effort.
       supabase.functions.invoke('notify-complete', { body: { stopId: s.id, sentBy: driverName(s.driverId) } }).catch(() => {})
+      autoBill(s)
       await refresh()
     } catch (e) { setErr(e.message || String(e)); setBusyStop(null); return }
     setBusyStop(null)
-    askBill(s)
   }
 
   async function undo(s) {

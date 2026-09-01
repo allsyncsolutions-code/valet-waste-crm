@@ -110,19 +110,16 @@ export default function Drivers({ app, date: dateProp, onDateChange, embedded })
   }
 
   async function doCheckIn(stop) {
-    // Ask BEFORE checking in: notify the client we've arrived, or check in
-    // silently? Either way the check-in itself is recorded as usual.
-    const notify = window.confirm(`Notify client that you've arrived at ${stop.name}?\n\nOK = yes, text them · Cancel = no text (still checks in)`)
     setBusyStop(stop.id)
     setErr(null)
     try {
       const gps = await getGps()
       await checkInStop(stop.id, gps)
       logActivity({ type: 'check_in', summary: `Checked in at ${stop.name}`, entityType: 'route_stop', entityId: stop.id })
-      // Tell the property contact we've arrived — only if the driver said yes.
-      // Server still decides who actually gets it (multi-location managers
-      // auto-suppressed). Fire-and-forget.
-      if (notify) supabase.functions.invoke('notify-arrival', { body: { stopId: stop.id } }).catch(() => {})
+      // Always tell the property contact we've arrived — the SERVER decides
+      // who actually gets it (multi-location managers auto-suppressed,
+      // opt-outs honored, at-most-once per stop). Fire-and-forget.
+      supabase.functions.invoke('notify-arrival', { body: { stopId: stop.id } }).catch(() => {})
       maybeNudge(stop) // fire-and-forget; never blocks the check-in
       await refresh()
     } catch (e) { setErr(e.message || String(e)) }

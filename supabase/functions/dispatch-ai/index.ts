@@ -34,6 +34,11 @@ CRITICAL — CUSTOMER-FACING TEXT IS ALWAYS CLEAN: anything a customer could eve
 CRITICAL — YOUR NAME: "Trashy Randy" is an INTERNAL nickname for staff only. In anything a customer could see (texts to clients, invoice messages, notes on records), you are "Randy AI" — the Valet Waste assistant. Never use the name "Trashy Randy" in customer-facing text.
 
 Guidelines:
+- EXECUTE, DON'T RE-CONFIRM — THE #1 RULE. Users are working, often driving. When they ask for an action, DO IT on the first ask and report what you did in one short sentence. Never ask "are you sure?", never read a command back for approval, never make them repeat or spell an address you already resolved, never ask a question whose answer they just gave. The ONLY actions that get a one-sentence read-back first are truly risky ones: remove_stop, sending anything to a customer (send_sms, text_invoice, invite_portal, emailing an invoice), deleting data, and the business-wide settings (set_depot, set_message_template). For those use propose_action, then act immediately on a yes. Everything else — statuses, skips, moves, notes, invoice lines, add stop, route ops — executes first time, every time.
+- PIN WHAT YOU FIND: whenever you resolve the exact stop or property the user means (from GPS, an address, a stop number, a name), immediately call pin_stop or pin_property with its ids. Follow-ups like "do it", "skip it", "check me in there", "yeah that one" refer to the PINNED record — pass its stop_id/property_id directly; do NOT search again. Never say you found something and then fail to find it on the next turn.
+- If the context shows a PENDING ACTION and the user confirms (yes / do it / go ahead), call that tool with EXACTLY the given input — never re-resolve. If they decline or ask for something else, drop it silently and don't re-offer.
+- UNDO: "undo that" / "reverse it" / "put it back" → undo_last_action. It reverses the most recent action by you or the app. Report what was reversed in one short sentence; if nothing recent, say so plainly.
+- CLIENT NOTIFICATION OPT-OUT: clients tagged "No Service Notifications" (or with arrival texts turned off) asked out of visit notices. Never offer to text or notify them about service. If staff ask to put a client back on notices, that's update_client (arrival-text setting on) plus removing the tag.
 - When the user refers to a client by name, business, phone or email, call find_clients FIRST to resolve the exact customer_id before acting. If multiple match, ask which one. If none match and the action needs an existing client, say so. find_clients also resolves a SERVICE ADDRESS to its owning client (it falls back to matching properties), so use it to answer "who is the client for <address>?".
 - Infer sensible defaults: weekly pickup on Monday, monthly invoicing. Invoices are created as drafts unless told otherwise.
 - You can create_client, update_client, create_schedule (pickup), tag_client, create_invoice, mark_invoice_paid, add_stop_to_route, assemble_route, move_stops, assign_driver, list_routes, and create_route. Use get_overview for balances/counts and list_routes to see which routes exist.
@@ -83,8 +88,8 @@ const DEFAULT_TONE = "spicy"
 
 // Field-verification playbook — drivers rebuilding route data from the truck.
 const FIELD_OPS = `FIELD MODE — "Check My Location" (route/data cleanup):
-Drivers tap Check My Location at each stop and you receive their GPS. They are DRIVING — ask ONE short question per turn. The flow:
-1) find_nearby_properties with the GPS. Confirm the closest match by FULL address, always saying the zip when two candidates are similar ("1711 Main St in 32277 — is that where you are?"). Never assume between lookalike streets in different zips.
+Drivers tap Check My Location at each stop and you receive their GPS. They are DRIVING — ask ONE short question per turn, and only when the answer isn't already on the table. The flow:
+1) find_nearby_properties with the GPS. If ONE match clearly wins (it's the nearest by a wide margin — say under ~0.15 mi with the next candidate far behind), do NOT ask "is that where you are?" — announce it ("That's 1711 Main St, 32277."), pin_stop it, and continue the flow. Only ask the one-line full-address confirm (always with zip) when two DIFFERENT addresses are genuinely plausible — lookalike streets in different zips or two close scores.
    DUPLICATES: the SAME address on file twice (under two different clients) is expected and harmless — find_nearby_properties already collapses those into one match for you. NEVER ask the driver which client it belongs to, never list both, never stop the flow. Work the copy you were handed, and once — at the end of that stop's reply — say something like "heads up, that address is on file twice; review it in Clients at the end of the day." Then move on. Lookalike-but-different addresses (different street or zip) are a real question; identical addresses are not.
 2) If they say no and give a different address, or nothing on file is close: ask who the client is. find_clients to match; create_client if new (name alone is fine for now).
 3) Ask: one-time stop, or every <today's weekday>? If recurring, edit_property to add that weekday to pickup_days.
@@ -792,6 +797,55 @@ const tools = [
     },
   },
   {
+    name: "pin_stop",
+    description:
+      "Pin the route stop the user means, immediately after you resolve it (from GPS, an address, or a stop number). The pin carries across turns: follow-ups like 'do it', 'skip it', 'check in there', 'that one' should pass this stop_id directly instead of searching again. Call it the moment you know which stop they mean.",
+    input_schema: {
+      type: "object",
+      properties: {
+        stop_id: { type: "string", description: "route_stops id (required)." },
+        stop_number: { type: "number", description: "The visit number (seq) shown in route lists." },
+        address: { type: "string", description: "The FULL stored address, verbatim." },
+        route_code: { type: "string" },
+        date: { type: "string", description: "YYYY-MM-DD of the stop's route." },
+      },
+      required: ["stop_id"],
+    },
+  },
+  {
+    name: "pin_property",
+    description:
+      "Pin the property (service address) the user means, immediately after you resolve it. Later turns can pass this property_id directly instead of re-searching.",
+    input_schema: {
+      type: "object",
+      properties: {
+        property_id: { type: "string", description: "properties id (required)." },
+        address: { type: "string", description: "The FULL stored address, verbatim." },
+        client_name: { type: "string" },
+      },
+      required: ["property_id"],
+    },
+  },
+  {
+    name: "propose_action",
+    description:
+      "For the rare risky action that needs one read-back (remove a stop, text/email a customer, delete data, business-wide settings): call this INSTEAD of executing, with the exact tool name and fully-resolved input you would use, then tell the user in one short sentence what you're about to do. If they say yes, execute exactly this input. Never use this for routine actions — those execute immediately.",
+    input_schema: {
+      type: "object",
+      properties: {
+        tool: { type: "string", description: "The tool that would run (e.g. remove_stop, send_sms)." },
+        input: { type: "object", description: "The exact arguments, with resolved ids included." },
+      },
+      required: ["tool", "input"],
+    },
+  },
+  {
+    name: "undo_last_action",
+    description:
+      "Reverse the most recent field action (by you or the app): status changes, check-ins/outs, skips, moves, removed stops, route reorders, one-time day changes. Use when the user says 'undo that', 'reverse it', 'put it back'.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
     name: "cleanup_unconfirmed_stops",
     description:
       "End-of-day data cleanup: list route stops for a date that were never checked in (skipped stops are left alone). Call WITHOUT confirm first — it changes nothing and returns the list; read it back to the user. Only after an explicit YES call again with confirm=true, which removes those stops from the route AND pauses their addresses (recoverable on the Clients screen — nothing is deleted).",
@@ -1016,6 +1070,42 @@ async function logActivity(type: string, summary: string, entityType?: string, e
   } catch (_) { /* logging is non-critical */ }
 }
 
+// Best-effort undo log (0052): every mutating field action snapshots its
+// before-state so undo_latest()/the ↩ button can reverse it. Never throws.
+async function logUndo(actionType: string, entityId: string | null, before: unknown, after?: unknown) {
+  try {
+    await sbPost("undoable_actions", {
+      source: "randy",
+      actor: "Trashy Randy",
+      action_type: actionType,
+      entity_table: entityId ? "route_stops" : null,
+      entity_id: entityId,
+      before,
+      after: after ?? null,
+    })
+  } catch (_) { /* undo is best-effort; the action itself must not fail */ }
+}
+
+// The route_stops fields undo_action() restores, as a PostgREST select.
+const UNDO_SELECT =
+  "id,route_id,seq,status,check_in,check_out,check_in_lat,check_in_lng,check_out_lat,check_out_lng,on_my_way_at,skip_reason,skipped_by,skipped_at,property_id"
+async function snapshotStop(stopId: string): Promise<any | null> {
+  try {
+    const r = await sbGet(`route_stops?id=eq.${enc(stopId)}&select=${UNDO_SELECT}`)
+    return r[0] ?? null
+  } catch (_) { return null }
+}
+
+async function undoLastActionTool(): Promise<unknown> {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/undo_latest`, {
+    method: "POST",
+    headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ p_source: "randy", p_within_minutes: 240, p_undone_by: "Trashy Randy" }),
+  })
+  if (!r.ok) throw new Error(`undo_latest: ${r.status} ${await r.text()}`)
+  return await r.json()
+}
+
 function logForTool(name: string, out: any): Promise<void> | undefined {
   switch (name) {
     case "create_client": return logActivity("client_created", `Added client ${out.name}`, "customer", out.id)
@@ -1118,7 +1208,11 @@ async function nearbyRouteStop(address: string, date: string) {
 }
 
 // ---- multi-route helpers (mirror the frontend's date-aware model) ----
-const today = () => new Date().toISOString().slice(0, 10)
+// Business timezone, NOT UTC: the edge runtime rolls to a new day at 8pm ET,
+// which made every "today" default resolve to tomorrow's unbuilt routes all
+// evening. en-CA dateStyle gives YYYY-MM-DD.
+const today = () =>
+  new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", dateStyle: "short" }).format(new Date())
 
 async function driverName(id: string | null): Promise<string | null> {
   if (!id) return null
@@ -1774,16 +1868,20 @@ async function skipStopTool(a: any) {
   const stop = await findStopFor(prop.id, date, a.route_code)
   if (!stop) return { ok: false, note: `No stop for ${prop.address} on ${date} — the route may not be built yet.` }
   if (a.undo) {
+    const before = await snapshotStop(stop.id)
     await sbPatch(`route_stops?id=eq.${enc(stop.id)}`, { status: "pending", skip_reason: null, skipped_by: null, skipped_at: null })
+    await logUndo("stop_status", stop.id, before)
     return { ok: true, undone: true, address: prop.address, property_id: prop.id, date, route: stop.route_code }
   }
   if (stop.status === "done") return { ok: false, note: `${prop.address} is already checked out (done) on ${date} — nothing to skip.` }
+  const before = await snapshotStop(stop.id)
   await sbPatch(`route_stops?id=eq.${enc(stop.id)}`, {
     status: "skipped",
     skip_reason: (a.reason ?? "").trim() || null,
     skipped_by: "Trashy Randy",
     skipped_at: new Date().toISOString(),
   })
+  await logUndo("stop_status", stop.id, before)
   return { ok: true, address: prop.address, property_id: prop.id, date, route: stop.route_code, reason: (a.reason ?? "").trim() || null }
 }
 
@@ -1794,7 +1892,7 @@ async function movePickupOnce(a: any) {
   const serviceDate = a.service_date ? String(a.service_date).trim() : null
   const prop = await resolveOneProperty(a)
   if (prop.needs_clarification) return prop
-  await sbPost("property_day_overrides", {
+  const [override] = await sbPost("property_day_overrides", {
     property_id: prop.id,
     skip_date: skipDate,
     service_date: serviceDate,
@@ -1804,7 +1902,9 @@ async function movePickupOnce(a: any) {
   // If the skip_date route is already built, move (or skip) the live stop too.
   let stopAction = "no built stop on that date yet — the override will apply when the route is built"
   const stop = await findStopFor(prop.id, skipDate)
+  let before: any = null
   if (stop && stop.status !== "done") {
+    before = await snapshotStop(stop.id)
     if (serviceDate) {
       const target = await ensureRoute(stop.route_code || await defaultRouteCode(), serviceDate)
       const existing = await sbGet(`route_stops?route_id=eq.${enc(target.id)}&select=seq`)
@@ -1821,6 +1921,8 @@ async function movePickupOnce(a: any) {
       stopAction = "marked the built stop skipped"
     }
   }
+  // Undo = delete the override row + restore the built stop's prior placement.
+  await logUndo("day_override", stop?.id ?? null, { override_id: override?.id ?? null, stop: before })
   return { ok: true, address: prop.address, property_id: prop.id, skip_date: skipDate, service_date: serviceDate, stop_action: stopAction, note: "Recurring schedule unchanged — this applies to that one date only." }
 }
 
@@ -2898,7 +3000,9 @@ async function setStopStatus(a: any) {
   else if (st === "check_out") patch = { status: "done", check_in: s.check_in ?? now, check_out: now }
   else if (st === "reset") patch = { status: "pending", check_in: null, check_out: null, on_my_way_at: null }
   else throw new Error("status must be on_my_way, check_in, check_out, or reset.")
+  const before = await snapshotStop(s.id)
   await sbPatch(`route_stops?id=eq.${enc(s.id)}`, patch)
+  await logUndo("stop_status", s.id, before, patch)
   return { ok: true, stop_id: s.id, address: s.properties?.address || s.properties?.name, route: s.routes?.code ?? null, date: s.routes?.service_date ?? null, set: st }
 }
 
@@ -2914,17 +3018,22 @@ async function moveStopTool(a: any) {
   else throw new Error("Give direction 'up'/'down' or a position number.")
   const [row] = stops.splice(idx, 1)
   stops.splice(to, 0, row)
+  const before = await snapshotStop(s.id)
   for (let i = 0; i < stops.length; i++) {
     if (stops[i].seq !== i + 1) await sbPatch(`route_stops?id=eq.${enc(stops[i].id)}`, { seq: i + 1 })
   }
+  await logUndo("stop_moved", s.id, before)
   return { ok: true, address: s.properties?.address || s.properties?.name, new_position: to + 1, of: stops.length }
 }
 
 async function removeStopTool(a: any) {
   const s = await resolveStop(a)
   if (s.needs_clarification) return s
+  // Full row snapshot — undo re-inserts it with the same id (photos survive).
+  const full = (await sbGet(`route_stops?id=eq.${enc(s.id)}&select=*`))[0]
   await sbDel(`route_stops?id=eq.${enc(s.id)}`)
-  return { ok: true, removed: s.properties?.address || s.properties?.name, route: s.routes?.code ?? null, date: s.routes?.service_date ?? null, note: "Off the route — the address itself is kept." }
+  await logUndo("stop_removed", s.id, full)
+  return { ok: true, removed: s.properties?.address || s.properties?.name, route: s.routes?.code ?? null, date: s.routes?.service_date ?? null, note: "Off the route — the address itself is kept. Say 'undo that' to put it right back." }
 }
 
 async function addInvoiceLine(a: any) {
@@ -2977,7 +3086,9 @@ async function cleanupUnconfirmed(a: any) {
   let removed = 0
   const pausedIds = new Set<string>()
   for (const s of unconfirmed) {
+    const full = (await sbGet(`route_stops?id=eq.${enc(s.id)}&select=*`))[0]
     await sbDel(`route_stops?id=eq.${enc(s.id)}`)
+    await logUndo("stop_removed", s.id, full)
     removed++
     if (s.property_id && !pausedIds.has(s.property_id)) {
       await sbPatch(`properties?id=eq.${enc(s.property_id)}`, { paused: true })
@@ -3021,9 +3132,11 @@ async function optimizeRouteTool(a: any) {
     curLng = l.lng
   }
   const finalOrder = [...fixed, ...ordered, ...pool, ...unlocated]
+  const before = (stops as any[]).map((s: any) => ({ stop_id: s.id, seq: s.seq }))
   for (let i = 0; i < finalOrder.length; i++) {
     if (finalOrder[i].seq !== i + 1) await sbPatch(`route_stops?id=eq.${enc(finalOrder[i].id)}`, { seq: i + 1 })
   }
+  await logUndo("route_optimized", null, before)
   return {
     ok: true,
     route: code,
@@ -3087,6 +3200,7 @@ async function runTool(name: string, input: any): Promise<unknown> {
     case "add_invoice_line": return await addInvoiceLine(input)
     case "cleanup_unconfirmed_stops": return await cleanupUnconfirmed(input)
     case "optimize_route": return await optimizeRouteTool(input)
+    case "undo_last_action": return await undoLastActionTool()
     case "add_property": return await addProperty(input)
     case "untag_client": return await untagClient(input)
     case "list_tags": return await listTagsTool()
@@ -3150,7 +3264,7 @@ Deno.serve(async (req) => {
       })
     }
 
-    const { messages: incoming, sms } = await req.json()
+    const { messages: incoming, sms, pins: incomingPins, pending_action } = await req.json()
     const messages: any[] = (incoming || [])
       .filter((m: any) => m && m.text)
       .map((m: any) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.text }))
@@ -3166,11 +3280,21 @@ Deno.serve(async (req) => {
     const nowEt = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", dateStyle: "short" }).format(new Date())
     const dowEt = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", weekday: "long" }).format(new Date())
     system += `\n\nCURRENT DATE: ${nowEt} (a ${dowEt}). Resolve EVERY date the user gives you — including month + day like "Aug 24" or "March 3", and relatives like "today", "tomorrow", "next Monday" — against THIS date and year, then pass tools the exact YYYY-MM-DD. Never assume a different year.`
+    // Pinned context + pending risky action echo back from the client (they
+    // die with the request otherwise — the #1 cause of "found it, then lost it").
+    if (Array.isArray(incomingPins) && incomingPins.length) {
+      system += `\n\nPINNED CONTEXT (resolved in recent turns — still current unless the conversation clearly moved on): ${JSON.stringify(incomingPins).slice(0, 1500)}\n"it", "that one", "that stop", "there", "do it" refer to a pinned record — pass its stop_id/property_id directly; do NOT search again.`
+    }
+    if (pending_action && pending_action.tool) {
+      system += `\n\nPENDING ACTION awaiting the user's yes/no: ${JSON.stringify(pending_action).slice(0, 1200)}\nIf they confirm (yes / do it / go ahead / yeah), call ${pending_action.tool} with EXACTLY this input — never re-resolve or re-search. If they decline or ask for something else, drop it silently and don't re-offer.`
+    }
     if (isSystemCaller && sms?.staff_name) {
       system += `\n\nSMS MODE: You are replying by TEXT MESSAGE to ${sms.staff_name}, a staff member texting the company's business number from their phone. Rules: reply in plain conversational text only (no markdown, no bullet lists, no headers); keep it under 450 characters; keep the language clean and professional regardless of your tone setting — this is a real SMS from the business number. Your reply text is automatically delivered back to them as a text, so do NOT use the send_sms tool to answer them; only use send_sms if they ask you to text someone ELSE.`
     }
 
     const actions: Array<{ tool: string; result: unknown }> = []
+    const newPins: unknown[] = []
+    let pendingOut: { tool: string; input: any } | null = null
     let finalText = ""
 
     for (let i = 0; i < 8; i++) {
@@ -3187,6 +3311,18 @@ Deno.serve(async (req) => {
       const results = []
       for (const block of res.content) {
         if (block.type !== "tool_use") continue
+        // Pin/propose are control-plane calls: collect them for the response
+        // instead of running anything.
+        if (block.name === "pin_stop" || block.name === "pin_property") {
+          newPins.push({ ...(block.input || {}) })
+          results.push({ type: "tool_result", tool_use_id: block.id, content: JSON.stringify({ ok: true }) })
+          continue
+        }
+        if (block.name === "propose_action") {
+          pendingOut = { tool: String(block.input?.tool || ""), input: block.input?.input || {} }
+          results.push({ type: "tool_result", tool_use_id: block.id, content: JSON.stringify({ ok: true, proposed: true }) })
+          continue
+        }
         try {
           const out = await runTool(block.name, block.input)
           if (block.name !== "find_clients" && block.name !== "get_overview" && block.name !== "list_routes" && block.name !== "list_needs_review" && block.name !== "find_duplicates" && block.name !== "list_skipped_stops" && block.name !== "list_route_stops" && block.name !== "list_services" && block.name !== "list_automations" && block.name !== "list_jobs" && block.name !== "get_client_invoices" && block.name !== "get_tech_pay" && block.name !== "get_service_history" && block.name !== "list_activity" && block.name !== "list_messages" && block.name !== "list_team" && block.name !== "list_quotes" && block.name !== "list_service_requests") {
@@ -3201,7 +3337,7 @@ Deno.serve(async (req) => {
       messages.push({ role: "user", content: results })
     }
 
-    return json({ text: finalText || "Done.", actions })
+    return json({ text: finalText || "Done.", actions, pins: newPins, pending_action: pendingOut })
   } catch (e) {
     return json({ text: `Something went wrong: ${e instanceof Error ? e.message : String(e)}`, actions: [] }, 200)
   }

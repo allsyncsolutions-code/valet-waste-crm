@@ -5,12 +5,15 @@
 // multi-location manager with dozens of texts a day) — unless that contact has
 // an explicit per-contact override.
 //
-//   customers.notify_on_service:  TRUE = always notify, FALSE = never,
+//   customers.notify_on_service:  TRUE = always notify, FALSE = never (the
+//                                 email opt-out link sets this),
 //                                 NULL = auto (notify only single-property contacts)
 //   route_stops.arrival_notified_at:  atomic at-most-once guard per stop.
 //
-// The actual SMS goes out through the existing `sms` edge function's `send`
-// action, so provider selection (RingCentral→Telnyx) and logging are reused.
+// Channel: SMS via the `sms` edge function when it's live; while texting is
+// paused (or the contact has no phone but has an email) the notice goes out
+// by email instead, with a one-tap opt-out link in the footer (0052). When
+// SMS resumes, texts take over again automatically.
 //
 // Deploy with JWT verification OFF (clients call with the anon key):
 //   supabase functions deploy notify-arrival --no-verify-jwt
@@ -72,10 +75,58 @@ async function sendVia(to: string, body: string, customerId: string, sentBy?: st
   return d
 }
 
+// Lazily mint the customer's opt-out bearer token (0052) — only contacts who
+// actually receive an email get one. Same model as portal_share_token.
+async function getOptoutToken(cust: any): Promise<string | null> {
+  try {
+    if (cust.notify_optout_token) return cust.notify_optout_token
+    if (!cust.email) return null
+    const bytes = new Uint8Array(12)
+    crypto.getRandomValues(bytes)
+    const token = Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("")
+    await fetch(`${SUPABASE_URL}/rest/v1/customers?id=eq.${cust.id}`, {
+      method: "PATCH",
+      headers: { ...rest, Prefer: "return=representation" },
+      body: JSON.stringify({ notify_optout_token: token }),
+    })
+    return token
+  } catch (_e) { return null }
+}
+
+async function sendEmail(to: string, subject: string, textBody: string, cust: any) {
+  const key = Deno.env.get("SENDGRID_API_KEY")
+  const from = Deno.env.get("SENDGRID_FROM") || "valetwastefl@allsynccrm.com"
+  if (!key) return { sent: false, note: "no_sendgrid_key" }
+  const token = await getOptoutToken(cust)
+  const footer = token
+    ? `<p style="margin:26px 0 0;font-size:12px;color:#8a9490;">Don't want visit notifications? <a href="${SUPABASE_URL}/functions/v1/notify-prefs?token=${token}" style="color:#5d6b63;">Tap here to turn them off</a>.</p>`
+    : ""
+  const html = `<div style="font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;color:#22302a;">
+<div style="background:#1f7a4d;color:#fff;padding:18px 22px;border-radius:10px 10px 0 0;font-weight:700;font-size:16px;">Valet Waste FL</div>
+<div style="padding:20px 22px;border:1px solid #e2e8e4;border-top:0;border-radius:0 0 10px 10px;font-size:15px;line-height:1.5;">
+<p style="margin:0;">${textBody}</p>${footer}
+</div></div>`
+  const r = await fetch("https://api.sendgrid.com/v3/mail/send", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      personalizations: [{ to: [{ email: to }] }],
+      from: { email: from, name: "Valet Waste FL" },
+      subject,
+      content: [
+        { type: "text/plain", value: textBody },
+        { type: "text/html", value: html },
+      ],
+    }),
+  })
+  if (!r.ok) throw new Error(`sendgrid ${r.status} ${await r.text()}`)
+  return { sent: true }
+}
+
 async function notifyArrival(stopId: string, sentBy?: string | null) {
   const r = await fetch(
     `${SUPABASE_URL}/rest/v1/route_stops?id=eq.${stopId}&select=id,arrival_notified_at,` +
-      `properties(name,address,customer_id,customers(id,name,contact_name,phone,notify_on_service))`,
+      `properties(name,address,customer_id,customers(id,name,contact_name,phone,email,notify_on_service,notify_optout_token))`,
     { headers: rest },
   )
   const rows = await r.json()
@@ -87,7 +138,8 @@ async function notifyArrival(stopId: string, sentBy?: string | null) {
   const cust = prop.customers || null
   if (!cust) return { ok: true, skipped: "no_customer" }
   const phone = (cust.phone || "").trim()
-  if (!phone) return { ok: true, skipped: "no_phone" }
+  const email = (cust.email || "").trim()
+  if (!phone && !email) return { ok: true, skipped: "no_contact" }
 
   const override = cust.notify_on_service // true / false / null
   let send = false, reason = ""
@@ -108,8 +160,23 @@ async function notifyArrival(stopId: string, sentBy?: string | null) {
   const body = `Hi ${who}, your Valet Waste FL technician has arrived at ${where} and is servicing your property now. Thank you! — Valet Waste FL`
 
   try {
-    const res = await sendVia(phone, body, cust.id, sentBy)
-    return { ok: true, sent: true, reason, provider: res?.provider }
+    if (phone) {
+      const res = await sendVia(phone, body, cust.id, sentBy)
+      if (res?.paused) {
+        // Texting is paused business-wide: email instead of silently dropping
+        // the notice (and don't burn the at-most-once claim if we can't).
+        if (email) {
+          await sendEmail(email, "Your Valet Waste technician has arrived", body, cust)
+          return { ok: true, sent: true, via: "email", reason, note: "texts paused — emailed instead" }
+        }
+        await releaseArrival(stopId)
+        return { ok: true, skipped: "paused_no_email" }
+      }
+      return { ok: true, sent: true, reason, provider: res?.provider }
+    }
+    // No phone on file — email is the channel.
+    await sendEmail(email, "Your Valet Waste technician has arrived", body, cust)
+    return { ok: true, sent: true, via: "email", reason }
   } catch (e) {
     await releaseArrival(stopId)
     return { ok: false, error: e instanceof Error ? e.message : String(e) }
