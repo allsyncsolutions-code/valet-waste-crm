@@ -47,6 +47,9 @@ import {
   normAddress,
   matchPropertyByAddress,
   loadRouteCombos,
+  resetRouteDay,
+  restoreDay,
+  removeStopsByIds,
   loadDayRouteSummaries,
   copyRouteStopsToDate,
 } from '../lib/routesData.js'
@@ -94,6 +97,11 @@ export default function RoutesView({ app }) {
   const [dayTarget, setDayTarget] = useState('')
   const [dayScope, setDayScope] = useState('once') // 'once' | 'permanent'
   const [dayBusy, setDayBusy] = useState(false)
+  // Session undo stack for plan-mode actions (newest last): added stops and
+  // day resets. Lives only as long as this view is mounted — after a page
+  // reload the trail is gone (a reset's stops can no longer be brought back).
+  const [planUndo, setPlanUndo] = useState([])
+  const [resetBusy, setResetBusy] = useState(false)
   const setMode = (m) => { setModeState(m); app.setRoutesMode && app.setRoutesMode(m) }
   // Follow external switches (e.g. a tech tapping the old Drivers & Field tab).
   useEffect(() => { if (app.routesMode && app.routesMode !== mode) setModeState(app.routesMode) }, [app.routesMode])
@@ -228,6 +236,58 @@ export default function RoutesView({ app }) {
     }
   }
 
+  // ---- plan-mode Reset day + Undo ------------------------------------------
+  const pushPlanUndo = (entry) => setPlanUndo((s) => [...s.slice(-9), entry])
+  const lastPlanUndo = planUndo[planUndo.length - 1] || null
+  const planUndoLabel = lastPlanUndo
+    ? lastPlanUndo.kind === 'reset'
+      ? `Undo day reset (${lastPlanUndo.stops.length} stop${lastPlanUndo.stops.length === 1 ? '' : 's'})`
+      : `Undo add (${lastPlanUndo.stopIds.length} stop${lastPlanUndo.stopIds.length === 1 ? '' : 's'})`
+    : ''
+
+  async function handleUndo() {
+    if (!lastPlanUndo) return
+    setErr(null)
+    try {
+      if (lastPlanUndo.kind === 'reset') {
+        await restoreDay({ stops: lastPlanUndo.stops, photos: lastPlanUndo.photos })
+        logActivity({ type: 'day_reset_undone', summary: `Undid day reset — restored ${lastPlanUndo.stops.length} stop${lastPlanUndo.stops.length === 1 ? '' : 's'} to Route ${lastPlanUndo.code} for ${prettyDate(lastPlanUndo.date)}`, entityType: 'route', entityId: lastPlanUndo.routeId })
+      } else {
+        await removeStopsByIds(lastPlanUndo.stopIds)
+        logActivity({ type: 'add_undone', summary: `Undid add — removed ${lastPlanUndo.stopIds.length} stop${lastPlanUndo.stopIds.length === 1 ? '' : 's'} from Route ${lastPlanUndo.code} for ${prettyDate(lastPlanUndo.date)}`, entityType: 'route', entityId: lastPlanUndo.routeId })
+      }
+      setPlanUndo((s) => s.slice(0, -1))
+      await refresh()
+    } catch (e) {
+      setErr(e.message || String(e))
+    }
+  }
+
+  async function handleResetDay() {
+    if (resetBusy) return
+    if (!route || !stops.length) { setErr('Nothing to reset — this route has no stops for the day.'); return }
+    const worked = stops.filter((s) => s.checkIn || s.checkOut || s.status !== 'pending').length
+    const msg = `Reset ${currentDef.name} for ${prettyDate(routeSel)}?\n\n`
+      + `This removes all ${stops.length} stop${stops.length === 1 ? '' : 's'} from this route for this day`
+      + `${worked ? ` — including ${worked} that already have field activity (check-ins, completions, photos)` : ''}. `
+      + `Other routes and the clients/properties themselves are untouched.\n\n`
+      + `You'll get an Undo option right after, in case this was an accident.`
+    if (!window.confirm(msg)) return
+    setResetBusy(true); setErr(null)
+    try {
+      const res = await resetRouteDay(route.id)
+      if (!res.removed.length) { setErr('Nothing to reset — this route has no stops for the day.'); return }
+      pushPlanUndo({ kind: 'reset', stops: res.removed, photos: res.photos, routeId: route.id, code: routeCode, date: routeSel })
+      const who = await currentActorName().catch(() => null)
+      logActivity({ type: 'day_reset', summary: `${who || 'Admin'} reset ${currentDef.name} for ${prettyDate(routeSel)} — removed ${res.removed.length} stop${res.removed.length === 1 ? '' : 's'}${res.photos.length ? ` (incl. ${res.photos.length} photo${res.photos.length === 1 ? '' : 's'})` : ''}`, entityType: 'route', entityId: route.id })
+      await refresh(routeSel)
+    } catch (e) {
+      setErr(e.message || String(e))
+    } finally {
+      setResetBusy(false)
+    }
+  }
+
   function handleOptimize() {
     const before = routeMetrics(stops, depot)
     const { fixed, movable } = splitFixed(stops)
@@ -293,7 +353,8 @@ export default function RoutesView({ app }) {
     setOptimized(false)
     withWrite(async () => {
       const r = route || await ensureRoute(routeCode, routeSel) // create the route for this date if needed
-      await addStopToRoute(r.id, propStop, seq)
+      const stopId = await addStopToRoute(r.id, propStop, seq)
+      pushPlanUndo({ kind: 'added', stopIds: [stopId], routeId: r.id, code: routeCode, date: routeSel })
       await refresh()
     })
   }
@@ -351,6 +412,7 @@ export default function RoutesView({ app }) {
         name: newStop.name, address: addr, service: newStop.service, customerId: custId, price: hasPrice ? price : null,
         jobTitle: newStop.title, jobDescription: newStop.description, jobPrice: hasPrice ? price : null,
       })
+      if (res.stopId) pushPlanUndo({ kind: 'added', stopIds: [res.stopId], routeId: res.route?.id, code: routeCode, date: routeSel })
       setShowNewStop(false)
       setNewStop(BLANK_STOP)
       await refresh(routeSel)
@@ -411,7 +473,8 @@ export default function RoutesView({ app }) {
     setMassBusy(true)
     setErr(null)
     try {
-      await addPropertiesToRoute(routeCode, routeSel, chosen)
+      const res = await addPropertiesToRoute(routeCode, routeSel, chosen)
+      if (res.ids && res.ids.length) pushPlanUndo({ kind: 'added', stopIds: res.ids, routeId: res.route?.id, code: routeCode, date: routeSel })
       setShowMass(false)
       await refresh(routeSel)
     } catch (e) {
@@ -999,6 +1062,10 @@ export default function RoutesView({ app }) {
             <option value="monthly">All monthly</option>
           </select>
           <button onClick={handleBuildFromSchedules} disabled={building} style={{ ...ghostBtn, opacity: building ? 0.6 : 1 }}>{building ? 'Building…' : 'Build from schedules'}</button>
+          {lastPlanUndo && (
+            <button onClick={handleUndo} title={planUndoLabel} style={{ ...ghostBtn, color: '#8a6414', borderColor: '#d8c9b0', background: '#fdf8ec' }}>↩ {planUndoLabel}</button>
+          )}
+          <button onClick={handleResetDay} disabled={resetBusy || !stops.length} title={`Remove every stop from ${currentDef.name} for ${prettyDate(routeSel)} — clients and properties are untouched, and you get an Undo right after`} style={{ ...ghostBtn, color: '#c0492f', borderColor: '#e8cfc8', background: '#fdf6f4', opacity: resetBusy || !stops.length ? 0.6 : 1 }}>{resetBusy ? 'Resetting…' : '⟲ Reset day'}</button>
           <button onClick={handleOptimize} disabled={loading || !stops.length} style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'linear-gradient(135deg,#1f7a4d,#155e3a)', color: '#fff', border: 'none', borderRadius: 10, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: loading ? 'default' : 'pointer', opacity: loading || !stops.length ? 0.6 : 1 }}>
             <span>✦</span> Optimize
           </button>

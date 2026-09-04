@@ -597,11 +597,57 @@ export async function addPropertiesToRoute(code, date, props) {
   const rows = list
     .filter((p) => !have.has(p.id))
     .map((p) => ({ route_id: route.id, property_id: p.id, seq: ++seq, status: 'pending', service: p.service || null, lat: p.lat, lng: p.lng }))
+  let ids = []
   if (rows.length) {
-    const { error } = await supabase.from('route_stops').insert(rows)
+    const { data, error } = await supabase.from('route_stops').insert(rows).select('id')
     if (error) throw error
+    ids = (data || []).map((r) => r.id)
   }
-  return { added: rows.length, route }
+  return { added: rows.length, route, ids }
+}
+
+// ---- plan-mode day reset + undo --------------------------------------------
+// Wipe EVERY stop (any status) off one route for one date. Returns the full
+// rows (+ their photos, which the FK cascades away on delete) so the caller
+// can offer undo by re-inserting them verbatim. Already-invoiced lines are
+// untouched: invoice_line_items.stop_id is ON DELETE SET NULL, so the line
+// survives detached rather than being destroyed.
+export async function resetRouteDay(routeId) {
+  const { data: stops, error } = await supabase
+    .from('route_stops').select('*').eq('route_id', routeId)
+  if (error) throw error
+  if (!stops || !stops.length) return { removed: [], photos: [] }
+  const ids = stops.map((r) => r.id)
+  const { data: photos, error: pErr } = await supabase
+    .from('stop_photos').select('*').in('stop_id', ids)
+  if (pErr) throw pErr
+  const { error: dErr } = await supabase.from('route_stops').delete().in('id', ids)
+  if (dErr) throw dErr
+  return { removed: stops, photos: photos || [] }
+}
+
+// Undo for resetRouteDay: re-insert the captured rows with their original ids
+// (so photos re-attach and links stay stable). Stops first, photos second —
+// the photo FK needs its stop back before it can point at it.
+export async function restoreDay({ stops, photos = [] }) {
+  if (!stops || !stops.length) return
+  const { error } = await supabase.from('route_stops').insert(stops)
+  if (error) {
+    if (error.code === '23505') throw new Error('Those stops are already back on the route — nothing to restore.')
+    throw error
+  }
+  if (photos.length) {
+    const { error: pErr } = await supabase.from('stop_photos').insert(photos)
+    if (pErr && pErr.code !== '23505') throw pErr
+  }
+}
+
+// Undo for planning adds: remove stops by id (no-op rows are fine — the stop
+// may already have been removed or moved by hand).
+export async function removeStopsByIds(ids) {
+  if (!ids || !ids.length) return
+  const { error } = await supabase.from('route_stops').delete().in('id', ids)
+  if (error) throw error
 }
 
 // All routes (with their stops + driver) for a single date — powers the
@@ -833,7 +879,7 @@ export async function addOneOffStop(code, date, { name, address, service, custom
   if (eErr) throw eErr
   const seq = (existing || []).reduce((m, e) => Math.max(m, e.seq || 0), 0) + 1
 
-  const { error: sErr } = await supabase.from('route_stops').insert({
+  const { data: stop, error: sErr } = await supabase.from('route_stops').insert({
     route_id: route.id,
     property_id: prop.id,
     seq,
@@ -844,10 +890,10 @@ export async function addOneOffStop(code, date, { name, address, service, custom
     job_price: jobPrice != null && !isNaN(Number(jobPrice)) ? Number(jobPrice) : null,
     lat: prop.lat,
     lng: prop.lng,
-  })
+  }).select('id').single()
   if (sErr) throw sErr
 
-  return { route, property: prop, geocoded: !!loc }
+  return { route, property: prop, stopId: stop.id, geocoded: !!loc }
 }
 
 // Loose address normalization for CSV matching: lowercase, drop punctuation,
