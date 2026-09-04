@@ -139,6 +139,14 @@ Deno.serve(async (req) => {
     try { event = JSON.parse(raw) } catch { return json({ error: "Bad payload." }, 400) }
     try {
       const obj = event.data?.object || {}
+      // This Stripe account also carries AllSync agency workspace
+      // subscriptions (allsync-dashboard billing). Only events for OUR
+      // customer may touch the singleton row — anything else overwrites
+      // real state (a $1 test-workspace sub did exactly that 2026-09-02
+      // and showed in the CRM as this subscription being "Active").
+      const billing = await getBilling()
+      const cust = typeof obj.customer === "string" ? obj.customer : obj.customer?.id
+      if (!cust || cust !== billing.stripe_customer_id) return json({ received: true })
       switch (event.type) {
         case "checkout.session.completed": {
           const patch: Record<string, unknown> = {}
@@ -183,6 +191,29 @@ Deno.serve(async (req) => {
     let customerId: string | undefined = billing.stripe_customer_id || undefined
 
     if (action === "status") {
+      // Display-only enrichment: card on file + customer contact, so the
+      // Settings card can show WHO/WHAT is actually paying. Never fails the
+      // status call — billing state matters more than the extras.
+      let card: { brand?: string; last4?: string } | null = null
+      let contact: { email?: string | null; name?: string | null } | null = null
+      try {
+        if (billing.stripe_subscription_id) {
+          const sub = await stripeApi(`subscriptions/${billing.stripe_subscription_id}`, sk, { method: "GET" })
+          const pmId = typeof sub.default_payment_method === "string"
+            ? sub.default_payment_method
+            : sub.default_payment_method?.id
+          if (pmId) {
+            const pm = await stripeApi(`payment_methods/${pmId}`, sk, { method: "GET" })
+            if (pm.card?.brand || pm.card?.last4) card = { brand: pm.card.brand, last4: pm.card.last4 }
+          }
+        }
+        if (customerId) {
+          const cust = await stripeApi(`customers/${customerId}`, sk, { method: "GET" })
+          contact = { email: cust.email || null, name: cust.name || null }
+        }
+      } catch (e) {
+        console.error("platform-billing status enrichment failed", e)
+      }
       return json({
         status: billing.status || "none",
         hasCustomer: !!customerId,
@@ -190,10 +221,18 @@ Deno.serve(async (req) => {
         currentPeriodEnd: billing.current_period_end || null,
         cancelAtPeriodEnd: !!billing.cancel_at_period_end,
         priceId: billing.price_id || PRICE_ID,
+        card,
+        contact,
       })
     }
 
     if (action === "checkout") {
+      // Never mint a second subscription while one is live — completing it
+      // would double-bill the customer every month (Stripe creates a new
+      // subscription per checkout; it does not replace the existing one).
+      if (billing.stripe_subscription_id && billing.status === "active") {
+        return json({ error: "A subscription is already active — use Manage card instead of starting a new one." })
+      }
       // Reuse the customer if we have one; otherwise let Checkout create it and
       // we capture the id on checkout.session.completed. Pre-create so the
       // Billing Portal works even before the first invoice settles.
@@ -210,6 +249,10 @@ Deno.serve(async (req) => {
           success_url: `${origin}/?crm_billing=success`,
           cancel_url: `${origin}/?crm_billing=cancel`,
           allow_promotion_codes: true,
+          // Tag our sessions so future handlers can identify them without
+          // relying on the customer id alone.
+          "metadata[app]": "valet-waste-crm",
+          "subscription_data[metadata][app]": "valet-waste-crm",
         },
       })
       return json({ url: session.url })
