@@ -202,6 +202,12 @@ Deno.serve(async (req) => {
     }
 
     if (action === "checkout") {
+      // Never mint a second subscription while one is live — completing it
+      // would double-bill the customer every month (Stripe creates a new
+      // subscription per checkout; it does not replace the existing one).
+      if (billing.stripe_subscription_id && billing.status === "active") {
+        return json({ error: "A subscription is already active — use Manage card instead of starting a new one." })
+      }
       // Reuse the customer if we have one; otherwise let Checkout create it and
       // we capture the id on checkout.session.completed. Pre-create so the
       // Billing Portal works even before the first invoice settles.
