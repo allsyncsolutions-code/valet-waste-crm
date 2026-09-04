@@ -96,6 +96,66 @@ export async function loadInvoicesForCustomer(customerId, limit = 25) {
   return data || []
 }
 
+// Same history, but ALSO catches invoices stranded on duplicate client rows:
+// other customers who share this client's email or phone, or who own a
+// property with the same normalized service address. Matched rows come back
+// with `matchReason` ('email' | 'phone' | 'address') + `matchName` so the UI
+// can flag where they came from; the client's own rows have no matchReason.
+export async function loadInvoicesForCustomerSmart(customerId, limit = 40) {
+  const dig = (p) => String(p || '').replace(/\D/g, '').slice(-10) // last 10 digits
+  const norm = (e) => String(e || '').trim().toLowerCase()
+
+  const [{ data: me }, { data: others }, { data: myProps }] = await Promise.all([
+    supabase.from('customers').select('id, name, email, phone').eq('id', customerId).maybeSingle(),
+    supabase.from('customers').select('id, name, email, phone').neq('id', customerId),
+    supabase.from('properties').select('id, norm_address').eq('customer_id', customerId),
+  ])
+  if (!me) throw new Error('Client not found.')
+
+  const myEmail = norm(me.email)
+  const myPhone = dig(me.phone)
+  const myAddrs = new Set((myProps || []).map((p) => (p.norm_address || '').trim()).filter(Boolean))
+
+  // customer id -> why they matched (first reason wins)
+  const byKey = { email: new Map(), phone: new Map(), address: new Map() }
+  for (const c of others || []) {
+    if (myEmail && norm(c.email) && norm(c.email) === myEmail) byKey.email.set(c.id, c.name)
+    else if (myPhone && dig(c.phone) && dig(c.phone) === myPhone) byKey.phone.set(c.id, c.name)
+  }
+  if (myAddrs.size) {
+    const { data: theirProps } = await supabase
+      .from('properties')
+      .select('customer_id, norm_address')
+      .not('customer_id', 'is', null)
+      .in('norm_address', [...myAddrs].slice(0, 40))
+    for (const p of theirProps || []) {
+      if (p.customer_id === customerId || byKey.email.has(p.customer_id) || byKey.phone.has(p.customer_id)) continue
+      if (!byKey.address.has(p.customer_id)) byKey.address.set(p.customer_id, null) // name filled below
+    }
+  }
+
+  const matchIds = [...new Set([...byKey.email.keys(), ...byKey.phone.keys(), ...byKey.address.keys()])]
+  const names = matchIds.length
+    ? (await supabase.from('customers').select('id, name').in('id', matchIds)).data || []
+    : []
+  const nameOf = Object.fromEntries(names.map((n) => [n.id, n.name]))
+
+  const ids = [customerId, ...matchIds].slice(0, 50)
+  const { data: invoices, error } = await supabase
+    .from('invoices')
+    .select('id, number, status, issue_date, due_date, subtotal, total, tip_amount, sent_at, paid_at, created_at, customer_id, customers(name)')
+    .in('customer_id', ids)
+    .order('created_at', { ascending: false })
+    .limit(limit)
+  if (error) throw error
+
+  return (invoices || []).map((inv) => {
+    if (inv.customer_id === customerId) return inv
+    const reason = byKey.email.has(inv.customer_id) ? 'email' : byKey.phone.has(inv.customer_id) ? 'phone' : 'address'
+    return { ...inv, matchReason: reason, matchName: nameOf[inv.customer_id] || inv.customers?.name || '' }
+  })
+}
+
 // ---- manual proof-of-service photos attached to an invoice ------------------
 // Files live in the public `stop-photos` bucket under inv/<invoiceId>/ (no new
 // bucket); the invoice_photos table tracks metadata. Photos with a stop_id

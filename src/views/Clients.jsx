@@ -5,7 +5,7 @@ import PinPicker from '../components/PinPicker.jsx'
 import { geocodeAll } from '../lib/importData.js'
 import { listTags, findOrCreateTag, subscribeTags } from '../lib/tagsData.js'
 import { paymentsStatus, invoicePaymentUrl } from '../lib/paymentsData.js'
-import { createInvoice, loadInvoicesForCustomer } from '../lib/invoicesData.js'
+import { createInvoice, loadInvoicesForCustomerSmart } from '../lib/invoicesData.js'
 import { uploadPropertyPhoto, updatePropertyPhoto, deletePropertyPhoto } from '../lib/propertyPhotosData.js'
 
 // Today as a LOCAL (browser/ET) date — toISOString() would hand back the UTC
@@ -168,15 +168,16 @@ export default function Clients({ app }) {
     return () => { alive = false }
   }, [selId])
 
-  // This client's invoices — the record panel card. Every invoice that belongs
-  // to them, newest first.
+  // This client's invoices — the record panel card. Their own invoices plus
+  // any stranded on duplicate client rows (matched by email / phone / service
+  // address), newest first.
   const [clientInvoices, setClientInvoices] = useState([])
   const [invBusy, setInvBusy] = useState(false)
   useEffect(() => {
     if (!selId) { setClientInvoices([]); return }
     let alive = true
     setInvBusy(true)
-    loadInvoicesForCustomer(selId)
+    loadInvoicesForCustomerSmart(selId)
       .then((r) => { if (alive) setClientInvoices(r) })
       .catch(() => { if (alive) setClientInvoices([]) })
       .finally(() => { if (alive) setInvBusy(false) })
@@ -897,10 +898,16 @@ export default function Clients({ app }) {
                   {clientInvoices.slice(0, 8).map((inv) => {
                     const st = inv.status || 'draft'
                     const chip = st === 'paid' ? { color: '#1f7a4d', bg: '#e7f1eb' } : st === 'sent' ? { color: '#155e9c', bg: '#e8f0fa' } : st === 'void' ? { color: '#9aa69e', bg: '#f1f3f0' } : { color: '#8a6414', bg: '#fdf8ec' }
+                    const matched = inv.matchReason ? `On a duplicate record (${inv.matchName || 'another client'}) — matched by ${inv.matchReason}. Clean up with Edit & Merge.` : 'Open the Invoices page'
                     return (
-                      <div key={inv.id} onClick={() => app.go('invoices')} title="Open the Invoices page" style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 2px', borderBottom: '1px solid #f1f3f0', cursor: 'pointer' }}>
+                      <div key={inv.id} onClick={() => app.go('invoices')} title={matched} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 2px', borderBottom: '1px solid #f1f3f0', cursor: 'pointer' }}>
                         <span style={{ fontFamily: MONO, fontSize: 12, color: '#5d6b63', flex: 'none' }}>{inv.number || '—'}</span>
                         <span style={{ fontSize: 12.5, color: '#7c8a82', flex: 'none' }}>{fmtDay(inv.issue_date || String(inv.created_at).slice(0, 10))}</span>
+                        {inv.matchReason && (
+                          <span title={matched} style={{ flex: 'none', fontSize: 9, fontWeight: 700, color: '#9a3412', background: '#fdf3ea', border: '1px solid #f0d9c8', padding: '1px 6px', borderRadius: 5, letterSpacing: '.03em' }}>
+                            ⧉ {inv.matchReason.toUpperCase()}
+                          </span>
+                        )}
                         <span style={{ flex: 1 }} />
                         {inv.tip_amount > 0 && st === 'paid' && <span title={`Includes a $${Number(inv.tip_amount).toFixed(2)} tip`} style={{ fontSize: 11, flex: 'none' }}>🎁</span>}
                         <span style={{ fontFamily: MONO, fontSize: 12.5, fontWeight: 600, flex: 'none' }}>${Number(inv.total || 0).toFixed(2)}</span>
