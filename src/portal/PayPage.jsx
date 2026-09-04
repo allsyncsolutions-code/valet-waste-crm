@@ -214,6 +214,15 @@ export default function PayPage({ slug, invoiceId }) {
                 <div style={{ fontSize: 12, color: '#1a2420' }}>
                   {it.title ? <div style={{ fontWeight: 700, fontSize: 12.5, marginBottom: 1 }}>{it.title}</div> : null}
                   {it.description ? <RichText text={it.description} style={{ fontSize: 12, color: '#1a2420' }} /> : (it.title ? null : '—')}
+                  {(it.photos || []).length > 0 && (
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 7 }}>
+                      {it.photos.map((u, ui) => (
+                        <a key={ui} href={u} target="_blank" rel="noreferrer" title="Proof of service — tap to enlarge">
+                          <img src={u} alt="Service photo" style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 8, border: '1px solid #e6ece8', display: 'block' }} />
+                        </a>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <div style={{ textAlign: 'center', fontSize: 12, color: '#5d6b63', paddingTop: 1 }}>{it.quantity}</div>
                 <div style={{ textAlign: 'right', fontSize: 12, color: '#5d6b63', paddingTop: 1 }}>{money(it.unit_price)}</div>
@@ -236,25 +245,6 @@ export default function PayPage({ slug, invoiceId }) {
           <div style={{ fontSize: 12.5, color: '#5d6b63' }}>Total due</div>
           <div style={{ fontWeight: 800, fontSize: 21 }}>{money(inv.total)}</div>
         </div>
-
-        {/* service photos — grouped by stop, from the invoice's line items */}
-        {(inv.photoGroups || []).length > 0 && (
-          <div style={{ margin: '0 18px', padding: '12px 0 14px', borderTop: '1px solid #f0f2ef' }}>
-            <div style={{ fontSize: 9.5, letterSpacing: '.1em', color: '#9aa69e', margin: '4px 0 8px', fontWeight: 600 }}>SERVICE PHOTOS</div>
-            {inv.photoGroups.map((g, gi) => (
-              <div key={gi} style={{ marginBottom: 12 }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: '#1a2420', margin: '6px 0 6px' }}>{g.heading}</div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
-                  {g.urls.map((u, ui) => (
-                    <a key={ui} href={u} target="_blank" rel="noreferrer">
-                      <img src={u} alt={g.heading} style={{ width: '100%', borderRadius: 8, border: '1px solid #e6ece8', display: 'block' }} />
-                    </a>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
 
         {/* notes + terms */}
         {(inv.notes || info.terms) && (

@@ -581,62 +581,43 @@ export default function Invoices({ app }) {
   )
 }
 
-// Service photos for the invoice's stops, grouped by stop (address + date).
-// Fetched render-time from stop_photos so late-added photos show up too.
-function StopPhotos({ stopIds }) {
-  const [groups, setGroups] = useState([])
+// Service photos for the invoice's stops, keyed by stop — the line item that
+// bills each stop shows its own thumbnails. Fetched render-time from
+// stop_photos so late-added photos show up too.
+function useStopPhotoMap(stopIds) {
+  const [byStop, setByStop] = useState({})
+  const key = (stopIds || []).join(',')
   useEffect(() => {
     let alive = true
-    if (!stopIds.length) { setGroups([]); return }
+    const ids = key ? key.split(',') : []
+    if (!ids.length) { setByStop({}); return }
     ;(async () => {
       try {
-        const { data: stops } = await supabase
-          .from('route_stops')
-          .select('id, properties(address), routes(service_date)')
-          .in('id', stopIds)
         const { data: photos } = await supabase
           .from('stop_photos')
           .select('stop_id, path')
-          .in('stop_id', stopIds)
+          .in('stop_id', ids)
           .order('created_at', { ascending: true })
         if (!alive) return
-        const byStop = new Map((stops || []).map((s) => {
-          const d = s.routes?.service_date ? String(s.routes.service_date).slice(0, 10) : null
-          return [s.id, { heading: [s.properties?.address, d].filter(Boolean).join(' — ') || 'Service photos', urls: [] }]
-        }))
+        const map = {}
         for (const p of photos || []) {
-          const g = byStop.get(p.stop_id)
-          if (g) g.urls.push(supabase.storage.from('stop-photos').getPublicUrl(p.path).data.publicUrl)
+          const url = supabase.storage.from('stop-photos').getPublicUrl(p.path).data.publicUrl
+          ;(map[p.stop_id] = map[p.stop_id] || []).push(url)
         }
-        setGroups([...byStop.values()].filter((g) => g.urls.length))
-      } catch (_e) { if (alive) setGroups([]) }
+        setByStop(map)
+      } catch (_e) { if (alive) setByStop({}) }
     })()
     return () => { alive = false }
-  }, [stopIds.join(',')])
-  if (!groups.length) return null
-  return (
-    <div style={{ marginTop: 14 }}>
-      <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.08em', color: '#9aa69e', margin: '10px 0 8px' }}>SERVICE PHOTOS</div>
-      {groups.map((g, i) => (
-        <div key={i} style={{ marginBottom: 10 }}>
-          <div style={{ fontSize: 12.5, fontWeight: 700, color: '#1a2420', marginBottom: 6 }}>{g.heading}</div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 7 }}>
-            {g.urls.map((u, j) => (
-              <a key={j} href={u} target="_blank" rel="noreferrer">
-                <img src={u} alt={g.heading} style={{ width: '100%', borderRadius: 8, border: '1px solid #e6eae6', display: 'block' }} />
-              </a>
-            ))}
-          </div>
-        </div>
-      ))}
-    </div>
-  )
+  }, [key])
+  return byStop
 }
 
 function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, onSendSms, onSendEmail, onSendBoth, onSchedule, pendingSends, onCancelSend, onDelete, onTakePayment }) {
   const meta = STATUS_META[inv.status] || STATUS_META.draft
   const company = settings || {}
   const contactBits = [company.company_phone, company.company_email, company.company_address].filter(Boolean)
+  // Proof-of-service thumbnails live INSIDE each line item (keyed by stop).
+  const photoByStop = useStopPhotoMap((inv.items || []).map((it) => it.stopId).filter(Boolean))
   return (
     <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, overflow: 'hidden' }}>
       {/* masthead: logo + business name (left) · contact info (right) */}
@@ -686,17 +667,29 @@ function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, on
           <div>DESCRIPTION</div><div style={{ textAlign: 'center' }}>QTY</div><div style={{ textAlign: 'right' }}>PRICE</div><div style={{ textAlign: 'right' }}>AMOUNT</div>
         </div>
         {inv.items.length === 0 && <div style={{ padding: '12px 0', color: '#9aa69e', fontSize: 12.5 }}>No line items.</div>}
-        {inv.items.map((it) => (
+        {inv.items.map((it) => {
+          const photos = it.stopId ? photoByStop[it.stopId] || [] : []
+          return (
           <div key={it.id} style={{ display: 'grid', gridTemplateColumns: '1fr 50px 90px 90px', gap: 8, padding: '9px 10px', borderBottom: '1px solid #f5f6f4', fontSize: 13, alignItems: 'start' }}>
             <div style={{ color: '#1a2420' }}>
               {it.title ? <div style={{ fontWeight: 700, fontSize: 13, color: '#1a2420', marginBottom: 2 }}>{it.title}</div> : null}
               {it.description ? <RichText text={it.description} style={{ fontSize: 13, color: '#1a2420' }} /> : (it.title ? null : '—')}
+              {photos.length > 0 && (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 72px)', gap: 6, marginTop: 7 }}>
+                  {photos.map((u, j) => (
+                    <a key={j} href={u} target="_blank" rel="noreferrer" title="Proof of service — click to enlarge">
+                      <img src={u} alt="Service photo" style={{ width: 72, height: 72, objectFit: 'cover', borderRadius: 7, border: '1px solid #e6eae6', display: 'block' }} />
+                    </a>
+                  ))}
+                </div>
+              )}
             </div>
             <div style={{ textAlign: 'center', fontFamily: MONO, color: '#5d6b63', paddingTop: 2 }}>{it.quantity}</div>
             <div style={{ textAlign: 'right', fontFamily: MONO, color: '#5d6b63', paddingTop: 2 }}>{money(it.unitPrice)}</div>
             <div style={{ textAlign: 'right', fontFamily: MONO, paddingTop: 2 }}>{money(it.amount)}</div>
           </div>
-        ))}
+          )
+        })}
 
         {/* totals */}
         <div style={{ marginLeft: 'auto', width: 220, marginTop: 12 }}>
@@ -707,9 +700,6 @@ function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, on
           <TotalRow label={inv.tipAmount > 0 ? 'Invoice total' : 'Total'} value={money(inv.total)} bold />
           {inv.tipAmount > 0 && <TotalRow label="Charged (with tip)" value={money(inv.total + inv.tipAmount)} bold />}
         </div>
-        {/* service photos — grouped by stop (render-time, same as the email + pay page) */}
-        <StopPhotos stopIds={(inv.items || []).map((it) => it.stopId).filter(Boolean)} />
-
       </div>
 
       {(inv.notes || company.invoice_terms) && (

@@ -560,30 +560,32 @@ Deno.serve(async (req) => {
       ))[0]
       if (!inv) return json({ error: "This payment link isn't valid." }, 404)
       const settings = await getSettings()
-      const items = (inv.invoice_line_items || [])
-        .slice()
-        .sort((a: any, b: any) => (a.position ?? 0) - (b.position ?? 0))
-        .map((li: any) => ({ title: li.title || "", description: li.description || "", quantity: Number(li.quantity || 0), unit_price: Number(li.unit_price || 0), amount: Number(li.amount || 0) }))
-      // Service photos grouped by stop (render-time — see payments fn).
-      let photoGroups: Array<{ heading: string, urls: string[] }> = []
+      // Service photos keyed by stop, attached to the line item that bills
+      // each stop (render-time — see payments fn). Photos never break the pay page.
+      const photoByStop = new Map<string, string[]>()
       try {
         const stopIds = [...new Set((inv.invoice_line_items || []).map((li: any) => li.stop_id).filter(Boolean))]
         if (stopIds.length) {
           const idList = stopIds.map((id: any) => enc(String(id))).join(",")
-          const stops = await sbGet(`route_stops?id=in.(${idList})&select=id,properties(address),routes(service_date)`)
           const photos = await sbGet(`stop_photos?stop_id=in.(${idList})&select=stop_id,path&order=created_at.asc`)
-          const byStop = new Map<string, { heading: string, urls: string[] }>()
-          for (const st of stops) {
-            const d = st.routes?.service_date ? String(st.routes.service_date).slice(0, 10) : null
-            byStop.set(st.id, { heading: [st.properties?.address, d].filter(Boolean).join(" — ") || "Service photos", urls: [] })
-          }
           for (const p of photos) {
-            const g = byStop.get(p.stop_id)
-            if (g) g.urls.push(`${SUPABASE_URL}/storage/v1/object/public/stop-photos/${enc(String(p.path))}`)
+            const url = `${SUPABASE_URL}/storage/v1/object/public/stop-photos/${enc(String(p.path))}`
+            if (!photoByStop.has(p.stop_id)) photoByStop.set(p.stop_id, [])
+            photoByStop.get(p.stop_id)!.push(url)
           }
-          photoGroups = [...byStop.values()].filter((g) => g.urls.length > 0)
         }
       } catch (_e) { /* photos never break the pay page */ }
+      const items = (inv.invoice_line_items || [])
+        .slice()
+        .sort((a: any, b: any) => (a.position ?? 0) - (b.position ?? 0))
+        .map((li: any) => ({
+          title: li.title || "",
+          description: li.description || "",
+          quantity: Number(li.quantity || 0),
+          unit_price: Number(li.unit_price || 0),
+          amount: Number(li.amount || 0),
+          photos: li.stop_id ? (photoByStop.get(li.stop_id) || []) : [],
+        }))
       return json({
         ok: true,
         company: {
@@ -600,7 +602,7 @@ Deno.serve(async (req) => {
         invoice: {
           id: inv.id, number: inv.number, status: inv.status,
           total: inv.total, tip_amount: Number(inv.tip_amount || 0), subtotal: inv.subtotal, discount: inv.discount,
-          due_date: inv.due_date, issue_date: inv.issue_date, notes: inv.notes || null, items, photoGroups,
+          due_date: inv.due_date, issue_date: inv.issue_date, notes: inv.notes || null, items,
         },
         payment: {
           available: !!(settings.run_mid && settings.run_public_key),
