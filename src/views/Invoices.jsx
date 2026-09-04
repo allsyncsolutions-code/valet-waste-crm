@@ -98,6 +98,27 @@ export default function Invoices({ app }) {
     return () => unsub && unsub()
   }, [app.activeLine])
 
+  // Cross-view prefill: "+ New invoice" on a client's record opens the create
+  // form already pointed at that client, with a first line pre-filled from
+  // their billing (rate / service, captured at click time).
+  useEffect(() => {
+    const p = app.invoicePrefill
+    if (!p || !p.tick) return
+    setEditId(null)
+    setAddingClient(false)
+    setNewClient(blankClient())
+    setForm({
+      ...blankForm(),
+      customerId: p.customerId,
+      items: [{
+        ...blankLine(),
+        description: p.description || '',
+        unitPrice: p.amount != null ? String(p.amount) : '',
+      }],
+    })
+    setShowForm(true)
+  }, [app.invoicePrefill?.tick])
+
   // Date filter — paid invoices count by their PAID date, everything else by
   // issue date, so "This month" reads as "collected/billed this month".
   const range = useMemo(() => {

@@ -5,10 +5,12 @@ import PinPicker from '../components/PinPicker.jsx'
 import { geocodeAll } from '../lib/importData.js'
 import { listTags, findOrCreateTag, subscribeTags } from '../lib/tagsData.js'
 import { paymentsStatus, invoicePaymentUrl } from '../lib/paymentsData.js'
-import { createInvoice } from '../lib/invoicesData.js'
+import { createInvoice, loadInvoicesForCustomer } from '../lib/invoicesData.js'
 import { uploadPropertyPhoto, updatePropertyPhoto, deletePropertyPhoto } from '../lib/propertyPhotosData.js'
 
-const todayStr = () => new Date().toISOString().slice(0, 10)
+// Today as a LOCAL (browser/ET) date — toISOString() would hand back the UTC
+// date, which is tomorrow's date late in the evening Eastern time.
+const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` }
 const fmtDay = (d) => { try { return new Date(d + 'T00:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) } catch { return d } }
 
 const FREQ = [
@@ -49,7 +51,7 @@ const BLANK = {
 // The Service-notification dropdown uses strings; map to the DB's true/false/null.
 const NOTIFY_TO_STR = (v) => (v === true ? 'always' : v === false ? 'never' : 'auto')
 const NOTIFY_FROM_STR = (s) => (s === 'always' ? true : s === 'never' ? false : null)
-const BLANK_PROP = { address: '', service: '', notes: '', price: '', techPay: '', days: [], frequency: 'weekly' }
+const BLANK_PROP = { address: '', service: '', notes: '', price: '', techPay: '', days: [], frequency: 'weekly', startDate: '' }
 
 export default function Clients({ app }) {
   const isMobile = app.isMobile
@@ -71,7 +73,7 @@ export default function Clients({ app }) {
   const [payErr, setPayErr] = useState(null)
   const [props, setProps] = useState([])
   const [editPid, setEditPid] = useState(null)
-  const [editP, setEditP] = useState({ address: '', service: '', notes: '', price: '', techPay: '', days: [], frequency: 'weekly' })
+  const [editP, setEditP] = useState({ address: '', service: '', notes: '', price: '', techPay: '', days: [], frequency: 'weekly', startDate: '' })
   const [addingAddr, setAddingAddr] = useState(false)
   const [newP, setNewP] = useState(BLANK_PROP)
   const [pBusy, setPBusy] = useState(false)
@@ -163,6 +165,21 @@ export default function Clients({ app }) {
     if (!selId) { setNotes([]); return }
     let alive = true
     loadClientNotes(selId).then((r) => { if (alive) setNotes(r) }).catch(() => { if (alive) setNotes([]) })
+    return () => { alive = false }
+  }, [selId])
+
+  // This client's invoices — the record panel card. Every invoice that belongs
+  // to them, newest first.
+  const [clientInvoices, setClientInvoices] = useState([])
+  const [invBusy, setInvBusy] = useState(false)
+  useEffect(() => {
+    if (!selId) { setClientInvoices([]); return }
+    let alive = true
+    setInvBusy(true)
+    loadInvoicesForCustomer(selId)
+      .then((r) => { if (alive) setClientInvoices(r) })
+      .catch(() => { if (alive) setClientInvoices([]) })
+      .finally(() => { if (alive) setInvBusy(false) })
     return () => { alive = false }
   }, [selId])
 
@@ -334,9 +351,18 @@ export default function Clients({ app }) {
       setPayBusy(false)
     }
   }
+  // "+ New invoice" — jump to the Invoices page with the create form already
+  // pointed at this client, first line pre-filled from their billing.
+  function newInvoiceForClient() {
+    if (!cur) return
+    const rate = cur.invoice && cur.invoice.amount != null ? Number(cur.invoice.amount) : null
+    const withService = props.find((p) => (p.service || '').trim())
+    const service = (withService && withService.service) || (cur.pickup && cur.pickup.service) || ''
+    app.openInvoiceFor(cur.id, { amount: rate, description: service })
+  }
   function startEditProp(p) {
     setEditPid(p.id)
-    setEditP({ address: p.address || '', service: p.service || '', notes: p.notes || '', price: p.price ?? '', techPay: p.tech_pay ?? '', days: p.pickup_days || [], frequency: p.pickup_frequency || 'weekly' })
+    setEditP({ address: p.address || '', service: p.service || '', notes: p.notes || '', price: p.price ?? '', techPay: p.tech_pay ?? '', days: p.pickup_days || [], frequency: p.pickup_frequency || 'weekly', startDate: p.pickup_start_date || '' })
   }
   // Full archive for one address: every check-in, skip, photo and change on a
   // single searchable timeline. Opening resets the filters so each address starts fresh.
@@ -419,6 +445,7 @@ export default function Clients({ app }) {
         tech_pay: newP.techPay === '' ? null : Number(newP.techPay),
         pickup_days: orderDays(newP.days),
         pickup_frequency: newP.frequency,
+        pickup_start_date: newP.startDate || null,
       })
       setAddingAddr(false)
       setNewP(BLANK_PROP)
@@ -443,6 +470,7 @@ export default function Clients({ app }) {
         tech_pay: editP.techPay === '' || editP.techPay == null ? null : Number(editP.techPay),
         pickup_days: orderDays(editP.days),
         pickup_frequency: editP.frequency,
+        pickup_start_date: editP.startDate || null,
       }
       const addrChanged = editP.address.trim() !== (p.address || '')
       if (addrChanged) patch.address = editP.address.trim()
@@ -855,6 +883,38 @@ export default function Clients({ app }) {
               {cur.notes && <Row label="Notes" value={cur.notes} />}
             </div>
 
+            <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '18px 20px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, justifyContent: 'space-between', marginBottom: 12 }}>
+                <div style={{ fontWeight: 700, fontSize: 14 }}>Invoices {clientInvoices.length ? <span style={{ color: '#7c8a82', fontWeight: 500, fontSize: 12.5 }}>· {clientInvoices.length}</span> : null}</div>
+                <button onClick={newInvoiceForClient} title="Create an invoice for this client — opens the Invoices page pre-filled with their name, rate and service" style={{ flex: 'none', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 8, padding: '7px 12px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>+ New invoice</button>
+              </div>
+              {invBusy ? (
+                <div style={{ fontSize: 12.5, color: '#9aa69e' }}>Loading invoices…</div>
+              ) : !clientInvoices.length ? (
+                <div style={{ fontSize: 12.5, color: '#9aa69e' }}>No invoices yet for this client.</div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  {clientInvoices.slice(0, 8).map((inv) => {
+                    const st = inv.status || 'draft'
+                    const chip = st === 'paid' ? { color: '#1f7a4d', bg: '#e7f1eb' } : st === 'sent' ? { color: '#155e9c', bg: '#e8f0fa' } : st === 'void' ? { color: '#9aa69e', bg: '#f1f3f0' } : { color: '#8a6414', bg: '#fdf8ec' }
+                    return (
+                      <div key={inv.id} onClick={() => app.go('invoices')} title="Open the Invoices page" style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 2px', borderBottom: '1px solid #f1f3f0', cursor: 'pointer' }}>
+                        <span style={{ fontFamily: MONO, fontSize: 12, color: '#5d6b63', flex: 'none' }}>{inv.number || '—'}</span>
+                        <span style={{ fontSize: 12.5, color: '#7c8a82', flex: 'none' }}>{fmtDay(inv.issue_date || String(inv.created_at).slice(0, 10))}</span>
+                        <span style={{ flex: 1 }} />
+                        {inv.tip_amount > 0 && st === 'paid' && <span title={`Includes a $${Number(inv.tip_amount).toFixed(2)} tip`} style={{ fontSize: 11, flex: 'none' }}>🎁</span>}
+                        <span style={{ fontFamily: MONO, fontSize: 12.5, fontWeight: 600, flex: 'none' }}>${Number(inv.total || 0).toFixed(2)}</span>
+                        <span style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: chip.color, background: chip.bg, padding: '2px 7px', borderRadius: 5, letterSpacing: '.04em' }}>{st.toUpperCase()}</span>
+                      </div>
+                    )
+                  })}
+                  {clientInvoices.length > 8 && (
+                    <div onClick={() => app.go('invoices')} style={{ padding: '8px 2px 2px', fontSize: 12, color: '#1f7a4d', fontWeight: 600, cursor: 'pointer' }}>View all {clientInvoices.length} on the Invoices page →</div>
+                  )}
+                </div>
+              )}
+            </div>
+
             {(
               <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '18px 20px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, justifyContent: 'space-between', marginBottom: 10 }}>
@@ -901,6 +961,10 @@ export default function Clients({ app }) {
                     <select value={newP.frequency} onChange={(e) => setNewP({ ...newP, frequency: e.target.value })} style={{ ...inp, fontSize: 13 }}>
                       {FREQ.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                     </select>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <input type="date" value={newP.startDate} onChange={(e) => setNewP({ ...newP, startDate: e.target.value })} style={{ ...inp, fontSize: 13, maxWidth: 190 }} title="First pickup date — leave blank to start right away" />
+                      <span style={{ fontSize: 11.5, color: '#9aa69e' }}>Start date (optional) — delays routing until then</span>
+                    </div>
                     <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
                       <button onClick={() => { setAddingAddr(false); setNewP(BLANK_PROP) }} disabled={pBusy} style={{ background: '#fff', border: '1px solid #dde2dd', color: '#5d6b63', borderRadius: 8, padding: '6px 12px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
                       <button onClick={saveNewProp} disabled={pBusy || !newP.address.trim()} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 8, padding: '6px 14px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', opacity: pBusy || !newP.address.trim() ? 0.6 : 1 }}>{pBusy ? 'Saving…' : 'Add address'}</button>
@@ -956,6 +1020,10 @@ export default function Clients({ app }) {
                           <select value={editP.frequency} onChange={(e) => setEditP({ ...editP, frequency: e.target.value })} style={{ ...inp, fontSize: 13 }}>
                             {FREQ.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                           </select>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <input type="date" value={editP.startDate} onChange={(e) => setEditP({ ...editP, startDate: e.target.value })} style={{ ...inp, fontSize: 13, maxWidth: 190 }} title="First pickup date — leave blank to start right away" />
+                            <span style={{ fontSize: 11.5, color: '#9aa69e' }}>Start date (optional) — delays routing until then</span>
+                          </div>
                           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
                             <button onClick={() => setEditPid(null)} disabled={pBusy} style={{ background: '#fff', border: '1px solid #dde2dd', color: '#5d6b63', borderRadius: 8, padding: '6px 12px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
                             <button onClick={() => saveProp(p)} disabled={pBusy} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 8, padding: '6px 14px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', opacity: pBusy ? 0.6 : 1 }}>{pBusy ? 'Saving…' : 'Save & re-geocode'}</button>
@@ -983,6 +1051,9 @@ export default function Clients({ app }) {
                               )}
                               {p.needs_review && (
                                 <span style={{ fontSize: 11, fontWeight: 700, fontFamily: MONO, color: '#c0492f', background: '#fbeae6', padding: '2px 8px', borderRadius: 6, letterSpacing: '.03em' }}>⚠ Needs review</span>
+                              )}
+                              {p.pickup_start_date && p.pickup_start_date > todayStr() && (
+                                <span title={`Doesn't route until its start date — ${fmtDay(p.pickup_start_date)}`} style={{ fontSize: 11, fontWeight: 700, fontFamily: MONO, color: '#155e9c', background: '#e8f0fa', padding: '2px 8px', borderRadius: 6 }}>starts {fmtDay(p.pickup_start_date)}</span>
                               )}
                               {p.paused && (
                                 <span style={{ fontSize: 11, fontWeight: 700, fontFamily: MONO, color: '#8a6d1e', background: '#f6efdd', padding: '2px 8px', borderRadius: 6, letterSpacing: '.03em' }}>⏸ Paused · off routes</span>
