@@ -191,6 +191,29 @@ Deno.serve(async (req) => {
     let customerId: string | undefined = billing.stripe_customer_id || undefined
 
     if (action === "status") {
+      // Display-only enrichment: card on file + customer contact, so the
+      // Settings card can show WHO/WHAT is actually paying. Never fails the
+      // status call — billing state matters more than the extras.
+      let card: { brand?: string; last4?: string } | null = null
+      let contact: { email?: string | null; name?: string | null } | null = null
+      try {
+        if (billing.stripe_subscription_id) {
+          const sub = await stripeApi(`subscriptions/${billing.stripe_subscription_id}`, sk, { method: "GET" })
+          const pmId = typeof sub.default_payment_method === "string"
+            ? sub.default_payment_method
+            : sub.default_payment_method?.id
+          if (pmId) {
+            const pm = await stripeApi(`payment_methods/${pmId}`, sk, { method: "GET" })
+            if (pm.card?.brand || pm.card?.last4) card = { brand: pm.card.brand, last4: pm.card.last4 }
+          }
+        }
+        if (customerId) {
+          const cust = await stripeApi(`customers/${customerId}`, sk, { method: "GET" })
+          contact = { email: cust.email || null, name: cust.name || null }
+        }
+      } catch (e) {
+        console.error("platform-billing status enrichment failed", e)
+      }
       return json({
         status: billing.status || "none",
         hasCustomer: !!customerId,
@@ -198,6 +221,8 @@ Deno.serve(async (req) => {
         currentPeriodEnd: billing.current_period_end || null,
         cancelAtPeriodEnd: !!billing.cancel_at_period_end,
         priceId: billing.price_id || PRICE_ID,
+        card,
+        contact,
       })
     }
 

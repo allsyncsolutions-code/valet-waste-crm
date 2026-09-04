@@ -852,6 +852,9 @@ export default function Settings({ app }) {
             ? new Date(billing.data.currentPeriodEnd).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
             : null
           const hasCustomer = billing.data && billing.data.hasCustomer
+          const card = billing.data && billing.data.card
+          const contact = billing.data && billing.data.contact
+          const cardText = card && (card.brand || card.last4) ? `${card.brand || 'Card'} ····${card.last4 || ''}` : null
           return (
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
               <span style={{ width: 10, height: 10, borderRadius: '50%', background: dot, flex: 'none' }} />
@@ -860,6 +863,11 @@ export default function Settings({ app }) {
                 <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 2 }}>
                   {active && nextDate ? `Next charge ${nextDate}` : billing.data && billing.data.cancelAtPeriodEnd && nextDate ? `Ends ${nextDate}` : pastDue ? 'Update the card to keep service active' : 'Add a card to activate billing'}
                 </div>
+                {(cardText || (contact && contact.email)) && (
+                  <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 2 }}>
+                    {cardText}{cardText && contact && contact.email ? ' · ' : ''}{contact && contact.email ? contact.email : ''}
+                  </div>
+                )}
               </div>
               {active || (hasCustomer && billing.data.hasSubscription) ? (
                 <button onClick={manageBilling} disabled={billing.busy} style={{ background: '#fff', border: '1px solid #635bff', color: '#635bff', borderRadius: 9, padding: '9px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: billing.busy ? 0.6 : 1 }}>{billing.busy ? 'Opening…' : 'Manage billing'}</button>
