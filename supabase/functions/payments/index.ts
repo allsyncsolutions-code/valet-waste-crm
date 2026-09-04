@@ -276,7 +276,7 @@ async function invoiceStopPhotos(invoiceId: string) {
   return byStop
 }
 
-function invoiceEmailHtml(c: Record<string, unknown>, s: Record<string, unknown>, inv: Record<string, unknown>, items: Array<Record<string, unknown>>, url: string, photosByStop: Map<string, string[]> = new Map()) {
+function invoiceEmailHtml(c: Record<string, unknown>, s: Record<string, unknown>, inv: Record<string, unknown>, items: Array<Record<string, unknown>>, url: string, photosByStop: Map<string, string[]> = new Map(), attachedPhotos: Array<{ url: string, taken_on?: string | null, note?: string | null }> = []) {
   const company = s.company_name || "Valet Waste FL"
   const money = (v: unknown) => "$" + Number(v || 0).toFixed(2)
   const esc = (t: unknown) => String(t ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" } as Record<string, string>)[ch])
@@ -319,6 +319,15 @@ function invoiceEmailHtml(c: Record<string, unknown>, s: Record<string, unknown>
         <a href="${url}" style="display:inline-block;background:#1f7a4d;color:#fff;text-decoration:none;font-size:15px;font-weight:600;padding:13px 34px;border-radius:9px">Pay Now</a>
         <div style="font-size:12px;color:#7c8a82;margin-top:10px;word-break:break-all">Or paste this link: ${url}</div>
       </div>
+      ${attachedPhotos.length ? `<div style="margin:22px 0 0;border-top:1px solid #e6ece8;padding-top:18px">
+        <div style="font-size:12px;color:#7c8a82;text-transform:uppercase;letter-spacing:.04em;margin-bottom:12px">Service photos</div>
+        <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px">
+          ${attachedPhotos.map((p) => `<div>
+            <a href="${p.url}" target="_blank"><img src="${p.url}" alt="Service photo" style="width:100%;border-radius:8px;border:1px solid #e6ece8;display:block" /></a>
+            ${(p.taken_on || p.note) ? `<div style="font-size:11px;color:#9aa69e;margin-top:4px">${esc([p.taken_on, p.note].filter(Boolean).join(" — "))}</div>` : ""}
+          </div>`).join("")}
+        </div>
+      </div>` : ""}
       ${inv.notes ? `<p style="margin:18px 0 0;font-size:13px;color:#5d6b63"><b>Notes:</b> ${esc(inv.notes)}</p>` : ""}
       ${s.invoice_terms ? `<p style="margin:14px 0 0;font-size:12px;color:#7c8a82;border-top:1px solid #e6ece8;padding-top:14px">${esc(s.invoice_terms)}</p>` : ""}
     </div>
@@ -509,6 +518,23 @@ Deno.serve(async (req) => {
 
       const items = await sbGet(`invoice_line_items?invoice_id=eq.${inv.id}&select=title,description,quantity,unit_price,amount,stop_id&order=position`)
       const photosByStop = await invoiceStopPhotos(String(inv.id))
+      // Manually attached photos (admin "Add photos"): ones tied to a line's
+      // stop merge into that line's thumbnails; the rest render in the
+      // trailing "Service photos" grid.
+      const lineStopIds = new Set(items.filter((i: any) => i.stop_id).map((i: any) => String(i.stop_id)))
+      const attachedPhotos: Array<{ url: string, taken_on?: string | null, note?: string | null }> = []
+      try {
+        const invPhotos = await sbGet(`invoice_photos?invoice_id=eq.${enc(String(inv.id))}&select=stop_id,path,taken_on,note&order=created_at.asc`)
+        for (const p of invPhotos || []) {
+          const url = `${SUPABASE_URL}/storage/v1/object/public/stop-photos/${enc(String(p.path))}`
+          if (p.stop_id && lineStopIds.has(String(p.stop_id))) {
+            if (!photosByStop.has(String(p.stop_id))) photosByStop.set(String(p.stop_id), [])
+            photosByStop.get(String(p.stop_id))!.push(url)
+          } else {
+            attachedPhotos.push({ url, taken_on: p.taken_on, note: p.note })
+          }
+        }
+      } catch (_e) { /* attachments never block the email */ }
       const s = await getSettings()
       const company = s.company_name || "Valet Waste FL"
       const money = (v: unknown) => "$" + Number(v || 0).toFixed(2)
@@ -516,7 +542,7 @@ Deno.serve(async (req) => {
       await sendInvoiceEmail(
         cust.email,
         subject,
-        invoiceEmailHtml(cust, s, inv, items, url, photosByStop),
+        invoiceEmailHtml(cust, s, inv, items, url, photosByStop, attachedPhotos),
         invoiceEmailText(cust, s, inv, items, url),
         company,
       )

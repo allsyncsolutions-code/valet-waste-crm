@@ -19,7 +19,14 @@ import {
   invoiceTotals,
   lineAmount,
   round2,
+  loadInvoicePhotos,
+  uploadInvoicePhoto,
+  deleteInvoicePhoto,
+  attachExistingPhoto,
+  loadClientServiceHistory,
 } from '../lib/invoicesData.js'
+import { loadStopPhotos } from '../lib/photosData.js'
+import { currentActorName } from '../lib/activityData.js'
 
 const money = (v) => '$' + Number(v || 0).toFixed(2)
 const initialsOf = (name) =>
@@ -33,7 +40,9 @@ const STATUS_META = {
   void: { label: 'Void', color: '#9a2c1e', bg: '#fdecea' },
 }
 const FILTERS = [['all', 'All'], ['draft', 'Draft'], ['sent', 'Sent'], ['paid', 'Paid']]
-const today = () => new Date().toISOString().slice(0, 10)
+// Today as a LOCAL date — toISOString() would return the UTC date (a day
+// ahead after 8 PM Eastern).
+const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` }
 const blankLine = () => ({ title: '', description: '', quantity: 1, unitPrice: '' })
 const blankForm = () => ({ customerId: '', issueDate: today(), dueDate: '', notes: '', discount: '', items: [blankLine()] })
 const blankClient = () => ({ name: '', contactName: '', email: '', phone: '', address: '' })
@@ -54,6 +63,7 @@ export default function Invoices({ app }) {
   const [paymentsOk, setPaymentsOk] = useState(false)
   const [payCfg, setPayCfg] = useState(null) // Runner.js config for "Take payment"
   const [takePay, setTakePay] = useState(false)
+  const [photosOpen, setPhotosOpen] = useState(false) // Add-photos modal (manual proof-of-service)
 
   const [showForm, setShowForm] = useState(false)
   const [editId, setEditId] = useState(null)
@@ -433,12 +443,16 @@ export default function Invoices({ app }) {
               Select an invoice, or create a new one.
             </div>
           )}
-          {cur && <InvoiceDetail inv={cur} settings={settings} paymentsOk={paymentsOk} busy={busy} onEdit={() => openEdit(cur)} onMarkPaid={onMarkPaid} onSendSms={onSendSms} onSendEmail={onSendEmail} onSendBoth={onSendBoth} onSchedule={openSchedule} pendingSends={pendingSends} onCancelSend={onCancelSend} onDelete={onDelete} onTakePayment={payCfg ? () => setTakePay(true) : null} />}
+          {cur && <InvoiceDetail inv={cur} settings={settings} paymentsOk={paymentsOk} busy={busy} onEdit={() => openEdit(cur)} onMarkPaid={onMarkPaid} onSendSms={onSendSms} onSendEmail={onSendEmail} onSendBoth={onSendBoth} onSchedule={openSchedule} pendingSends={pendingSends} onCancelSend={onCancelSend} onDelete={onDelete} onTakePayment={payCfg ? () => setTakePay(true) : null} onAddPhotos={() => setPhotosOpen(true)} />}
         </div>
       </div>
 
       {takePay && cur && (
         <TakePaymentModal inv={cur} cfg={payCfg} onClose={() => setTakePay(false)} onPaid={() => refresh().catch(() => {})} />
+      )}
+
+      {photosOpen && cur && (
+        <AddPhotosModal invoice={cur} onClose={() => setPhotosOpen(false)} onDone={() => refresh().catch(() => {})} />
       )}
 
       {schedOpen && cur && (
@@ -612,12 +626,29 @@ function useStopPhotoMap(stopIds) {
   return byStop
 }
 
-function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, onSendSms, onSendEmail, onSendBoth, onSchedule, pendingSends, onCancelSend, onDelete, onTakePayment }) {
+function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, onSendSms, onSendEmail, onSendBoth, onSchedule, pendingSends, onCancelSend, onDelete, onTakePayment, onAddPhotos }) {
   const meta = STATUS_META[inv.status] || STATUS_META.draft
   const company = settings || {}
   const contactBits = [company.company_phone, company.company_email, company.company_address].filter(Boolean)
   // Proof-of-service thumbnails live INSIDE each line item (keyed by stop).
   const photoByStop = useStopPhotoMap((inv.items || []).map((it) => it.stopId).filter(Boolean))
+  // Manually attached photos (invoice_photos): ones tied to a line's stop merge
+  // into that line's thumbnails; the rest render in a trailing grid.
+  const [invPhotos, setInvPhotos] = useState([])
+  useEffect(() => {
+    let alive = true
+    loadInvoicePhotos(inv.id).then((r) => { if (alive) setInvPhotos(r) }).catch(() => { if (alive) setInvPhotos([]) })
+    return () => { alive = false }
+  }, [inv.id])
+  const mergedByStop = useMemo(() => {
+    const m = { ...photoByStop }
+    for (const p of invPhotos) {
+      if (p.stop_id) (m[p.stop_id] = m[p.stop_id] || []).push(p.url)
+    }
+    return m
+  }, [photoByStop, invPhotos])
+  const lineStopIds = useMemo(() => new Set((inv.items || []).map((it) => it.stopId).filter(Boolean)), [inv.items])
+  const loosePhotos = invPhotos.filter((p) => !p.stop_id || !lineStopIds.has(p.stop_id))
   return (
     <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, overflow: 'hidden' }}>
       {/* masthead: logo + business name (left) · contact info (right) */}
@@ -668,7 +699,7 @@ function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, on
         </div>
         {inv.items.length === 0 && <div style={{ padding: '12px 0', color: '#9aa69e', fontSize: 12.5 }}>No line items.</div>}
         {inv.items.map((it) => {
-          const photos = it.stopId ? photoByStop[it.stopId] || [] : []
+          const photos = it.stopId ? mergedByStop[it.stopId] || [] : []
           return (
           <div key={it.id} style={{ display: 'grid', gridTemplateColumns: '1fr 50px 90px 90px', gap: 8, padding: '9px 10px', borderBottom: '1px solid #f5f6f4', fontSize: 13, alignItems: 'start' }}>
             <div style={{ color: '#1a2420' }}>
@@ -700,6 +731,20 @@ function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, on
           <TotalRow label={inv.tipAmount > 0 ? 'Invoice total' : 'Total'} value={money(inv.total)} bold />
           {inv.tipAmount > 0 && <TotalRow label="Charged (with tip)" value={money(inv.total + inv.tipAmount)} bold />}
         </div>
+
+        {/* manually attached photos not tied to a line's stop */}
+        {loosePhotos.length > 0 && (
+          <div style={{ marginTop: 14 }}>
+            <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.08em', color: '#9aa69e', margin: '10px 0 8px' }}>SERVICE PHOTOS · ATTACHED ({loosePhotos.length})</div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 7 }}>
+              {loosePhotos.map((p) => (
+                <a key={p.id} href={p.url} target="_blank" rel="noreferrer" title={[p.taken_on ? fmtDate(p.taken_on) : null, p.note].filter(Boolean).join(' — ')}>
+                  <img src={p.url} alt="Service photo" style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 8, border: '1px solid #e6eae6', display: 'block' }} />
+                </a>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {(inv.notes || company.invoice_terms) && (
@@ -765,6 +810,7 @@ function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, on
           <button onClick={onTakePayment} disabled={busy} style={{ background: '#fff', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: busy ? 0.6 : 1 }}>💳 Take payment</button>
         )}
         {inv.status !== 'paid' && <button onClick={onMarkPaid} disabled={busy} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: busy ? 0.6 : 1 }}>Mark paid</button>}
+        <button onClick={onAddPhotos} disabled={busy} title="Manually attach proof-of-service photos for past services — picks the date, service and address from this client's history" style={{ background: '#fff', border: '1px solid #dde2dd', color: '#1a2420', borderRadius: 9, padding: '10px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>📷 Add photos</button>
         <div style={{ flex: 1 }} />
         <button onClick={onDelete} disabled={busy} style={{ background: '#fff', border: '1px solid #f0c9c2', color: '#c0492f', borderRadius: 9, padding: '10px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Delete</button>
       </div>
@@ -1050,6 +1096,160 @@ function TakePaymentModal({ inv, cfg, onClose, onPaid }) {
             </div>
           </>
         )}
+      </div>
+    </div>
+  )
+}
+
+// Manually attach proof-of-service photos for PAST services: the client's
+// service history (date · service · address) with whatever photos already
+// exist, plus an upload control per visit. Uploaded photos ride the invoice
+// (inside the matching line item when one bills that stop, otherwise in the
+// attached-photos grid) and go out with the email / pay page.
+function AddPhotosModal({ invoice, onClose, onDone }) {
+  const [events, setEvents] = useState(null) // null = loading
+  const [stopPics, setStopPics] = useState({}) // stopId -> [photo] (photos on file at the stop)
+  const [attached, setAttached] = useState([]) // invoice_photos rows for THIS invoice
+  const [busyKey, setBusyKey] = useState(null)
+  const [err, setErr] = useState(null)
+
+  async function reload() {
+    try {
+      const [evs, atts] = await Promise.all([
+        loadClientServiceHistory(invoice.customerId),
+        loadInvoicePhotos(invoice.id),
+      ])
+      setEvents(evs)
+      setAttached(atts)
+      if (evs.length) {
+        loadStopPhotos(evs.map((e) => e.stopId)).then(setStopPics).catch(() => {})
+      }
+    } catch (e) {
+      setEvents([])
+      setErr(e.message || String(e))
+    }
+  }
+  useEffect(() => { reload() }, [invoice.id])
+
+  async function addFiles(ev, stopId, takenOn) {
+    const files = Array.from(ev.target.files || [])
+    ev.target.value = ''
+    if (!files.length) return
+    setBusyKey(String(stopId))
+    setErr(null)
+    try {
+      const who = await currentActorName().catch(() => null)
+      for (const f of files) {
+        await uploadInvoicePhoto(invoice.id, f, { stopId, takenOn, createdBy: who })
+      }
+      setAttached(await loadInvoicePhotos(invoice.id))
+      onDone && onDone()
+    } catch (e) {
+      setErr(e.message || String(e))
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  async function removeAttached(p) {
+    setErr(null)
+    try {
+      await deleteInvoicePhoto(p)
+      setAttached(await loadInvoicePhotos(invoice.id))
+      onDone && onDone()
+    } catch (e) {
+      setErr(e.message || String(e))
+    }
+  }
+
+  // Pull a driver-captured photo onto this invoice (references the existing
+  // storage object — the original stays on the stop's record untouched).
+  async function attachOnFile(p, stopId, date) {
+    setBusyKey(`file-${p.id}`)
+    setErr(null)
+    try {
+      const who = await currentActorName().catch(() => null)
+      await attachExistingPhoto(invoice.id, { stopId, path: p.path, takenOn: date, createdBy: who })
+      setAttached(await loadInvoicePhotos(invoice.id))
+      onDone && onDone()
+    } catch (e) {
+      setErr(e.message || String(e))
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  const attachedFor = (stopId) => attached.filter((p) => p.stop_id === stopId)
+
+  return (
+    <div onClick={() => !busyKey && onClose()} style={overlay}>
+      <div onClick={(e) => e.stopPropagation()} style={{ ...modal, width: 600, maxHeight: '86vh', display: 'flex', flexDirection: 'column' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+          <div style={{ fontWeight: 700, fontSize: 16, flex: 1 }}>Add service photos — {invoice.number}</div>
+          <div onClick={() => !busyKey && onClose()} style={{ cursor: 'pointer', color: '#7c8a82', fontSize: 18 }}>✕</div>
+        </div>
+        <div style={{ fontSize: 12.5, color: '#7c8a82', marginBottom: 14 }}>
+          {invoice.customerName} — pick the visit these photos belong to. Photos attach to the invoice (and to its line item when one bills that visit), and go out with the email / pay page.
+        </div>
+        {err && <div style={{ background: '#fdecea', border: '1px solid #f3b7b0', color: '#9a2c1e', borderRadius: 9, padding: '8px 12px', fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
+
+        <div style={{ flex: 1, overflowY: 'auto', margin: '0 -8px', padding: '0 8px' }}>
+          {events === null ? (
+            <div style={{ padding: 24, textAlign: 'center', color: '#9aa69e', fontSize: 13 }}>Loading service history…</div>
+          ) : events.length === 0 ? (
+            <div style={{ padding: 24, textAlign: 'center', color: '#9aa69e', fontSize: 13 }}>No service history found for this client yet — add stops on a route first.</div>
+          ) : events.map((e) => {
+            const mine = attachedFor(e.stopId)
+            const onFile = stopPics[e.stopId] || []
+            return (
+              <div key={e.stopId} style={{ border: '1px solid #e6eae6', borderRadius: 11, padding: '10px 12px', marginBottom: 9 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700 }}>{fmtDate(e.date)}{e.route ? <span style={{ fontFamily: MONO, fontSize: 10.5, color: '#7c8a82', fontWeight: 600, marginLeft: 7 }}>Route {e.route}</span> : null}</div>
+                    <div style={{ fontSize: 11.5, color: '#7c8a82', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{[e.service, e.address].filter(Boolean).join(' · ') || '—'}</div>
+                  </div>
+                  <label title="Attach photos from this visit to the invoice" style={{ flex: 'none', display: 'inline-flex', alignItems: 'center', gap: 6, background: '#1f7a4d', color: '#fff', borderRadius: 8, padding: '7px 12px', fontSize: 12, fontWeight: 600, cursor: busyKey ? 'wait' : 'pointer', opacity: busyKey === String(e.stopId) ? 0.6 : 1 }}>
+                    {busyKey === String(e.stopId) ? 'Adding…' : '＋ Add photos'}
+                    <input type="file" accept="image/*" multiple style={{ display: 'none' }} onChange={(ev) => addFiles(ev, e.stopId, e.date)} />
+                  </label>
+                </div>
+                {mine.length > 0 && (
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 9 }}>
+                    <div style={{ width: '100%', fontSize: 10, fontFamily: MONO, letterSpacing: '.06em', color: '#1f7a4d', fontWeight: 700 }}>ON THIS INVOICE</div>
+                    {mine.map((p) => (
+                      <div key={p.id} style={{ position: 'relative', width: 54, height: 54 }}>
+                        <a href={p.url} target="_blank" rel="noreferrer"><img src={p.url} alt="Attached" style={{ width: 54, height: 54, objectFit: 'cover', borderRadius: 7, border: '1px solid #cfe7da', display: 'block' }} /></a>
+                        <button onClick={() => removeAttached(p)} title="Remove from this invoice" style={{ position: 'absolute', top: -6, right: -6, width: 17, height: 17, borderRadius: '50%', background: '#c0492f', color: '#fff', border: '2px solid #fff', fontSize: 9, lineHeight: 1, cursor: 'pointer', padding: 0 }}>×</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {onFile.length > 0 && (
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: mine.length ? 6 : 9, alignItems: 'center' }}>
+                    <div style={{ width: '100%', fontSize: 10, fontFamily: MONO, letterSpacing: '.06em', color: '#9aa69e', fontWeight: 700 }}>CAPTURED AT THIS VISIT ({onFile.length}) — tap ＋ to put one on the invoice</div>
+                    {onFile.map((p) => {
+                      const already = mine.some((m) => m.path === p.path)
+                      return (
+                        <div key={p.id} style={{ position: 'relative', width: 46, height: 46 }}>
+                          <a href={p.url} target="_blank" rel="noreferrer" title="Captured at this visit by the driver">
+                            <img src={p.url} alt="On file" style={{ width: 46, height: 46, objectFit: 'cover', borderRadius: 6, border: '1px solid #e6eae6', display: 'block', opacity: already ? 0.4 : 0.85 }} />
+                          </a>
+                          {!already && (
+                            <button onClick={() => attachOnFile(p, e.stopId, e.date)} disabled={!!busyKey} title="Put this photo on the invoice" style={{ position: 'absolute', inset: 0, width: 46, height: 46, borderRadius: 6, border: 'none', background: 'rgba(15,40,25,.35)', color: '#fff', fontSize: 16, fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{busyKey === `file-${p.id}` ? '…' : '＋'}</button>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+
+        <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', paddingTop: 14 }}>
+          <button onClick={onClose} disabled={!!busyKey} style={ghostBtn}>Done</button>
+        </div>
       </div>
     </div>
   )

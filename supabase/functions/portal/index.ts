@@ -563,8 +563,10 @@ Deno.serve(async (req) => {
       // Service photos keyed by stop, attached to the line item that bills
       // each stop (render-time — see payments fn). Photos never break the pay page.
       const photoByStop = new Map<string, string[]>()
+      const lineStopIds = new Set<string>((inv.invoice_line_items || []).map((li: any) => li.stop_id).filter(Boolean))
+      const attachedPhotos: Array<{ url: string, taken_on?: string | null, note?: string | null }> = []
       try {
-        const stopIds = [...new Set((inv.invoice_line_items || []).map((li: any) => li.stop_id).filter(Boolean))]
+        const stopIds = [...lineStopIds]
         if (stopIds.length) {
           const idList = stopIds.map((id: any) => enc(String(id))).join(",")
           const photos = await sbGet(`stop_photos?stop_id=in.(${idList})&select=stop_id,path&order=created_at.asc`)
@@ -572,6 +574,18 @@ Deno.serve(async (req) => {
             const url = `${SUPABASE_URL}/storage/v1/object/public/stop-photos/${enc(String(p.path))}`
             if (!photoByStop.has(p.stop_id)) photoByStop.set(p.stop_id, [])
             photoByStop.get(p.stop_id)!.push(url)
+          }
+        }
+        // Manually attached photos (admin "Add photos"): merge into their
+        // line's thumbnails, keep the rest for the trailing grid.
+        const invPhotos = await sbGet(`invoice_photos?invoice_id=eq.${enc(invoiceId)}&select=stop_id,path,taken_on,note&order=created_at.asc`)
+        for (const p of invPhotos || []) {
+          const url = `${SUPABASE_URL}/storage/v1/object/public/stop-photos/${enc(String(p.path))}`
+          if (p.stop_id && lineStopIds.has(String(p.stop_id))) {
+            if (!photoByStop.has(String(p.stop_id))) photoByStop.set(String(p.stop_id), [])
+            photoByStop.get(String(p.stop_id))!.push(url)
+          } else {
+            attachedPhotos.push({ url, taken_on: p.taken_on, note: p.note })
           }
         }
       } catch (_e) { /* photos never break the pay page */ }
@@ -602,7 +616,7 @@ Deno.serve(async (req) => {
         invoice: {
           id: inv.id, number: inv.number, status: inv.status,
           total: inv.total, tip_amount: Number(inv.tip_amount || 0), subtotal: inv.subtotal, discount: inv.discount,
-          due_date: inv.due_date, issue_date: inv.issue_date, notes: inv.notes || null, items,
+          due_date: inv.due_date, issue_date: inv.issue_date, notes: inv.notes || null, items, attached_photos: attachedPhotos,
         },
         payment: {
           available: !!(settings.run_mid && settings.run_public_key),

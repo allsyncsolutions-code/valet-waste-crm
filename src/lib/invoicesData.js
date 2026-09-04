@@ -96,6 +96,86 @@ export async function loadInvoicesForCustomer(customerId, limit = 25) {
   return data || []
 }
 
+// ---- manual proof-of-service photos attached to an invoice ------------------
+// Files live in the public `stop-photos` bucket under inv/<invoiceId>/ (no new
+// bucket); the invoice_photos table tracks metadata. Photos with a stop_id
+// render inside the matching line item; the rest render in the invoice's
+// trailing photo grid.
+const PHOTO_BUCKET = 'stop-photos'
+const photoUrl = (path) => supabase.storage.from(PHOTO_BUCKET).getPublicUrl(path).data.publicUrl
+
+export async function loadInvoicePhotos(invoiceId) {
+  const { data, error } = await supabase
+    .from('invoice_photos')
+    .select('id, stop_id, path, taken_on, note, created_by, created_at')
+    .eq('invoice_id', invoiceId)
+    .order('created_at', { ascending: true })
+  if (error) throw error
+  return (data || []).map((r) => ({ ...r, url: photoUrl(r.path) }))
+}
+
+export async function uploadInvoicePhoto(invoiceId, file, { stopId = null, takenOn = null, note = null, createdBy = null } = {}) {
+  const ext = (file.name && file.name.split('.').pop()) || 'jpg'
+  const path = `inv/${invoiceId}/${crypto.randomUUID()}.${ext.toLowerCase()}`
+  const { error: upErr } = await supabase.storage.from(PHOTO_BUCKET).upload(path, file, {
+    cacheControl: '3600', contentType: file.type || 'image/jpeg', upsert: false,
+  })
+  if (upErr) throw upErr
+  const { data, error } = await supabase
+    .from('invoice_photos')
+    .insert({ invoice_id: invoiceId, stop_id: stopId || null, path, taken_on: takenOn || null, note: note || null, created_by: createdBy || null })
+    .select('id, stop_id, path, taken_on, note, created_by, created_at')
+    .single()
+  if (error) throw error
+  return { ...data, url: photoUrl(data.path) }
+}
+
+export async function deleteInvoicePhoto(photo) {
+  const { error } = await supabase.from('invoice_photos').delete().eq('id', photo.id)
+  if (error) throw error
+  // Only remove the stored file for photos WE uploaded (inv/ prefix) — rows
+  // attached from an existing stop/property photo just borrow that path.
+  if (String(photo.path || '').startsWith('inv/')) {
+    try { await supabase.storage.from(PHOTO_BUCKET).remove([photo.path]) } catch (e) { /* row gone; object cleanup best-effort */ }
+  }
+}
+
+// Reference an EXISTING photo (e.g. one the driver captured at the stop)
+// on this invoice — no re-upload, just a metadata row pointing at the same
+// storage object.
+export async function attachExistingPhoto(invoiceId, { stopId = null, path, takenOn = null, createdBy = null }) {
+  const { data, error } = await supabase
+    .from('invoice_photos')
+    .insert({ invoice_id: invoiceId, stop_id: stopId || null, path, taken_on: takenOn || null, created_by: createdBy || null })
+    .select('id, stop_id, path, taken_on, note, created_by, created_at')
+    .single()
+  if (error) throw error
+  return { ...data, url: photoUrl(data.path) }
+}
+
+// The client's service history for the Add-photos modal: their properties'
+// route stops (visit date, service, address), newest first.
+export async function loadClientServiceHistory(customerId, limit = 25) {
+  const { data, error } = await supabase
+    .from('route_stops')
+    .select('id, service, properties!inner(address, name, service), routes(service_date, code)')
+    .eq('properties.customer_id', customerId)
+    .order('created_at', { ascending: false })
+    .limit(120)
+  if (error) throw error
+  return (data || [])
+    .filter((s) => s.routes?.service_date)
+    .sort((a, b) => String(b.routes.service_date).localeCompare(String(a.routes.service_date)))
+    .slice(0, limit)
+    .map((s) => ({
+      stopId: s.id,
+      date: String(s.routes.service_date).slice(0, 10),
+      service: s.service || s.properties?.service || '',
+      address: s.properties?.address || s.properties?.name || '',
+      route: s.routes?.code || null,
+    }))
+}
+
 // Replace all line items for an invoice (simplest correct edit path).
 async function writeLineItems(invoiceId, items) {
   const { error: delErr } = await supabase

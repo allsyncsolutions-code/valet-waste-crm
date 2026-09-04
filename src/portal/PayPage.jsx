@@ -246,6 +246,23 @@ export default function PayPage({ slug, invoiceId }) {
           <div style={{ fontWeight: 800, fontSize: 21 }}>{money(inv.total)}</div>
         </div>
 
+        {/* manually attached service photos (not tied to a specific line) */}
+        {(inv.attached_photos || []).length > 0 && (
+          <div style={{ margin: '0 18px', padding: '12px 0 14px', borderTop: '1px solid #f0f2ef' }}>
+            <div style={{ fontSize: 9.5, letterSpacing: '.1em', color: '#9aa69e', margin: '4px 0 8px', fontWeight: 600 }}>SERVICE PHOTOS</div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
+              {inv.attached_photos.map((p, i) => (
+                <div key={i}>
+                  <a href={p.url} target="_blank" rel="noreferrer">
+                    <img src={p.url} alt="Service photo" style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 8, border: '1px solid #e6ece8', display: 'block' }} />
+                  </a>
+                  {(p.taken_on || p.note) ? <div style={{ fontSize: 9.5, color: '#9aa69e', marginTop: 3 }}>{[p.taken_on, p.note].filter(Boolean).join(' — ')}</div> : null}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* notes + terms */}
         {(inv.notes || info.terms) && (
           <div style={{ margin: '0 18px', padding: '0 0 14px', borderTop: '1px solid #f0f2ef' }}>
