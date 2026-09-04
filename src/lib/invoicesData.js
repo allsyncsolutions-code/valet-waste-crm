@@ -83,6 +83,19 @@ export async function loadInvoices(line) {
   return rows.map(mapInvoice)
 }
 
+// One client's invoices, newest first — powers the Invoices card in the
+// client record (Clients tab).
+export async function loadInvoicesForCustomer(customerId, limit = 25) {
+  const { data, error } = await supabase
+    .from('invoices')
+    .select('id, number, status, issue_date, due_date, subtotal, total, tip_amount, sent_at, paid_at, created_at')
+    .eq('customer_id', customerId)
+    .order('created_at', { ascending: false })
+    .limit(limit)
+  if (error) throw error
+  return data || []
+}
+
 // Replace all line items for an invoice (simplest correct edit path).
 async function writeLineItems(invoiceId, items) {
   const { error: delErr } = await supabase

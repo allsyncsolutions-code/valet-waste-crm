@@ -1214,6 +1214,20 @@ async function nearbyRouteStop(address: string, date: string) {
 const today = () =>
   new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", dateStyle: "short" }).format(new Date())
 
+// Timestamps handed to the model are ALWAYS rendered in Eastern time — a raw
+// UTC ISO string makes a 9:29pm ET check-out read as "1:29am" (next-day UTC).
+// Every tool result that shows a human a time goes through these.
+const ET_TIME = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York", month: "short", day: "numeric",
+  hour: "numeric", minute: "2-digit",
+})
+const etTs = (ts: string | null | undefined) =>
+  ts ? `${ET_TIME.format(new Date(ts))} ET` : null
+// Calendar date (YYYY-MM-DD) of a timestamp in Eastern time — slicing the raw
+// ISO string gives the UTC date, which is wrong for anything after 8pm ET.
+const etDate = (ts: string | null | undefined) =>
+  ts ? new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", dateStyle: "short" }).format(new Date(ts)) : null
+
 async function driverName(id: string | null): Promise<string | null> {
   if (!id) return null
   const r = await sbGet(`profiles?id=eq.${enc(id)}&select=full_name,email`)
@@ -2146,7 +2160,7 @@ async function listJobs(a: any) {
 
 async function listAutomations() {
   const rows = await sbGet(`automations?select=kind,name,description,status,last_run_at&order=created_at.asc`)
-  return { automations: rows }
+  return { automations: rows.map((r: any) => ({ kind: r.kind, name: r.name, description: r.description, status: r.status, last_run: etTs(r.last_run_at) })) }
 }
 
 async function suggestAutomation(a: any) {
@@ -2300,7 +2314,7 @@ async function listClientNotes(a: any) {
   return {
     client: client.name,
     count: rows.length,
-    notes: rows.map((n: any) => ({ date: String(n.created_at).slice(0, 10), by: n.author_name || "staff", note: n.body })),
+    notes: rows.map((n: any) => ({ at: etTs(n.created_at), by: n.author_name || "staff", note: n.body })),
   }
 }
 
@@ -2405,15 +2419,15 @@ async function getPortalStatus(a: any) {
     client: cust.name,
     portal_link: cust.portal_slug ? `${PORTAL_ORIGIN}/?portal=${cust.portal_slug}` : null,
     has_logged_in: !!sess,
-    last_seen: sess?.last_seen_at || sess?.created_at || null,
+    last_seen: etTs(sess?.last_seen_at || sess?.created_at),
     card_on_file: cust.run_vault_id ? { brand: cust.run_card_brand, last4: cust.run_card_last4 } : null,
     autopay: !!cust.autopay_consent,
-    autopay_since: cust.autopay_consented_at || null,
+    autopay_since: etTs(cust.autopay_consented_at),
     fifth_week_credits_applied: credits.length,
     balance_due: balanceDue,
     open_invoices: invoices.map((i: any) => ({ number: i.number, total: i.total, due: i.due_date })),
     open_quotes: quotes.map((q: any) => ({ number: q.number, title: q.title, total: q.total, status: q.status })),
-    open_requests: requests.map((r: any) => ({ kind: r.kind, message: r.message, status: r.status, date: String(r.created_at).slice(0, 10) })),
+    open_requests: requests.map((r: any) => ({ kind: r.kind, message: r.message, status: r.status, at: etTs(r.created_at) })),
     contact: { phone: cust.phone || null, email: cust.email || null },
   }
 }
@@ -2670,7 +2684,7 @@ async function getClientInvoices(a: any) {
     client: c.name,
     outstanding_balance: outstanding,
     count: rows.length,
-    invoices: rows.map((i: any) => ({ number: i.number, status: i.status, total: Number(i.total || 0), due: i.due_date, paid_at: i.paid_at, created: i.created_at })),
+    invoices: rows.map((i: any) => ({ number: i.number, status: i.status, total: Number(i.total || 0), due: i.due_date, paid: etTs(i.paid_at), created: etTs(i.created_at) })),
   }
 }
 
@@ -2747,9 +2761,9 @@ async function getServiceHistory(a: any) {
     visits: stops.map((s: any) => ({
       date: s.routes?.service_date,
       address: s.properties?.address || s.properties?.name,
-      on_my_way: s.on_my_way_at,
-      checked_in: s.check_in,
-      checked_out: s.check_out,
+      on_my_way: etTs(s.on_my_way_at),
+      checked_in: etTs(s.check_in),
+      checked_out: etTs(s.check_out),
       photos: (s.stop_photos || []).length,
       gps: s.check_in_lat != null ? `${s.check_in_lat},${s.check_in_lng}` : null,
       status: s.check_out ? "completed" : s.check_in ? "in progress" : "not serviced",
@@ -2762,7 +2776,7 @@ async function listActivity(a: any) {
   let q = `activity_log?select=created_at,actor,type,summary&order=created_at.desc&limit=${limit}`
   if (a.type) q += `&type=eq.${enc(String(a.type).trim())}`
   const rows = await sbGet(q)
-  return { count: rows.length, activity: rows }
+  return { count: rows.length, activity: rows.map((r: any) => ({ at: etTs(r.created_at), actor: r.actor, type: r.type, summary: r.summary })) }
 }
 
 async function listMessages(a: any) {
@@ -2777,7 +2791,7 @@ async function listMessages(a: any) {
     if (digits) filter = `&or=(to_number.ilike.*${digits}*,from_number.ilike.*${digits}*)`
   }
   const rows = await sbGet(`sms_messages?select=created_at,direction,to_number,from_number,body,status,purpose${filter}&order=created_at.desc&limit=${limit}`)
-  return { count: rows.length, messages: rows.map((m: any) => ({ at: m.created_at, dir: m.direction, to: m.to_number, from: m.from_number, body: m.body, status: m.status, purpose: m.purpose })) }
+  return { count: rows.length, messages: rows.map((m: any) => ({ at: etTs(m.created_at), dir: m.direction, to: m.to_number, from: m.from_number, body: m.body, status: m.status, purpose: m.purpose })) }
 }
 
 async function listTeam(a: any) {

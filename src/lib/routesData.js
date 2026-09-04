@@ -143,13 +143,20 @@ export async function loadRouteSlice(code = 'B', date = null, line = null) {
   const onRoute = new Set(stops.map((s) => s.propertyId))
   // Properties already placed on ANOTHER route this date are not "unrouted" —
   // a stop only needs to be on one route for the day, so don't flag it while
-  // planning a different route.
+  // planning a different route. The propertyId → code map also labels those
+  // stops in the "+ Add stops" picker, where they stay selectable: putting the
+  // same address on a second (alternate/backup) route for the day is allowed.
   let placedElsewhere = new Set()
+  let elsewhereCodes = {}
   if (date) {
-    const { data: dayRoutes } = await supabase.from('routes').select('id').eq('service_date', date).neq('id', route.id)
+    const { data: dayRoutes } = await supabase.from('routes').select('id, code').eq('service_date', date).neq('id', route.id)
     if (dayRoutes && dayRoutes.length) {
-      const { data: dayStops } = await supabase.from('route_stops').select('property_id').in('route_id', dayRoutes.map((r) => r.id))
-      placedElsewhere = new Set((dayStops || []).map((s) => s.property_id))
+      const { data: dayStops } = await supabase.from('route_stops').select('property_id, route_id').in('route_id', dayRoutes.map((r) => r.id))
+      for (const s of dayStops || []) {
+        placedElsewhere.add(s.property_id)
+        const code = (dayRoutes.find((r) => r.id === s.route_id) || {}).code
+        if (code) elsewhereCodes[s.property_id] = code
+      }
     }
   }
   // "Unrouted" means due on THIS date but not yet placed on the route — not the
@@ -184,7 +191,7 @@ export async function loadRouteSlice(code = 'B', date = null, line = null) {
   const depot = route.depot_lat != null
     ? { name: route.depot_name || homeDepot.name, lat: route.depot_lat, lng: route.depot_lng }
     : homeDepot
-  return { route, depot, stops, unrouted, placedElsewhereIds: [...placedElsewhere] }
+  return { route, depot, stops, unrouted, placedElsewhereIds: [...placedElsewhere], elsewhereCodes }
 }
 
 // Persist a new visit order (writes seq for every stop).
@@ -518,6 +525,63 @@ export async function loadAllProperties(line) {
     id: p.id, name: p.name, address: p.address || '', service: p.service || '',
     lat: p.lat, lng: p.lng, needsReview: !!p.needs_review, customerId: p.customer_id, customerName: p.customers?.name || '',
   }))
+}
+
+// Every route that has stops on this date (with done counts) — powers the
+// "Route B ran this day" hint when the selected route shows empty, and the
+// "copy another route's day here" picker for alternate/backup routes.
+export async function loadDayRouteSummaries(date, line = null) {
+  if (!date) return []
+  let q = supabase
+    .from('routes')
+    .select('id, code, name, driver_id, route_stops(status)')
+    .eq('service_date', date)
+  if (line) q = q.eq('business_line', line)
+  const { data, error } = await q.order('code', { ascending: true })
+  if (error) throw error
+  return (data || [])
+    .filter((r) => (r.route_stops || []).length > 0)
+    .map((r) => ({
+      id: r.id,
+      code: r.code,
+      name: r.name || `Route ${r.code}`,
+      driverId: r.driver_id,
+      stops: r.route_stops.length,
+      done: r.route_stops.filter((s) => s.status === 'done').length,
+    }))
+}
+
+// Copy ANOTHER route's stops for the same date onto this route — the one-click
+// way to build an alternate/backup route (same addresses, own stop order, own
+// driver). Properties already on the target route are skipped.
+export async function copyRouteStopsToDate(fromCode, toCode, date) {
+  if (!date) throw new Error('A date is required.')
+  const { data: src } = await supabase
+    .from('routes').select('id').eq('code', fromCode).eq('service_date', date).maybeSingle()
+  if (!src) return { copied: 0, noSource: true }
+  const { data: srcStops, error } = await supabase
+    .from('route_stops')
+    .select('property_id, service, time_window, lat, lng, seq')
+    .eq('route_id', src.id)
+    .order('seq', { ascending: true })
+  if (error) throw error
+  if (!srcStops || !srcStops.length) return { copied: 0, noSource: true }
+
+  const target = await ensureRoute(toCode, date)
+  const { data: existing } = await supabase.from('route_stops').select('property_id, seq').eq('route_id', target.id)
+  const have = new Set((existing || []).map((e) => e.property_id))
+  let seq = (existing || []).reduce((m, e) => Math.max(m, e.seq || 0), 0)
+  const rows = srcStops
+    .filter((s) => !have.has(s.property_id))
+    .map((s) => ({
+      route_id: target.id, property_id: s.property_id, seq: ++seq, status: 'pending',
+      service: s.service, time_window: s.time_window, lat: s.lat, lng: s.lng,
+    }))
+  if (rows.length) {
+    const { error: iErr } = await supabase.from('route_stops').insert(rows)
+    if (iErr) throw iErr
+  }
+  return { copied: rows.length, sourceCode: fromCode, route: target }
 }
 
 // Append many properties to a date's route in one shot (skips ones already on it).

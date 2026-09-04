@@ -204,7 +204,7 @@ async function runInvoiceReminders(auto: any): Promise<string> {
 
   const custIds = [...new Set(invoices.map((i: any) => i.customer_id).filter(Boolean))]
   const customers: Record<string, any> = {}
-  for (const c of await sbGet(`customers?id=in.(${custIds.join(",")})&select=id,name,email,phone,portal_slug`)) customers[c.id] = c
+  for (const c of await sbGet(`customers?id=in.(${custIds.join(",")})&select=id,name,email,phone,portal_slug,notify_on_service`)) customers[c.id] = c
   const settings = (await sbGet(`app_settings?id=eq.1&select=company_name`))[0] || {}
   const company = settings.company_name || "Valet Waste FL"
 
@@ -258,7 +258,9 @@ async function runInvoiceReminders(auto: any): Promise<string> {
     if (emailOn) {
       try { await sendCustomerEmail(cust.email, `Reminder: invoice ${inv.number} — ${amount}`, text, payUrl, amount, company); e++ } catch (_err) { /* try other channels */ }
     }
-    if (r.sms && cust.phone) {
+    // Per-customer text opt-out ('No Service Notifications'): no reminder
+    // TEXTS — the email channel (if the rule has one) still applies.
+    if (r.sms && cust.phone && cust.notify_on_service !== false) {
       try {
         const res = await fetch(`${SUPABASE_URL}/functions/v1/sms`, {
           method: "POST",

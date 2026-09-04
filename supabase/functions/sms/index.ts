@@ -234,6 +234,21 @@ async function sendSms(to: string, body: string, customerId?: string | null, pur
     return { ok: false, paused: true, message: "Texting is paused (RingCentral limit) — no SMS was sent. Emails still go out." }
   }
 
+  // Per-customer text opt-out ('No Service Notifications' flag / tag): no
+  // AUTOMATED texts (reminders, invoice links, notices). Staff-sent 'manual'
+  // texts still go through — a human chose to send those. Same no-`error`
+  // convention as the pause so callers degrade instead of blowing up.
+  if (customerId && purpose !== "manual") {
+    try {
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/customers?id=eq.${encodeURIComponent(String(customerId))}&select=notify_on_service`, { headers: restHeaders })
+      const rows = await r.json()
+      if (rows?.[0]?.notify_on_service === false) {
+        await logMessage({ direction: "out", provider: "optout", to_number: toNum, body, status: "blocked_optout", customer_id: customerId || null, ...meta })
+        return { ok: false, blocked_optout: true, message: "This client is opted out of texts (No Service Notifications) — no SMS was sent." }
+      }
+    } catch (_e) { /* lookup failure must never block a legitimate send */ }
+  }
+
   const rcReady =
     settings.sms_enabled &&
     settings.rc_client_id &&
