@@ -50,6 +50,8 @@ import {
   resetRouteDay,
   restoreDay,
   removeStopsByIds,
+  loadDayRouteSummaries,
+  copyRouteStopsToDate,
 } from '../lib/routesData.js'
 import { loadDrivers } from '../lib/teamData.js'
 import { loadCustomers, updateProperty } from '../lib/customersData.js'
@@ -121,6 +123,7 @@ export default function RoutesView({ app }) {
     setStops(slice.stops)
     setUnrouted(slice.unrouted)
     setElsewhereIds(slice.placedElsewhereIds || [])
+    setElsewhereCodes(slice.elsewhereCodes || {})
     baselineRef.current = routeMetrics(slice.stops, slice.depot)
     return slice
   }
@@ -429,11 +432,13 @@ export default function RoutesView({ app }) {
   const [massSel, setMassSel] = useState(() => new Set())
   const [massLoading, setMassLoading] = useState(false)
   const [massBusy, setMassBusy] = useState(false)
-  // Properties already on ANOTHER route this date — hidden from the Add-stops
-  // picker so the same stop can't end up on two routes for one day.
+  // Properties already on ANOTHER route this date. They stay selectable in the
+  // Add-stops picker (labeled with the route they're on) — an address CAN sit
+  // on a second route for the day when you're building an alternate/backup run.
   const [elsewhereIds, setElsewhereIds] = useState([])
+  const [elsewhereCodes, setElsewhereCodes] = useState({}) // propertyId → route code
 
-  const onRouteIds = useMemo(() => new Set([...stops.map((s) => s.propertyId), ...elsewhereIds]), [stops, elsewhereIds])
+  const onRouteIds = useMemo(() => new Set(stops.map((s) => s.propertyId)), [stops])
   const massFiltered = useMemo(() => {
     const q = massQuery.trim().toLowerCase()
     return allProps.filter((p) =>
@@ -477,6 +482,37 @@ export default function RoutesView({ app }) {
     }
     setMassBusy(false)
   }
+
+  // ---- alternate/backup routes ----
+  // Which other routes have stops today (for the "copy another route here"
+  // picker and the "that day ran on another route" hint below).
+  const [daySummary, setDaySummary] = useState([])
+  useEffect(() => {
+    let alive = true
+    loadDayRouteSummaries(routeSel, app.activeLine)
+      .then((rows) => alive && setDaySummary(rows))
+      .catch(() => alive && setDaySummary([]))
+    return () => { alive = false }
+  }, [routeSel, app.activeLine, route?.id, stops.length])
+
+  const [copyingRoute, setCopyingRoute] = useState(false)
+  async function handleCopyRouteFrom(fromCode) {
+    if (!fromCode || copyingRoute) return
+    setCopyingRoute(true)
+    setErr(null)
+    try {
+      const res = await copyRouteStopsToDate(fromCode, routeCode, routeSel)
+      if (res.noSource) setErr(`Route ${fromCode} has no stops on ${prettyDate(routeSel)} to copy.`)
+      else if (res.copied === 0) setErr(`Nothing new to copy — those stops are already on ${currentDef.name}.`)
+      else setNotice(`Copied ${res.copied} stop${res.copied === 1 ? '' : 's'} from Route ${fromCode} onto ${currentDef.name} for ${prettyDate(routeSel)} — reorder or Optimize for the alternate run.`)
+      await refresh(routeSel)
+    } catch (e) {
+      setErr(e.message || String(e))
+    } finally {
+      setCopyingRoute(false)
+    }
+  }
+  const copyableRoutes = daySummary.filter((r) => r.code !== routeCode)
 
   const [building, setBuilding] = useState(false)
   async function handleBuildFromSchedules() {
@@ -1006,6 +1042,14 @@ export default function RoutesView({ app }) {
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
           <button onClick={openNewStop} style={ghostBtn}>+ New pickup</button>
           <button onClick={openMass} style={ghostBtn}>+ Add stops</button>
+          {copyableRoutes.length > 0 && (
+            <select value="" onChange={(e) => { if (e.target.value) handleCopyRouteFrom(e.target.value); e.target.value = '' }} title="Copy another route's stops for this day onto this route — the one-click way to build an alternate/backup run with the same addresses" style={{ ...ghostBtn, cursor: 'pointer', paddingRight: 4 }}>
+              <option value="">⧉ Copy route here…</option>
+              {copyableRoutes.map((r) => (
+                <option key={r.code} value={r.code}>Route {r.code} · {r.name} ({r.stops} stops)</option>
+              ))}
+            </select>
+          )}
           <button onClick={openCsv} style={ghostBtn}>⇪ Import CSV</button>
           {[...stops, ...unrouted].some((s) => s.needsReview) && (
             <button onClick={handleMarkAllReviewed} style={{ ...ghostBtn, color: '#1f7a4d', borderColor: '#cfe0d5' }} title="Clear every ⚠ REVIEW flag on this route">✓ Mark reviewed</button>
@@ -1082,6 +1126,18 @@ export default function RoutesView({ app }) {
             {!loading && !stops.length && (
               <div style={{ padding: '28px 16px', textAlign: 'center', color: '#9aa69e', fontSize: 12.5 }}>
                 {route ? 'No stops on this route yet.' : 'No route scheduled — add properties and a route to get started.'}
+                {daySummary.length > 0 && (
+                  <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'center' }}>
+                    <div style={{ fontSize: 11.5, color: '#7c8a82' }}>{currentDef.name} didn't run this day — but {daySummary.length === 1 ? 'this route did' : 'these routes did'}:</div>
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'center' }}>
+                      {daySummary.map((r) => (
+                        <button key={r.code} onClick={() => setRouteCode(r.code)} title={`Switch to Route ${r.code}`} style={{ background: '#fff', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 8, padding: '6px 11px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
+                          Route {r.code} · {r.stops} stop{r.stops === 1 ? '' : 's'}{r.done ? ` · ${r.done} done` : ''}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
             {!loading && stops.length > 0 && visibleStops.length === 0 && (
@@ -1222,7 +1278,7 @@ export default function RoutesView({ app }) {
                 <div style={{ fontWeight: 700, fontSize: 16, flex: 1 }}>Add stops to {currentDef.name}</div>
                 <div onClick={() => !massBusy && setShowMass(false)} style={{ cursor: 'pointer', color: '#7c8a82', fontSize: 18 }}>✕</div>
               </div>
-              <div style={{ fontSize: 12.5, color: '#7c8a82', marginBottom: 12 }}>Pick properties to add to {currentDef.code} on <b>{prettyDate(routeSel)}</b>. Already-routed stops are hidden.</div>
+              <div style={{ fontSize: 12.5, color: '#7c8a82', marginBottom: 12 }}>Pick properties to add to {currentDef.code} on <b>{prettyDate(routeSel)}</b>. Properties already on this route are hidden — ones on <i>another</i> route today show a chip and can still be added (alternate/backup routes can share addresses).</div>
               <input value={massQuery} onChange={(e) => setMassQuery(e.target.value)} style={mInp} placeholder="Search by property, address, customer or service…" autoFocus />
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
                 <label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12.5, fontWeight: 600, color: '#5d6b63', cursor: 'pointer' }}>
@@ -1248,6 +1304,9 @@ export default function RoutesView({ app }) {
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                         <span style={{ fontWeight: 600, fontSize: 13.5 }}>{p.name}</span>
                         {p.needsReview && <span title="Flagged for review" style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#c0492f', background: '#fbeae6', padding: '1px 5px', borderRadius: 4, letterSpacing: '.03em' }}>⚠ REVIEW</span>}
+                        {elsewhereCodes[p.id] && (
+                          <span title={`Already on Route ${elsewhereCodes[p.id]} today — adding it here puts the same address on both routes for the day (alternate/backup run)`} style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#5a3e78', background: '#f1e9f8', padding: '1px 5px', borderRadius: 4 }}>⧉ {elsewhereCodes[p.id]}</span>
+                        )}
                       </div>
                       <div style={{ fontSize: 11.5, color: '#7c8a82', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                         {[p.customerName, p.address || p.service].filter(Boolean).join(' · ')}

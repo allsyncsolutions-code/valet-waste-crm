@@ -4,33 +4,21 @@
 Before making changes, read this file completely. Follow these instructions for this repository.
 
 ## Owner approval channel
-For any decision that requires owner approval, send a structured email to:
+**(Updated 2026-09-04, at the owner's direction: the email round-trip is PAUSED.)**
+Ask for approvals **directly in the working session** — the owner works with agents here (desktop or phone remote). Do NOT send AGENT-QUESTION emails to `dev-agents@allsynccrm.com` and do NOT wait on PR-comment replies; the `agent-mail` edge function is dormant (kept deployed for reversibility — its reply-posting half never worked reliably anyway).
 
-`dev-agents@allsynccrm.com`
+For any decision that requires owner approval: pause, ask the owner in the session, and wait for an explicit decision. If the owner is not reachable in the session, stop and leave the work clearly staged (branch pushed, PR open, summary written) rather than proceeding.
 
-Do not make a high-impact decision merely because an implementation seems reasonable. Pause, send the required question, and wait for an explicit decision.
+## Making the ask
+Ask in the conversation, in one clear block:
 
-## Sending the ask (agents have no mail client)
-CLI agents cannot send email directly. Send the approval question with one curl against the `agent-mail` edge function — it files the question, emails `dev-agents@allsynccrm.com` from the company Outlook mailbox, and pushes the owner's phone:
+- **Situation** — one or two sentences.
+- **Decision needed** — the exact question, with options when there are real alternatives (A / B / C) and a recommendation.
+- **Impact** — anything that touches production, customer communications, money, data, or secrets, plus rollback.
 
-```bash
-curl -s -X POST "https://ozoonpwuyusvksmydkuu.supabase.co/functions/v1/agent-mail" \
-  -H "Authorization: Bearer $(cat ~/.valetwaste/agent-ask.key)" \
-  -H "Content-Type: application/json" \
-  --data-binary @- <<'JSON'
-{"action":"send","subject":"[AGENT-QUESTION][BLOCKING][Valet Waste][GitHub PR #12] Short decision title","body":"AGENT-QUESTION v1\nQuestion-ID: aq_20260831_example\nProject: Valet Waste\n…fill the full template below…"}
-JSON
-```
+Keep it short enough to answer from a phone. If the answer changes the risk, scope, cost, data impact, or security impact, ask again — don't stretch an earlier approval to cover new ground.
 
-Before sending:
-
-- Open the pull request (or issue) first — `gh pr create` / `gh issue create` — and use its number in the subject and body. The owner's decision is posted back as a comment on it.
-- Fill the entire email template below; the `Question-ID` must be unique per question (`aq_YYYYMMDD_unique-id`).
-- The endpoint is idempotent per `Question-ID` (a retried curl never emails twice) and rate-limited to 10 questions per hour.
-
-If `~/.valetwaste/agent-ask.key` is missing, or the endpoint answers that Outlook isn't connected or the ask key isn't configured, stop and tell the owner in the session — that is the one case where a human-relayed email is still needed. Never write the key's value into the repository, logs, or an email body.
-
-The owner replies to the email starting `APPROVE:`, `REJECT`, or `CLARIFY`; `agent-mail` posts that reply to the linked PR/issue automatically. Poll for it with `gh pr view NUMBER --comments` (or `gh issue view NUMBER --comments`) every few minutes while you wait. Do not end the waiting period on your own initiative.
+Open a PR for anything non-trivial (`gh pr create`) and reference its number so the work is reviewable, but the approval itself comes from the owner in the session.
 
 ## Decisions that require approval
 Request approval before doing any of the following:
@@ -56,99 +44,19 @@ You may proceed without asking for approval when the change is reversible and do
 
 If uncertain whether approval is required, treat the work as blocked and ask.
 
-## Approval request format
-
-### Email subject
-
-```text
-[AGENT-QUESTION][BLOCKING][Valet Waste][GitHub PR #NUMBER] Short decision title
-```
-
-If no pull request exists yet, use:
-
-```text
-[AGENT-QUESTION][BLOCKING][Valet Waste][GitHub Issue #NUMBER] Short decision title
-```
-
-### Email body
-
-```text
-AGENT-QUESTION v1
-Question-ID: aq_YYYYMMDD_unique-id
-Project: Valet Waste
-Repository: allsyncsolutions-code/valet-waste-crm
-Branch: BRANCH_NAME
-Source: Claude Code
-Return-Channel: github-pr-comment
-Pull-Request: PR_NUMBER
-Blocking: yes
-Priority: high
-Decision-Deadline: ISO-8601 timestamp with timezone
-
-Summary:
-One or two sentences explaining the situation.
-
-Question:
-State the exact decision needed from the owner.
-
-Recommendation:
-State the preferred option and why.
-
-Alternatives:
-A. First viable option.
-B. Second viable option.
-C. Third viable option, if applicable.
-
-Impact:
-Describe security, cost, data, customer, delivery, and rollback impact.
-
-Relevant files:
-List affected file paths and GitHub links if available.
-
-Proposed next action:
-State exactly what you will do after approval.
-```
-
-Replace every ALL-CAPS placeholder with the actual project details. Keep the email concise but complete. The ask endpoint sets the email's `Reply-To` header to `dev-agents@allsynccrm.com` automatically, so the owner's reply returns to the approval mailbox no matter which address the question was sent from. Never include passwords, API keys, tokens, full `.env` files, or unnecessary customer personal data.
-
 ## Valid owner decisions
-Only treat an answer as approval when it begins with one of these exact prefixes:
+Only proceed when the owner gives an explicit, unambiguous go-ahead in the session. The cleanest forms:
 
-```text
-APPROVE:
-REJECT
-CLARIFY
-```
+- `APPROVE:` / `APPROVE: B` (option letter), or plainly worded equivalents such as "approved — merge it" or "yes, do option A".
 
-Examples:
-
-```text
-APPROVE: B
-Decision: Use the staged database migration.
-Constraints: Make it reversible, preserve existing records, add tests, and do not run it in production.
-```
-
-```text
-REJECT
-Decision: Do not add automatic SMS retries.
-Next step: Build a staff-review queue instead.
-```
-
-```text
-CLARIFY
-Question: What is the expected daily message volume, and which provider errors are transient versus permanent?
-```
-
-Do not interpret "yes", "looks good", "go ahead", emoji reactions, or similar informal text as approval.
+Do NOT treat silence, "hm", "maybe later", or a tangent about something else as approval. When a message is ambiguous, confirm with one short question. Record the decision (quote it in the PR description or commit message when practical).
 
 ## After a decision
-
-1. Wait for the owner's response.
-2. Confirm the response matches the active Question-ID and linked GitHub issue or pull request.
-3. Proceed only within the approved option and stated constraints.
-4. If new facts change the risk, scope, cost, data impact, or security impact, stop and send a new question.
-5. Record a concise implementation summary, changed files, validation steps, and test results in the associated GitHub pull request or issue.
-6. Never merge, deploy, publish, change DNS, execute production migrations, or expose secrets solely because an email approval exists; request the specific approval required by the repository's release process.
+1. Confirm the response actually covers the work you're about to do (scope, option, constraints).
+2. Proceed only within the approved option and stated constraints.
+3. If new facts change the risk, scope, cost, data impact, or security impact, stop and ask again.
+4. Record a concise implementation summary, changed files, validation steps, and test results in the associated pull request.
+5. An approval to merge is not automatically an approval for follow-on production changes (e.g. a separately deployed edge function or a migration) — name each step in the ask, or ask again.
 
 ## Project-specific settings
 
@@ -167,3 +75,4 @@ Deployment environment: production (Vercel frontend + hosted Supabase project); 
 - Pushing to `main` triggers `.github/workflows/notify-push.yml`, which sends an SMS to Valet Waste admins via the `notify-push` Supabase edge function. Treat any push to `main` as a customer-facing communication event requiring owner approval.
 - Database migrations live in `supabase/migrations/` and Edge Functions in `supabase/functions/`. Any change there falls under the "requires approval" list above.
 - Frontend environment variables: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` (read in `src/lib/supabaseClient.js`). Never commit `.env` files or secret values.
+- Deploy edge functions from a worktree under `/Users` (never `/tmp`) with `--project-ref ozoonpwuyusvksmydkuu`; worktrees are not supabase-linked.

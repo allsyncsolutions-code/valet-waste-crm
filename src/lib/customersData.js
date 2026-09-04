@@ -157,6 +157,7 @@ export async function addProperty(customerId, fields) {
       tech_pay: fields.tech_pay ?? null,
       pickup_days: fields.pickup_days || [],
       pickup_frequency: fields.pickup_frequency || 'weekly',
+      pickup_start_date: fields.pickup_start_date || null,
     })
     .select('id')
     .single()

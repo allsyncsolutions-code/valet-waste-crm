@@ -2,10 +2,8 @@
 
 Read and follow `AGENTS.md` before planning, editing, testing, committing, or deploying anything in this repository.
 
-The owner-approval workflow in `AGENTS.md` is mandatory. For any decision marked as requiring approval, send the required structured email to:
+The owner-approval workflow in `AGENTS.md` is mandatory. For any decision marked as requiring approval, ask the owner **directly in the working session** (the email round-trip to dev-agents@allsynccrm.com was paused by the owner on 2026-09-04).
 
-[dev-agents@allsynccrm.com](mailto:dev-agents@allsynccrm.com)
+Do not proceed with blocked work until the owner gives an explicit, unambiguous go-ahead in the session (e.g. `APPROVE:`, "approved — merge it", "yes, do option A").
 
-Do not proceed with blocked work until an explicit owner response beginning with `APPROVE:`, `REJECT`, or `CLARIFY` is available.
-
-When an approval response is received, proceed only within its approved scope and constraints. If the scope, risk, cost, data impact, security impact, or customer impact changes, stop and request a new decision.
+When an approval is received, proceed only within its approved scope and constraints. If the scope, risk, cost, data impact, security impact, or customer impact changes, stop and request a new decision.
