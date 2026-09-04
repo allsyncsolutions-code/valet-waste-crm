@@ -139,6 +139,14 @@ Deno.serve(async (req) => {
     try { event = JSON.parse(raw) } catch { return json({ error: "Bad payload." }, 400) }
     try {
       const obj = event.data?.object || {}
+      // This Stripe account also carries AllSync agency workspace
+      // subscriptions (allsync-dashboard billing). Only events for OUR
+      // customer may touch the singleton row — anything else overwrites
+      // real state (a $1 test-workspace sub did exactly that 2026-09-02
+      // and showed in the CRM as this subscription being "Active").
+      const billing = await getBilling()
+      const cust = typeof obj.customer === "string" ? obj.customer : obj.customer?.id
+      if (!cust || cust !== billing.stripe_customer_id) return json({ received: true })
       switch (event.type) {
         case "checkout.session.completed": {
           const patch: Record<string, unknown> = {}
@@ -210,6 +218,10 @@ Deno.serve(async (req) => {
           success_url: `${origin}/?crm_billing=success`,
           cancel_url: `${origin}/?crm_billing=cancel`,
           allow_promotion_codes: true,
+          // Tag our sessions so future handlers can identify them without
+          // relying on the customer id alone.
+          "metadata[app]": "valet-waste-crm",
+          "subscription_data[metadata][app]": "valet-waste-crm",
         },
       })
       return json({ url: session.url })
