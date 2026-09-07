@@ -13,6 +13,7 @@ function mapCustomer(row) {
     id: row.id,
     name: row.name,
     contactName: row.contact_name || '',
+    contactPhone: row.contact_phone || '', // POC number: texts go here first when set
     email: row.email || '',
     phone: row.phone || '',
     address: row.address || '',
@@ -55,6 +56,7 @@ export async function createClient(payload) {
     .insert({
       name: payload.name,
       contact_name: payload.contactName || null,
+      contact_phone: payload.contactPhone || null,
       email: payload.email || null,
       phone: payload.phone || null,
       address: payload.address || null,
@@ -99,6 +101,7 @@ export async function updateCustomer(id, payload) {
     .update({
       name: payload.name,
       contact_name: payload.contactName || null,
+      contact_phone: payload.contactPhone || null,
       email: payload.email || null,
       phone: payload.phone || null,
       address: payload.address || null,
@@ -320,7 +323,7 @@ export async function countPropertiesByCustomer(customerIds) {
 // PARTIAL client update — only the fields passed. (updateCustomer writes the
 // whole record from the edit form, which would blank anything left out.)
 const CUSTOMER_COLS = {
-  name: 'name', contactName: 'contact_name', email: 'email', phone: 'phone',
+  name: 'name', contactName: 'contact_name', email: 'email', phone: 'phone', contactPhone: 'contact_phone',
   address: 'address', status: 'status', notes: 'notes',
   billingType: 'billing_type', notifyOnService: 'notify_on_service',
 }

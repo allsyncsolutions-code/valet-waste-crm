@@ -126,7 +126,7 @@ async function sendEmail(to: string, subject: string, textBody: string, cust: an
 async function notifyArrival(stopId: string, sentBy?: string | null) {
   const r = await fetch(
     `${SUPABASE_URL}/rest/v1/route_stops?id=eq.${stopId}&select=id,arrival_notified_at,` +
-      `properties(name,address,customer_id,customers(id,name,contact_name,phone,email,notify_on_service,notify_optout_token))`,
+      `properties(name,address,customer_id,customers(id,name,contact_name,phone,contact_phone,email,notify_on_service,notify_optout_token))`,
     { headers: rest },
   )
   const rows = await r.json()
@@ -137,7 +137,7 @@ async function notifyArrival(stopId: string, sentBy?: string | null) {
   const prop = stop.properties || {}
   const cust = prop.customers || null
   if (!cust) return { ok: true, skipped: "no_customer" }
-  const phone = (cust.phone || "").trim()
+  const phone = (cust.contact_phone || cust.phone || "").trim() // POC number wins; main phone is the default
   const email = (cust.email || "").trim()
   if (!phone && !email) return { ok: true, skipped: "no_contact" }
 

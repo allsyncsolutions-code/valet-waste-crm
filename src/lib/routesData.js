@@ -656,7 +656,7 @@ export async function loadDayDispatch(date, line) {
   if (!date) throw new Error('A date is required.')
   let q = supabase
     .from('routes')
-    .select('id, code, name, driver_id, business_line, route_stops(id, seq, status, service, time_window, lat, lng, check_in, check_out, on_my_way_at, excess_flagged, excess_note, tech_pay, nudge_sent, skip_reason, skipped_by, property_id, job_title, job_description, job_price, properties(name, address, notes, lat, lng, price, tech_pay, customer_id, customers(name, phone, notify_on_service, customer_tags(tag:tags(id,name,color)))), stop_photos(id))')
+    .select('id, code, name, driver_id, business_line, route_stops(id, seq, status, service, time_window, lat, lng, check_in, check_out, on_my_way_at, excess_flagged, excess_note, tech_pay, nudge_sent, skip_reason, skipped_by, property_id, job_title, job_description, job_price, properties(name, address, notes, lat, lng, price, tech_pay, customer_id, customers(name, phone, contact_phone, notify_on_service, customer_tags(tag:tags(id,name,color)))), stop_photos(id))')
     .eq('service_date', date)
   if (line) q = q.eq('business_line', line)
   const { data, error } = await q.order('code', { ascending: true })
@@ -676,7 +676,7 @@ export async function loadDayDispatch(date, line) {
         name: s.properties?.name || '—', address: s.properties?.address || '',
         notes: s.properties?.notes || '',
         clientName: s.properties?.customers?.name || null,
-        clientPhone: s.properties?.customers?.phone || null,
+        clientPhone: s.properties?.customers?.contact_phone || s.properties?.customers?.phone || null, // POC number wins
         notifyOnService: s.properties?.customers?.notify_on_service !== false, // false = opted out of visit notices
         tags: tagsOf(s.properties?.customers),
         customerId: s.properties?.customer_id || null,

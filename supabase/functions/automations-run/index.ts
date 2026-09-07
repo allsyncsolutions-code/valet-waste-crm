@@ -204,7 +204,7 @@ async function runInvoiceReminders(auto: any): Promise<string> {
 
   const custIds = [...new Set(invoices.map((i: any) => i.customer_id).filter(Boolean))]
   const customers: Record<string, any> = {}
-  for (const c of await sbGet(`customers?id=in.(${custIds.join(",")})&select=id,name,email,phone,portal_slug,notify_on_service`)) customers[c.id] = c
+  for (const c of await sbGet(`customers?id=in.(${custIds.join(",")})&select=id,name,email,phone,contact_phone,portal_slug,notify_on_service`)) customers[c.id] = c
   const settings = (await sbGet(`app_settings?id=eq.1&select=company_name`))[0] || {}
   const company = settings.company_name || "Valet Waste FL"
 
@@ -260,12 +260,14 @@ async function runInvoiceReminders(auto: any): Promise<string> {
     }
     // Per-customer text opt-out ('No Service Notifications'): no reminder
     // TEXTS — the email channel (if the rule has one) still applies.
-    if (r.sms && cust.phone && cust.notify_on_service !== false) {
+    // Point-of-contact number wins over the main phone (0055).
+    const textTo = (cust.contact_phone || cust.phone || "").trim()
+    if (r.sms && textTo && cust.notify_on_service !== false) {
       try {
         const res = await fetch(`${SUPABASE_URL}/functions/v1/sms`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "send", to: cust.phone, body: text, customerId: cust.id, purpose: "reminder", sentBy: company }),
+          body: JSON.stringify({ action: "send", to: textTo, body: text, customerId: cust.id, purpose: "reminder", sentBy: company }),
         })
         const d = await res.json().catch(() => ({}))
         if (d?.ok) t++
@@ -681,7 +683,7 @@ async function runScheduledInvoiceSends(): Promise<string> {
   for (const row of due) {
     try {
       const inv = (await sbGet(
-        `invoices?id=eq.${row.invoice_id}&select=id,number,status,total,payment_url,customer_id,customers(name,phone,email,portal_slug)`,
+        `invoices?id=eq.${row.invoice_id}&select=id,number,status,total,payment_url,customer_id,customers(name,phone,contact_phone,email,portal_slug)`,
       ))[0]
       if (!inv || inv.status === "paid" || inv.status === "void") {
         await sbPatch(`invoice_scheduled_sends?id=eq.${row.id}`, { status: "cancelled", last_error: `invoice ${inv ? inv.status : "deleted"} — nothing to send` })
@@ -704,7 +706,8 @@ async function runScheduledInvoiceSends(): Promise<string> {
       }
 
       let smsPaused = false
-      if ((row.channel === "sms" || row.channel === "both") && cust.phone) {
+      const textTo = (cust.contact_phone || cust.phone || "").trim() // POC number wins (0055)
+      if ((row.channel === "sms" || row.channel === "both") && textTo) {
         const tpl = settings.sms_invoice_template || DEFAULT_TPL
         const body = String(tpl).replace(/\{(\w+)\}/g, (m, k) => {
           const vars: Record<string, string> = {
@@ -719,7 +722,7 @@ async function runScheduledInvoiceSends(): Promise<string> {
         const r = await fetch(`${SUPABASE_URL}/functions/v1/sms`, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${SERVICE_KEY}` },
-          body: JSON.stringify({ action: "send", to: cust.phone, body, customerId: inv.customer_id, purpose: "invoice" }),
+          body: JSON.stringify({ action: "send", to: textTo, body, customerId: inv.customer_id, purpose: "invoice" }),
         })
         const d = await r.json().catch(() => ({}))
         if (d?.paused) {

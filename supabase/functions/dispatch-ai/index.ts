@@ -140,6 +140,7 @@ const tools = [
         contact_name: { type: "string" },
         email: { type: "string" },
         phone: { type: "string" },
+        contact_phone: { type: "string", description: "Point-of-contact number for texts (optional): when set, all client texts go here instead of phone." },
         service: { type: "string", description: 'e.g. "4yd dumpster x2"' },
         pickup_frequency: { type: "string", enum: FREQS },
         pickup_day: { type: "string", enum: DAYS },
@@ -163,6 +164,7 @@ const tools = [
         contact_name: { type: "string" },
         email: { type: "string" },
         phone: { type: "string" },
+        contact_phone: { type: "string", description: "Point-of-contact number: when set, ALL client texts (visit notices, invoices, reminders, yours) go here instead of phone. Empty string clears it (falls back to phone)." },
         notes: { type: "string", description: "Replaces the one-line notes summary. For a dated running note use add_client_note instead." },
         status: { type: "string", enum: ["active", "paused", "prospect"], description: "Setting 'paused' ALSO pauses all the client's addresses and pulls their pending stops off today's/future routes; 'active' unpauses all their addresses." },
         billing_type: { type: "string", enum: ["subscription", "one_time"], description: "Switch the client between subscription and single-payment." },
@@ -1290,13 +1292,13 @@ async function findClients(a: any) {
   if (!q) return { matches: [] }
   const like = `*${q}*`
   const or = `or=(name.ilike.${enc(like)},email.ilike.${enc(like)},phone.ilike.${enc(like)},contact_name.ilike.${enc(like)},address.ilike.${enc(like)})`
-  const rows = await sbGet(`customers?${or}&select=id,name,contact_name,email,phone,address,status&limit=10`)
+  const rows = await sbGet(`customers?${or}&select=id,name,contact_name,email,phone,contact_phone,address,status&limit=10`)
   if (rows.length) return { matches: rows }
   // Fallback: the query may be a SERVICE-PROPERTY address (clients usually have
   // no address of their own — the addresses live on their properties). Resolve
   // the owning client(s) by matching the property address/name.
   const plike = enc(`*${q}*`)
-  const props = await sbGet(`properties?or=(address.ilike.${plike},name.ilike.${plike})&select=address,customer_id,customers(id,name,contact_name,email,phone,status)&limit=10`)
+  const props = await sbGet(`properties?or=(address.ilike.${plike},name.ilike.${plike})&select=address,customer_id,customers(id,name,contact_name,email,phone,contact_phone,status)&limit=10`)
   const seen = new Set<string>()
   const matches: any[] = []
   for (const p of props) {
@@ -1371,6 +1373,7 @@ async function createClient(a: any) {
     contact_name: a.contact_name ?? null,
     email: a.email ?? null,
     phone: a.phone ?? null,
+    contact_phone: a.contact_phone ?? null,
     status: a.status ?? "active",
     billing_type: a.billing_type ?? "subscription",
   })
@@ -1390,7 +1393,7 @@ async function createClient(a: any) {
 
 async function updateClient(a: any) {
   const patch: Record<string, unknown> = {}
-  for (const k of ["name", "address", "contact_name", "email", "phone", "notes", "status", "billing_type", "business_line", "notify_on_service"]) {
+  for (const k of ["name", "address", "contact_name", "email", "phone", "contact_phone", "notes", "status", "billing_type", "business_line", "notify_on_service"]) {
     if (a[k] !== undefined) patch[k] = a[k]
   }
   if (Object.keys(patch).length === 0) throw new Error("No fields to update.")
@@ -2403,7 +2406,7 @@ async function getPortalStatus(a: any) {
   const client = await resolveClient(a)
   if (client.error || client.needs_clarification) return client
   const [cust] = await sbGet(
-    `customers?id=eq.${enc(client.id)}&select=id,name,email,phone,portal_slug,autopay_consent,autopay_consented_at,run_vault_id,run_card_brand,run_card_last4`,
+    `customers?id=eq.${enc(client.id)}&select=id,name,email,phone,contact_phone,portal_slug,autopay_consent,autopay_consented_at,run_vault_id,run_card_brand,run_card_last4`,
   )
   if (!cust) return { error: "Client not found." }
   const [sessions, invoices, quotes, requests, credits] = await Promise.all([
@@ -2428,14 +2431,14 @@ async function getPortalStatus(a: any) {
     open_invoices: invoices.map((i: any) => ({ number: i.number, total: i.total, due: i.due_date })),
     open_quotes: quotes.map((q: any) => ({ number: q.number, title: q.title, total: q.total, status: q.status })),
     open_requests: requests.map((r: any) => ({ kind: r.kind, message: r.message, status: r.status, at: etTs(r.created_at) })),
-    contact: { phone: cust.phone || null, email: cust.email || null },
+    contact: { phone: (cust.contact_phone || cust.phone) || null, email: cust.email || null }, // texts resolve to the POC number first (0055)
   }
 }
 
 async function invitePortal(a: any) {
   const client = await resolveClient(a)
   if (client.error || client.needs_clarification) return client
-  const [cust] = await sbGet(`customers?id=eq.${enc(client.id)}&select=id,name,phone,email,portal_slug`)
+  const [cust] = await sbGet(`customers?id=eq.${enc(client.id)}&select=id,name,phone,contact_phone,email,portal_slug`)
   if (!cust) return { error: "Client not found." }
   if (!cust.portal_slug) return { error: `${cust.name} has no portal slug — that shouldn't happen; check the client record.` }
 
@@ -2457,15 +2460,16 @@ async function invitePortal(a: any) {
     tpl.replace(/\{customerName\}/g, cust.name).replace(/\{companyName\}/g, company).replace(/\{link\}/g, link),
   )
 
-  if (cust.phone) {
+  const textTo = (cust.contact_phone || cust.phone || "").trim() // POC number wins (0055)
+  if (textTo) {
     const r = await fetch(`${SUPABASE_URL}/functions/v1/sms`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "send", to: cust.phone, body, customerId: cust.id, purpose: "manual", sentBy: "Trashy Randy" }),
+      body: JSON.stringify({ action: "send", to: textTo, body, customerId: cust.id, purpose: "manual", sentBy: "Trashy Randy" }),
     })
     const d = await r.json().catch(() => ({}))
     if (!d?.ok) throw new Error(`SMS failed: ${d?.error || `sms function returned ${r.status}`}`)
-    return { ok: true, client: cust.name, via: "sms", to: cust.phone, note: "Portal invite texted with the 5th-week-free pitch (login link good for 7 days)." }
+    return { ok: true, client: cust.name, via: "sms", to: textTo, note: "Portal invite texted with the 5th-week-free pitch (login link good for 7 days)." }
   }
   if (cust.email) {
     const key = Deno.env.get("SENDGRID_API_KEY")
@@ -2524,8 +2528,9 @@ async function textInvoiceTool(a: any) {
   }
   if (!inv) return { error: "No matching invoice found." }
 
-  const cust = (await sbGet(`customers?id=eq.${inv.customer_id}&select=id,name,phone`))[0]
-  if (!cust?.phone) return { error: `${cust?.name || "That client"} has no phone number on file.` }
+  const cust = (await sbGet(`customers?id=eq.${inv.customer_id}&select=id,name,phone,contact_phone`))[0]
+  const textTo = (cust?.contact_phone || cust?.phone || "").trim() // POC number wins (0055)
+  if (!textTo) return { error: `${cust?.name || "That client"} has no phone number on file.` }
   if (!inv.total || Number(inv.total) < 0.5) return { error: "Invoice total must be at least $0.50 for a payment link." }
 
   // Reuse the stored Stripe link or mint one via the stripe function.
@@ -2579,7 +2584,7 @@ async function textInvoiceTool(a: any) {
   const sr = await fetch(`${SUPABASE_URL}/functions/v1/sms`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "send", to: cust.phone, body, customerId: cust.id, purpose: "invoice", sentBy: "Trashy Randy" }),
+    body: JSON.stringify({ action: "send", to: textTo, body, customerId: cust.id, purpose: "invoice", sentBy: "Trashy Randy" }),
   })
   const sd = await sr.json().catch(() => ({}))
   if (!sd?.ok) return { error: `SMS failed: ${sd?.error || sr.status}` }
@@ -2617,13 +2622,13 @@ async function sendSmsTool(a: any) {
       isStaff = true
     } else {
       // …then clients.
-      const clients = await sbGet(`customers?select=id,name,phone&name=ilike.*${enc(to)}*`)
+      const clients = await sbGet(`customers?select=id,name,phone,contact_phone&name=ilike.*${enc(to)}*`)
       if (clients.length > 1) {
         return { needs_clarification: true, matches: clients.map((c: any) => c.name), note: "Multiple clients match — which one?" }
       }
       if (!clients.length) return { error: `No team member or client matched "${to}". Give me a phone number instead.` }
-      if (!clients[0].phone) return { error: `${clients[0].name} has no phone number on file.` }
-      phone = clients[0].phone
+      if (!clients[0].contact_phone && !clients[0].phone) return { error: `${clients[0].name} has no phone number on file.` }
+      phone = clients[0].contact_phone || clients[0].phone
       recipient = clients[0].name
       customerId = clients[0].id
     }

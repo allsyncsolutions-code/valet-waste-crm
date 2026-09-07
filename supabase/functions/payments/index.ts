@@ -561,8 +561,8 @@ Deno.serve(async (req) => {
       const inv = (await sbGet(`invoices?id=eq.${enc(String(body.invoice_id))}&select=id,number,status,customer_id`))[0]
       if (!inv) return json({ error: "Invoice not found." }, 404)
       if (inv.status === "paid" || inv.status === "void") return json({ error: `Invoice ${inv.number} is already ${inv.status === "paid" ? "paid" : "void"} — nothing to send.` }, 400)
-      const cust = (await sbGet(`customers?id=eq.${inv.customer_id}&select=phone,email`))[0]
-      if ((channel === "sms" || channel === "both") && !cust?.phone) return json({ error: "This customer has no phone number on file." }, 400)
+      const cust = (await sbGet(`customers?id=eq.${inv.customer_id}&select=phone,contact_phone,email`))[0]
+      if ((channel === "sms" || channel === "both") && !(cust?.contact_phone || cust?.phone)) return json({ error: "This customer has no phone number on file." }, 400)
       if ((channel === "email" || channel === "both") && !cust?.email) return json({ error: "This customer has no email on file." }, 400)
       const row = (await sbPost("invoice_scheduled_sends", { invoice_id: inv.id, channel, send_at: sendAt.toISOString() }))[0]
       return json({ ok: true, scheduled: row })

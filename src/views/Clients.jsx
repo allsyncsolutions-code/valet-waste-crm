@@ -43,7 +43,7 @@ const fmtDate = (ts) => { try { return new Date(ts).toLocaleDateString(undefined
 const fmtTime = (ts) => { try { return new Date(ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) } catch { return ts } }
 
 const BLANK = {
-  name: '', address: '', contactName: '', email: '', phone: '', status: 'active', notes: '', billingType: 'subscription',
+  name: '', address: '', contactName: '', email: '', phone: '', contactPhone: '', status: 'active', notes: '', billingType: 'subscription',
   notifyOnService: null, // null=auto (single-property only), true=always, false=never
   service: '', frequency: 'weekly', dayOfWeek: 'monday',
   cadence: 'monthly', amount: '',
@@ -593,7 +593,7 @@ export default function Clients({ app }) {
   function openEdit() {
     if (!cur) return
     setForm({
-      name: cur.name || '', address: cur.address || '', contactName: cur.contactName || '',
+      name: cur.name || '', address: cur.address || '', contactName: cur.contactName || '', contactPhone: cur.contactPhone || '',
       email: cur.email || '', phone: cur.phone || '', status: cur.status || 'active', notes: cur.notes || '',
       billingType: cur.billingType || 'subscription',
       notifyOnService: cur.notifyOnService ?? null,
@@ -614,6 +614,7 @@ export default function Clients({ app }) {
       name: form.name.trim(),
       address: form.address.trim(),
       contactName: form.contactName.trim(),
+      contactPhone: form.contactPhone.trim(),
       email: form.email.trim(),
       phone: form.phone.trim(),
       status: form.status,
@@ -879,6 +880,7 @@ export default function Clients({ app }) {
               <Row label="Contact Name" value={cur.contactName || '—'} />
               <Row label="Email" value={cur.email || '—'} />
               <Row label="Phone" value={cur.phone || '—'} />
+              {cur.contactPhone && <Row label="Texts go to" value={`${cur.contactPhone}${cur.contactName ? ` (${cur.contactName})` : ''} — point of contact`} />}
               <Row label="Status" value={cap(cur.status)} />
               <Row label="Text on service" value={cur.notifyOnService === true ? 'Always' : cur.notifyOnService === false ? 'Never' : 'Auto (single-property only)'} />
               {cur.notes && <Row label="Notes" value={cur.notes} />}
@@ -1261,6 +1263,10 @@ export default function Clients({ app }) {
               <Field label="Phone"><input value={form.phone} onChange={(e) => set({ phone: e.target.value })} style={inp} /></Field>
               <Field label="Email"><input value={form.email} onChange={(e) => set({ email: e.target.value })} style={inp} type="email" /></Field>
             </div>
+            <Field label="Point-of-contact phone">
+              <input value={form.contactPhone} onChange={(e) => set({ contactPhone: e.target.value })} style={inp} placeholder="Blank = texts go to the phone above" />
+              <div style={{ fontSize: 11, color: '#7c8a82', marginTop: 4 }}>When set, ALL texts to this client (visit notices, invoices, reminders) go to this number instead of the main phone.</div>
+            </Field>
 
             <Divider>Pickup defaults</Divider>
             <Field label="Service"><input value={form.service} onChange={(e) => set({ service: e.target.value })} style={inp} placeholder="4yd dumpster x2" /></Field>
@@ -1361,6 +1367,7 @@ const MERGE_PROP_FIELDS = [
 const MERGE_CLIENT_FIELDS = [
   { key: 'contactName', label: 'Contact name' },
   { key: 'phone', label: 'Phone' },
+  { key: 'contactPhone', label: 'Point-of-contact phone' },
   { key: 'email', label: 'Email' },
   { key: 'address', label: 'Billing address' },
   { key: 'notes', label: 'Client notes', long: true },
