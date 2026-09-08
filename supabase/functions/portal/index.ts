@@ -562,7 +562,9 @@ Deno.serve(async (req) => {
       const settings = await getSettings()
       // Service photos keyed by stop, attached to the line item that bills
       // each stop (render-time — see payments fn). Photos never break the pay page.
+      // The tech's visit note (route_stops.checkin_note) rides the same join.
       const photoByStop = new Map<string, string[]>()
+      const noteByStop = new Map<string, string>()
       const lineStopIds = new Set<string>((inv.invoice_line_items || []).map((li: any) => li.stop_id).filter(Boolean))
       const attachedPhotos: Array<{ url: string, taken_on?: string | null, note?: string | null }> = []
       try {
@@ -574,6 +576,11 @@ Deno.serve(async (req) => {
             const url = `${SUPABASE_URL}/storage/v1/object/public/stop-photos/${enc(String(p.path))}`
             if (!photoByStop.has(p.stop_id)) photoByStop.set(p.stop_id, [])
             photoByStop.get(p.stop_id)!.push(url)
+          }
+          const stops = await sbGet(`route_stops?id=in.(${idList})&select=id,checkin_note`)
+          for (const st of stops) {
+            const note = String(st.checkin_note || "").trim()
+            if (note) noteByStop.set(st.id, note)
           }
         }
         // Manually attached photos (admin "Add photos"): merge into their
@@ -599,6 +606,7 @@ Deno.serve(async (req) => {
           unit_price: Number(li.unit_price || 0),
           amount: Number(li.amount || 0),
           photos: li.stop_id ? (photoByStop.get(li.stop_id) || []) : [],
+          note: li.stop_id ? (noteByStop.get(li.stop_id) || null) : null,
         }))
       return json({
         ok: true,

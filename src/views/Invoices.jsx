@@ -222,7 +222,10 @@ export default function Invoices({ app }) {
       dueDate: inv.dueDate || '',
       notes: inv.notes || '',
       discount: inv.discount ? String(inv.discount) : '',
-      items: inv.items.length ? inv.items.map((it) => ({ title: it.title || '', description: it.description, quantity: it.quantity, unitPrice: it.unitPrice })) : [blankLine()],
+      // stopId rides along so an edit keeps the line tied to its stop — that
+      // link is what renders per-line photos + the visit note (and guards
+      // double-billing), and it used to be wiped on every edit.
+      items: inv.items.length ? inv.items.map((it) => ({ title: it.title || '', description: it.description, quantity: it.quantity, unitPrice: it.unitPrice, stopId: it.stopId || null })) : [blankLine()],
     })
     setShowForm(true)
   }
@@ -626,12 +629,43 @@ function useStopPhotoMap(stopIds) {
   return byStop
 }
 
+// The tech's visit note for each stop a line item bills (route_stops.checkin_note)
+// — same render-time join as the photos, keyed by stop_id.
+function useStopNoteMap(stopIds) {
+  const [byStop, setByStop] = useState({})
+  const key = (stopIds || []).join(',')
+  useEffect(() => {
+    let alive = true
+    const ids = key ? key.split(',') : []
+    if (!ids.length) { setByStop({}); return }
+    ;(async () => {
+      try {
+        const { data: stops } = await supabase
+          .from('route_stops')
+          .select('id, checkin_note')
+          .in('id', ids)
+        if (!alive) return
+        const map = {}
+        for (const s of stops || []) {
+          const note = String(s.checkin_note || '').trim()
+          if (note) map[s.id] = note
+        }
+        setByStop(map)
+      } catch (_e) { if (alive) setByStop({}) }
+    })()
+    return () => { alive = false }
+  }, [key])
+  return byStop
+}
+
 function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, onSendSms, onSendEmail, onSendBoth, onSchedule, pendingSends, onCancelSend, onDelete, onTakePayment, onAddPhotos }) {
   const meta = STATUS_META[inv.status] || STATUS_META.draft
   const company = settings || {}
   const contactBits = [company.company_phone, company.company_email, company.company_address].filter(Boolean)
   // Proof-of-service thumbnails live INSIDE each line item (keyed by stop).
   const photoByStop = useStopPhotoMap((inv.items || []).map((it) => it.stopId).filter(Boolean))
+  // The tech's visit note rides the same per-stop join.
+  const noteByStop = useStopNoteMap((inv.items || []).map((it) => it.stopId).filter(Boolean))
   // Manually attached photos (invoice_photos): ones tied to a line's stop merge
   // into that line's thumbnails; the rest render in a trailing grid.
   const [invPhotos, setInvPhotos] = useState([])
@@ -700,11 +734,13 @@ function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, on
         {inv.items.length === 0 && <div style={{ padding: '12px 0', color: '#9aa69e', fontSize: 12.5 }}>No line items.</div>}
         {inv.items.map((it) => {
           const photos = it.stopId ? mergedByStop[it.stopId] || [] : []
+          const stopNote = it.stopId ? noteByStop[it.stopId] : ''
           return (
           <div key={it.id} style={{ display: 'grid', gridTemplateColumns: '1fr 50px 90px 90px', gap: 8, padding: '9px 10px', borderBottom: '1px solid #f5f6f4', fontSize: 13, alignItems: 'start' }}>
             <div style={{ color: '#1a2420' }}>
               {it.title ? <div style={{ fontWeight: 700, fontSize: 13, color: '#1a2420', marginBottom: 2 }}>{it.title}</div> : null}
               {it.description ? <RichText text={it.description} style={{ fontSize: 13, color: '#1a2420' }} /> : (it.title ? null : '—')}
+              {stopNote ? <div style={{ fontSize: 11.5, color: '#7c8a82', fontStyle: 'italic', marginTop: 3 }}>📝 {stopNote}</div> : null}
               {photos.length > 0 && (
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 72px)', gap: 6, marginTop: 7 }}>
                   {photos.map((u, j) => (

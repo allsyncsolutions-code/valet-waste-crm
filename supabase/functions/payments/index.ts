@@ -276,7 +276,24 @@ async function invoiceStopPhotos(invoiceId: string) {
   return byStop
 }
 
-function invoiceEmailHtml(c: Record<string, unknown>, s: Record<string, unknown>, inv: Record<string, unknown>, items: Array<Record<string, unknown>>, url: string, photosByStop: Map<string, string[]> = new Map(), attachedPhotos: Array<{ url: string, taken_on?: string | null, note?: string | null }> = []) {
+// Driver's visit note for each stop a line item bills (route_stops.checkin_note)
+// — same render-time join as the photos, so a note edited after the invoice was
+// drafted still shows when the email goes out. Returns Map<stop_id, note>.
+async function invoiceStopNotes(invoiceId: string) {
+  const items = await sbGet(`invoice_line_items?invoice_id=eq.${invoiceId}&select=stop_id`)
+  const stopIds = [...new Set(items.map((i: any) => i.stop_id).filter(Boolean))]
+  if (!stopIds.length) return new Map<string, string>()
+  const idList = stopIds.map((id: string) => enc(String(id))).join(",")
+  const stops = await sbGet(`route_stops?id=in.(${idList})&select=id,checkin_note`)
+  const byStop = new Map<string, string>()
+  for (const s of stops) {
+    const note = String(s.checkin_note || "").trim()
+    if (note) byStop.set(s.id, note)
+  }
+  return byStop
+}
+
+function invoiceEmailHtml(c: Record<string, unknown>, s: Record<string, unknown>, inv: Record<string, unknown>, items: Array<Record<string, unknown>>, url: string, photosByStop: Map<string, string[]> = new Map(), attachedPhotos: Array<{ url: string, taken_on?: string | null, note?: string | null }> = [], notesByStop: Map<string, string> = new Map()) {
   const company = s.company_name || "Valet Waste FL"
   const money = (v: unknown) => "$" + Number(v || 0).toFixed(2)
   const esc = (t: unknown) => String(t ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" } as Record<string, string>)[ch])
@@ -287,9 +304,15 @@ function invoiceEmailHtml(c: Record<string, unknown>, s: Record<string, unknown>
     if (!urls.length) return ""
     return `<div style="margin-top:8px">${urls.map((u) => `<a href="${u}" target="_blank"><img src="${u}" alt="Service photo" style="width:92px;height:92px;object-fit:cover;border-radius:8px;border:1px solid #e6ece8;margin:0 6px 6px 0;display:inline-block;vertical-align:top" /></a>`).join("")}<div style="clear:both"></div></div>`
   }
+  // The tech's visit note for the stop this line bills — small italic caption,
+  // same slot the photos occupy.
+  const visitNote = (it: Record<string, unknown>) => {
+    const note = it.stop_id ? notesByStop.get(String(it.stop_id)) : ""
+    return note ? `<div style="margin-top:4px;font-size:12.5px;color:#7c8a82;font-style:italic">📝 ${esc(note)}</div>` : ""
+  }
   const rows = items
     .map((it) => `<tr>
-      <td style="padding:7px 10px;border-bottom:1px solid #e6ece8;font-size:14px;color:#1a2420">${it.title ? `<div style="font-weight:700">${esc(it.title)}</div>` : ""}${esc(it.description || (it.title ? "" : "Service"))}${thumbs(it)}</td>
+      <td style="padding:7px 10px;border-bottom:1px solid #e6ece8;font-size:14px;color:#1a2420">${it.title ? `<div style="font-weight:700">${esc(it.title)}</div>` : ""}${esc(it.description || (it.title ? "" : "Service"))}${visitNote(it)}${thumbs(it)}</td>
       <td style="padding:7px 10px;border-bottom:1px solid #e6ece8;font-size:14px;color:#5d6b63;text-align:center;white-space:nowrap">${it.quantity}</td>
       <td style="padding:7px 10px;border-bottom:1px solid #e6ece8;font-size:14px;color:#5d6b63;text-align:right;white-space:nowrap">${money(it.unit_price)}</td>
       <td style="padding:7px 10px;border-bottom:1px solid #e6ece8;font-size:14px;color:#1a2420;text-align:right;white-space:nowrap">${money(it.amount)}</td>
@@ -518,6 +541,7 @@ Deno.serve(async (req) => {
 
       const items = await sbGet(`invoice_line_items?invoice_id=eq.${inv.id}&select=title,description,quantity,unit_price,amount,stop_id&order=position`)
       const photosByStop = await invoiceStopPhotos(String(inv.id))
+      const notesByStop = await invoiceStopNotes(String(inv.id)).catch(() => new Map<string, string>())
       // Manually attached photos (admin "Add photos"): ones tied to a line's
       // stop merge into that line's thumbnails; the rest render in the
       // trailing "Service photos" grid.
@@ -542,7 +566,7 @@ Deno.serve(async (req) => {
       await sendInvoiceEmail(
         cust.email,
         subject,
-        invoiceEmailHtml(cust, s, inv, items, url, photosByStop, attachedPhotos),
+        invoiceEmailHtml(cust, s, inv, items, url, photosByStop, attachedPhotos, notesByStop),
         invoiceEmailText(cust, s, inv, items, url),
         company,
       )

@@ -253,6 +253,7 @@ async function writeLineItems(invoiceId, items) {
       unit_price: num(it.unitPrice),
       amount: lineAmount(it),
       position: i,
+      stop_id: it.stopId || null, // keep stop-linked lines linked (per-line photos + visit note render off this)
     }))
   if (rows.length) {
     const { error } = await supabase.from('invoice_line_items').insert(rows)

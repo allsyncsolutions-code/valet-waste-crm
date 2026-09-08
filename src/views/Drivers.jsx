@@ -584,6 +584,9 @@ function StopRow({ s, busy, photos = [], pending = [], syncing = 0, uploading, o
           {!!s.notes && (
             <div title={s.notes} style={{ fontSize: 11.5, color: '#8a6d1e', marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>🗒 {s.notes}</div>
           )}
+          {!!s.checkinNote && (
+            <div title={`Visit note (shows on this stop's invoice line): ${s.checkinNote}`} style={{ fontSize: 11.5, color: '#5d6b63', marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>📝 {s.checkinNote}</div>
+          )}
           {(s.tags || []).length > 0 && (
             <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 3 }}>
               {s.tags.map((t) => <span key={t.id} style={{ fontSize: 10, fontWeight: 700, color: t.color || '#1f7a4d', background: (t.color || '#1f7a4d') + '1a', border: `1px solid ${(t.color || '#1f7a4d')}55`, borderRadius: 5, padding: '1px 6px' }}>{t.name}</span>)}

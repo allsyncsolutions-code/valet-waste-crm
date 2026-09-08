@@ -214,6 +214,7 @@ export default function PayPage({ slug, invoiceId }) {
                 <div style={{ fontSize: 12, color: '#1a2420' }}>
                   {it.title ? <div style={{ fontWeight: 700, fontSize: 12.5, marginBottom: 1 }}>{it.title}</div> : null}
                   {it.description ? <RichText text={it.description} style={{ fontSize: 12, color: '#1a2420' }} /> : (it.title ? null : '—')}
+                  {it.note ? <div style={{ fontSize: 11, color: '#7c8a82', fontStyle: 'italic', marginTop: 3 }}>📝 {it.note}</div> : null}
                   {(it.photos || []).length > 0 && (
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 7 }}>
                       {it.photos.map((u, ui) => (
