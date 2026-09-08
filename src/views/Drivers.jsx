@@ -581,6 +581,9 @@ function StopRow({ s, busy, photos = [], pending = [], syncing = 0, uploading, o
         <div style={{ flex: 1, minWidth: 0 }}>
           <div onClick={onOpenClient || undefined} title={onOpenClient ? `Open ${s.clientName || 'client'}'s record` : undefined} style={{ fontWeight: 600, fontSize: 13, cursor: onOpenClient ? 'pointer' : 'default', color: onOpenClient ? '#1f7a4d' : '#1a2420' }}>{s.name}</div>
           <div onClick={onOpenClient || undefined} style={{ fontSize: 11.5, color: '#7c8a82', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', cursor: onOpenClient ? 'pointer' : 'default' }}>{s.address || s.service}</div>
+          {!!s.notes && (
+            <div title={s.notes} style={{ fontSize: 11.5, color: '#8a6d1e', marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>🗒 {s.notes}</div>
+          )}
           {(s.tags || []).length > 0 && (
             <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 3 }}>
               {s.tags.map((t) => <span key={t.id} style={{ fontSize: 10, fontWeight: 700, color: t.color || '#1f7a4d', background: (t.color || '#1f7a4d') + '1a', border: `1px solid ${(t.color || '#1f7a4d')}55`, borderRadius: 5, padding: '1px 6px' }}>{t.name}</span>)}
