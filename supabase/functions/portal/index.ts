@@ -342,6 +342,13 @@ ${buttons}
 <p style="color:#777;font-size:13px">Didn't request this? You can ignore this email.</p>`
 }
 
+function codeHtml(customerName: string, code: string, companyName: string) {
+  return `<p>Hi ${customerName || "there"},</p>
+<p>Here's your ${companyName} portal login code:</p>
+<p style="font-size:34px;font-weight:800;letter-spacing:8px;margin:20px 0">${code}</p>
+<p style="color:#777;font-size:13px">It works once and expires in 10 minutes. Didn't request this? You can ignore this email.</p>`
+}
+
 async function createMagicLink(customerId: string, slug: string): Promise<string> {
   const codeRaw = randomToken(24)
   await sbPost("portal_magic_links", {
@@ -523,6 +530,64 @@ Deno.serve(async (req) => {
       const company = settings.company_name || "Valet Waste FL"
       await sendEmail(clean, `Your ${company} portal login link`, magicHtml(matches[0].name, links, company), company)
       return json(generic)
+    }
+
+    if (action === "request_code") {
+      // App login screen (native, since 2026-07-27): email → 6-digit code, no
+      // magic link. One code is written for EVERY customer record matching the
+      // email — property managers hold several, and redeem_code returns an
+      // account picker. The app ALWAYS sent request_code/redeem_code; these
+      // handlers are the missing other half (before this, app login fell
+      // through to "Unknown action.").
+      if (!email) return json({ error: "Enter your email." }, 400)
+      const generic = { ok: true, message: "If that email is on file, a login code is on its way." }
+      const clean = String(email).trim().toLowerCase()
+      const cs = await sbGet(`customers?select=id,name,email,portal_slug&email=ilike.${enc(clean)}&limit=10`)
+      const matches = cs.filter((c: any) => c.portal_slug)
+      if (!matches.length) return json(generic)
+      // Throttle like staff-reset: at most 5 codes per hour. Each request
+      // writes one row per matched customer, so scale the cap to match.
+      const hourAgo = new Date(Date.now() - 3600000).toISOString()
+      const ids = matches.map((c: any) => c.id).join(",")
+      const recent = await sbGet(`portal_magic_links?customer_id=in.(${ids})&created_at=gte.${hourAgo}&select=id`)
+      if ((recent || []).length >= 5 * matches.length) return json(generic)
+      const code = String(100000 + Math.floor(Math.random() * 900000))
+      const expires = new Date(Date.now() + 10 * 60000).toISOString()
+      for (const c of matches.slice(0, 5)) {
+        await sbPost("portal_magic_links", { customer_id: c.id, code_hash: await sha256(code), expires_at: expires })
+      }
+      const settings = await getSettings()
+      const company = settings.company_name || "Valet Waste FL"
+      await sendEmail(clean, `Your ${company} portal login code`, codeHtml(matches[0].name, code, company), company)
+      return json(generic)
+    }
+
+    if (action === "redeem_code") {
+      if (!email || !code) return json({ error: "Enter the 6-digit code we emailed you." }, 400)
+      const clean = String(email).trim().toLowerCase()
+      const hash = await sha256(String(code).trim())
+      const cs = await sbGet(`customers?select=id,name,portal_slug&email=ilike.${enc(clean)}&limit=10`)
+      const matches = cs.filter((c: any) => c.portal_slug)
+      const expired = { error: "That code has expired or was already used — request a new one." }
+      if (!matches.length) return json(expired, 401)
+      const ids = matches.map((c: any) => c.id).join(",")
+      const rows = await sbGet(`portal_magic_links?customer_id=in.(${ids})&code_hash=eq.${hash}&select=id,customer_id,expires_at,used_at`)
+      const live = rows.filter((r: any) => !r.used_at && new Date(r.expires_at).getTime() > Date.now())
+      const accounts: Array<{ name: string, slug: string, token: string }> = []
+      for (const c of matches) {
+        const row = live.find((r: any) => r.customer_id === c.id)
+        if (!row) continue
+        await sbPatch(`portal_magic_links?id=eq.${row.id}`, { used_at: new Date().toISOString() })
+        const sessionToken = randomToken(32)
+        await sbPost("portal_sessions", {
+          customer_id: c.id,
+          token_hash: await sha256(sessionToken),
+          expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
+        })
+        accounts.push({ name: c.name, slug: c.portal_slug, token: sessionToken })
+      }
+      if (!accounts.length) return json(expired, 401)
+      return json({ ok: true, accounts })
     }
 
     if (action === "redeem") {
