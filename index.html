@@ -27,6 +27,18 @@
     @keyframes sheetUp { from { transform: translateY(24px); opacity: 0;} to { transform: translateY(0); opacity: 1;} }
     @keyframes blink { 0%,100%{opacity:1;} 50%{opacity:.2;} }
     @keyframes ping { 0%{ transform: scale(1); opacity:.6;} 80%,100%{ transform: scale(2.4); opacity:0;} }
+    /* Invoice PDF printing: printInvoiceDoc() (src/lib/printInvoice.js) adds
+       body.printing right before window.print(), and only the marked invoice
+       document (.print-doc) ends up on the page — everything else on the tab
+       disappears. A normal Ctrl+P anywhere in the app is untouched. */
+    @media print {
+      body.printing { background: #fff !important; }
+      body.printing * { visibility: hidden !important; }
+      body.printing .print-doc, body.printing .print-doc * { visibility: visible !important; }
+      body.printing .print-doc { position: absolute; left: 0; top: 0; width: 100%; }
+      .print-doc { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      .print-hide, .print-hide * { display: none !important; }
+    }
   </style>
 </head>
 <body>

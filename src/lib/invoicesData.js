@@ -54,6 +54,12 @@ function mapInvoice(row) {
       : null,
     number: row.number,
     status: row.status,
+    // Bill-to override — what the invoice DOCUMENT shows (email, pay page,
+    // PDF) instead of the assigned customer's name/email/phone, e.g. a
+    // property manager's end client for insurance purposes.
+    billToName: row.bill_to_name || '',
+    billToEmail: row.bill_to_email || '',
+    billToPhone: row.bill_to_phone || '',
     issueDate: row.issue_date,
     dueDate: row.due_date,
     notes: row.notes || '',
@@ -275,6 +281,9 @@ export async function createInvoice(payload) {
       discount: num(payload.discount),
       subtotal,
       total,
+      bill_to_name: (payload.billToName || '').trim() || null,
+      bill_to_email: (payload.billToEmail || '').trim() || null,
+      bill_to_phone: (payload.billToPhone || '').trim() || null,
     })
     .select('id, number')
     .single()
@@ -298,10 +307,38 @@ export async function updateInvoice(id, payload) {
       discount: num(payload.discount),
       subtotal,
       total,
+      bill_to_name: (payload.billToName || '').trim() || null,
+      bill_to_email: (payload.billToEmail || '').trim() || null,
+      bill_to_phone: (payload.billToPhone || '').trim() || null,
     })
     .eq('id', id)
   if (error) throw error
   await writeLineItems(id, payload.items)
+  return id
+}
+
+// Update JUST the bill-to override (name/email/phone shown on the invoice
+// document) — editable on any status, including sent + paid invoices, because
+// property managers ask for their end client's name after the fact.
+export async function updateBillTo(id, number, { name, email, phone }) {
+  const { error } = await supabase
+    .from('invoices')
+    .update({
+      bill_to_name: (name || '').trim() || null,
+      bill_to_email: (email || '').trim() || null,
+      bill_to_phone: (phone || '').trim() || null,
+    })
+    .eq('id', id)
+  if (error) throw error
+  const shown = (name || '').trim()
+  logActivity({
+    type: 'invoice_updated',
+    summary: shown
+      ? `Set invoice ${number || ''} bill-to override to “${shown}”`.trim()
+      : `Cleared the bill-to override on invoice ${number || ''}`.trim(),
+    entityType: 'invoice',
+    entityId: id,
+  })
   return id
 }
 

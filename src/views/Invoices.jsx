@@ -11,6 +11,7 @@ import {
   loadInvoices,
   createInvoice,
   updateInvoice,
+  updateBillTo,
   markPaid,
   deleteInvoice,
   textInvoice,
@@ -27,6 +28,7 @@ import {
 } from '../lib/invoicesData.js'
 import { loadStopPhotos } from '../lib/photosData.js'
 import { currentActorName } from '../lib/activityData.js'
+import { printInvoiceDoc } from '../lib/printInvoice.js'
 
 const money = (v) => '$' + Number(v || 0).toFixed(2)
 const initialsOf = (name) =>
@@ -44,7 +46,7 @@ const FILTERS = [['all', 'All'], ['draft', 'Draft'], ['sent', 'Sent'], ['paid', 
 // ahead after 8 PM Eastern).
 const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` }
 const blankLine = () => ({ title: '', description: '', quantity: 1, unitPrice: '' })
-const blankForm = () => ({ customerId: '', issueDate: today(), dueDate: '', notes: '', discount: '', items: [blankLine()] })
+const blankForm = () => ({ customerId: '', issueDate: today(), dueDate: '', notes: '', discount: '', billToName: '', billToEmail: '', billToPhone: '', items: [blankLine()] })
 const blankClient = () => ({ name: '', contactName: '', email: '', phone: '', address: '' })
 
 export default function Invoices({ app }) {
@@ -69,6 +71,8 @@ export default function Invoices({ app }) {
   const [editId, setEditId] = useState(null)
   const [saving, setSaving] = useState(false)
   const [form, setForm] = useState(blankForm())
+  const [billToOpen, setBillToOpen] = useState(false) // bill-to override modal (any status)
+  const [billToEditing, setBillToEditing] = useState(false) // override fields expanded in the create/edit form
 
   // Inline "add new client" inside the invoice form
   const [addingClient, setAddingClient] = useState(false)
@@ -117,6 +121,7 @@ export default function Invoices({ app }) {
     setEditId(null)
     setAddingClient(false)
     setNewClient(blankClient())
+    setBillToEditing(false)
     setForm({
       ...blankForm(),
       customerId: p.customerId,
@@ -209,6 +214,7 @@ export default function Invoices({ app }) {
     setEditId(null)
     setAddingClient(false)
     setNewClient(blankClient())
+    setBillToEditing(false)
     setForm({ ...blankForm(), customerId: customers[0]?.id || '' })
     setShowForm(true)
   }
@@ -216,12 +222,16 @@ export default function Invoices({ app }) {
     setEditId(inv.id)
     setAddingClient(false)
     setNewClient(blankClient())
+    setBillToEditing(!!(inv.billToName || inv.billToEmail || inv.billToPhone))
     setForm({
       customerId: inv.customerId,
       issueDate: inv.issueDate || today(),
       dueDate: inv.dueDate || '',
       notes: inv.notes || '',
       discount: inv.discount ? String(inv.discount) : '',
+      billToName: inv.billToName || '',
+      billToEmail: inv.billToEmail || '',
+      billToPhone: inv.billToPhone || '',
       // stopId rides along so an edit keeps the line tied to its stop — that
       // link is what renders per-line photos + the visit note (and guards
       // double-billing), and it used to be wiped on every edit.
@@ -268,6 +278,7 @@ export default function Invoices({ app }) {
     }
   }
   const onMarkPaid = () => action(() => markPaid(cur.id, cur.number))
+  const onEditBillTo = () => setBillToOpen(true)
   const onSendSms = () => action(async () => { await textInvoice(cur) })
   const onSendEmail = () => action(async () => { await emailInvoice(cur) })
   const onSendBoth = () => action(async () => {
@@ -446,7 +457,7 @@ export default function Invoices({ app }) {
               Select an invoice, or create a new one.
             </div>
           )}
-          {cur && <InvoiceDetail inv={cur} settings={settings} paymentsOk={paymentsOk} busy={busy} onEdit={() => openEdit(cur)} onMarkPaid={onMarkPaid} onSendSms={onSendSms} onSendEmail={onSendEmail} onSendBoth={onSendBoth} onSchedule={openSchedule} pendingSends={pendingSends} onCancelSend={onCancelSend} onDelete={onDelete} onTakePayment={payCfg ? () => setTakePay(true) : null} onAddPhotos={() => setPhotosOpen(true)} />}
+          {cur && <InvoiceDetail inv={cur} settings={settings} paymentsOk={paymentsOk} busy={busy} onEdit={() => openEdit(cur)} onMarkPaid={onMarkPaid} onSendSms={onSendSms} onSendEmail={onSendEmail} onSendBoth={onSendBoth} onSchedule={openSchedule} pendingSends={pendingSends} onCancelSend={onCancelSend} onDelete={onDelete} onTakePayment={payCfg ? () => setTakePay(true) : null} onAddPhotos={() => setPhotosOpen(true)} onEditBillTo={onEditBillTo} />}
         </div>
       </div>
 
@@ -456,6 +467,18 @@ export default function Invoices({ app }) {
 
       {photosOpen && cur && (
         <AddPhotosModal invoice={cur} onClose={() => setPhotosOpen(false)} onDone={() => refresh().catch(() => {})} />
+      )}
+
+      {billToOpen && cur && (
+        <BillToModal
+          inv={cur}
+          onClose={() => setBillToOpen(false)}
+          onSaved={async (shown) => {
+            setBillToOpen(false)
+            setNotice(shown ? `Invoice ${cur.number} now shows “${shown}” as the billed-to name.` : `Invoice ${cur.number} is back to showing ${cur.customerName || 'the client'}’s own info.`)
+            await refresh()
+          }}
+        />
       )}
 
       {schedOpen && cur && (
@@ -515,16 +538,32 @@ export default function Invoices({ app }) {
               {(() => {
                 const c = customers.find((x) => x.id === form.customerId)
                 if (!c) return null
+                const overriding = !!(form.billToName || form.billToEmail || form.billToPhone)
+                const expanded = billToEditing || overriding
                 return (
                   <div style={{ background: '#f7f9f7', border: '1px solid #e6eae6', borderRadius: 11, padding: '10px 14px', marginBottom: 12 }}>
                     <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.1em', color: '#9aa69e', marginBottom: 4 }}>BILL TO</div>
-                    <div style={{ fontSize: 13, fontWeight: 600 }}>{c.name}</div>
-                    {(c.email || c.phone || c.address) && (
-                      <div style={{ fontSize: 12, color: '#7c8a82', marginTop: 2 }}>
-                        {[c.email, c.phone, c.address].filter(Boolean).join(' · ')}
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>
+                      {overriding ? form.billToName || c.name : c.name}
+                      {overriding && form.billToName && <span style={{ fontSize: 10, fontFamily: MONO, color: '#8a6320', background: '#fdf2e0', borderRadius: 5, padding: '1px 6px', marginLeft: 7 }}>CUSTOM NAME</span>}
+                    </div>
+                    <div style={{ fontSize: 12, color: '#7c8a82', marginTop: 2 }}>
+                      {[overriding ? (form.billToEmail || null) : c.email, overriding ? (form.billToPhone || null) : c.phone, overriding ? null : c.address].filter(Boolean).join(' · ') || '—'}
+                    </div>
+                    {!overriding && !c.email && !c.phone && <div style={{ fontSize: 11.5, color: '#c08a2e', marginTop: 3 }}>No email or phone on file — add them on the client record so the invoice shows contact info.</div>}
+                    {expanded ? (
+                      <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        <div style={{ fontSize: 11.5, color: '#8a6320' }}>Shows on the emailed invoice, pay page and PDF — the invoice itself stays assigned to {c.name}. Clear the fields to go back to their info.</div>
+                        <div style={twoCol}>
+                          <Field label="Name on invoice"><input value={form.billToName} onChange={(e) => setF({ billToName: e.target.value })} style={inp} placeholder={c.name} autoFocus /></Field>
+                          <Field label="Email on invoice"><input value={form.billToEmail} onChange={(e) => setF({ billToEmail: e.target.value })} style={inp} placeholder={c.email || '—'} /></Field>
+                        </div>
+                        <Field label="Phone on invoice"><input value={form.billToPhone} onChange={(e) => setF({ billToPhone: e.target.value })} style={inp} placeholder={c.phone || '—'} /></Field>
+                        <button type="button" onClick={() => { setBillToEditing(false); setF({ billToName: '', billToEmail: '', billToPhone: '' }) }} style={{ alignSelf: 'flex-start', background: 'none', border: 'none', color: '#c0492f', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: 0 }}>× Use {c.name}'s own info</button>
                       </div>
+                    ) : (
+                      <button type="button" onClick={() => setBillToEditing(true)} style={{ background: 'none', border: 'none', color: '#1f7a4d', fontSize: 11.5, fontWeight: 600, cursor: 'pointer', padding: 0, marginTop: 6 }}>✎ Show a different name on this invoice (e.g. their end client)</button>
                     )}
-                    {!c.email && !c.phone && <div style={{ fontSize: 11.5, color: '#c08a2e', marginTop: 3 }}>No email or phone on file — add them on the client record so the invoice shows contact info.</div>}
                   </div>
                 )
               })()}
@@ -658,7 +697,7 @@ function useStopNoteMap(stopIds) {
   return byStop
 }
 
-function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, onSendSms, onSendEmail, onSendBoth, onSchedule, pendingSends, onCancelSend, onDelete, onTakePayment, onAddPhotos }) {
+function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, onSendSms, onSendEmail, onSendBoth, onSchedule, pendingSends, onCancelSend, onDelete, onTakePayment, onAddPhotos, onEditBillTo }) {
   const meta = STATUS_META[inv.status] || STATUS_META.draft
   const company = settings || {}
   const contactBits = [company.company_phone, company.company_email, company.company_address].filter(Boolean)
@@ -684,7 +723,7 @@ function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, on
   const lineStopIds = useMemo(() => new Set((inv.items || []).map((it) => it.stopId).filter(Boolean)), [inv.items])
   const loosePhotos = invPhotos.filter((p) => !p.stop_id || !lineStopIds.has(p.stop_id))
   return (
-    <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, overflow: 'hidden' }}>
+    <div className="print-doc" style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, overflow: 'hidden' }}>
       {/* masthead: logo + business name (left) · contact info (right) */}
       <div style={{ padding: '22px 22px 16px', display: 'flex', alignItems: 'flex-start', gap: 14, flexWrap: 'wrap' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 1, minWidth: 200 }}>
@@ -718,11 +757,28 @@ function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, on
           </div>
         </div>
         <div style={{ minWidth: 200 }}>
-          <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.1em', color: '#9aa69e', marginBottom: 4 }}>BILL TO</div>
-          <div style={{ fontWeight: 700, fontSize: 14 }}>{inv.customerName || 'Unknown customer'}</div>
-          {inv.customerEmail && <div style={{ fontSize: 12.5, color: '#5d6b63', marginTop: 2 }}>{inv.customerEmail}</div>}
-          {inv.customerPhone && <div style={{ fontSize: 12.5, color: '#5d6b63', marginTop: 2 }}>{inv.customerPhone}</div>}
-          {inv.customerAddress && <div style={{ fontSize: 12.5, color: '#5d6b63', marginTop: 2 }}>{inv.customerAddress}</div>}
+          <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.1em', color: '#9aa69e', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 7 }}>
+            BILL TO
+            <button onClick={onEditBillTo} title="Show a different name / email / phone on this invoice (e.g. the property manager's end client, for their insurance) — works on sent and paid invoices too" className="print-hide" style={{ background: 'none', border: 'none', color: '#9aa69e', fontSize: 12, cursor: 'pointer', padding: 0, lineHeight: 1 }}>✎</button>
+          </div>
+          {inv.billToName ? (
+            <>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>
+                {inv.billToName}
+                <span className="print-hide" title={`Overridden — the invoice stays assigned to ${inv.customerName}`} style={{ fontFamily: MONO, fontSize: 9.5, color: '#8a6320', background: '#fdf2e0', padding: '1px 6px', borderRadius: 5, marginLeft: 7, verticalAlign: '1px' }}>CUSTOM</span>
+              </div>
+              {inv.billToEmail && <div style={{ fontSize: 12.5, color: '#5d6b63', marginTop: 2 }}>{inv.billToEmail}</div>}
+              {inv.billToPhone && <div style={{ fontSize: 12.5, color: '#5d6b63', marginTop: 2 }}>{inv.billToPhone}</div>}
+              <div className="print-hide" style={{ fontSize: 10.5, color: '#9aa69e', marginTop: 4 }}>Stays assigned to {inv.customerName || 'the client'} — sends, reminders and autopay are unchanged.</div>
+            </>
+          ) : (
+            <>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>{inv.customerName || 'Unknown customer'}</div>
+              {inv.customerEmail && <div style={{ fontSize: 12.5, color: '#5d6b63', marginTop: 2 }}>{inv.customerEmail}</div>}
+              {inv.customerPhone && <div style={{ fontSize: 12.5, color: '#5d6b63', marginTop: 2 }}>{inv.customerPhone}</div>}
+              {inv.customerAddress && <div style={{ fontSize: 12.5, color: '#5d6b63', marginTop: 2 }}>{inv.customerAddress}</div>}
+            </>
+          )}
         </div>
       </div>
 
@@ -802,7 +858,7 @@ function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, on
 
       {/* pay link */}
       {inv.paymentUrl && (
-        <div style={{ margin: '0 22px 14px', display: 'flex', gap: 8, alignItems: 'center', background: '#eef7f1', border: '1px solid #cfe7da', borderRadius: 10, padding: '10px 12px' }}>
+        <div className="print-hide" style={{ margin: '0 22px 14px', display: 'flex', gap: 8, alignItems: 'center', background: '#eef7f1', border: '1px solid #cfe7da', borderRadius: 10, padding: '10px 12px' }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 11.5, color: '#1f7a4d', fontWeight: 600 }}>Payment link</div>
             <input readOnly value={inv.paymentUrl} onFocus={(e) => e.target.select()} style={{ width: '100%', border: '1px solid #cfe7da', background: '#fff', borderRadius: 7, padding: '6px 9px', fontSize: 11.5, marginTop: 5, boxSizing: 'border-box' }} />
@@ -813,7 +869,7 @@ function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, on
 
       {/* scheduled sends */}
       {pendingSends.length > 0 && (
-        <div style={{ margin: '0 22px 10px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div className="print-hide" style={{ margin: '0 22px 10px', display: 'flex', flexDirection: 'column', gap: 6 }}>
           {pendingSends.map((s) => (
             <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 8, background: '#f5f0e4', border: '1px solid #e7dcc2', borderRadius: 10, padding: '8px 12px', fontSize: 12.5 }}>
               <span>🗓</span>
@@ -827,8 +883,9 @@ function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, on
       )}
 
       {/* actions */}
-      <div style={{ display: 'flex', gap: 9, padding: '14px 22px', borderTop: '1px solid #f0f2ef', flexWrap: 'wrap' }}>
+      <div className="print-hide" style={{ display: 'flex', gap: 9, padding: '14px 22px', borderTop: '1px solid #f0f2ef', flexWrap: 'wrap' }}>
         {inv.status === 'draft' && <button onClick={onEdit} disabled={busy} style={ghostBtn}>Edit</button>}
+        <button onClick={() => printInvoiceDoc(inv)} disabled={busy} title="Print or save this invoice as a PDF" style={{ background: '#fff', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: busy ? 0.6 : 1 }}>⬇ PDF</button>
         {inv.status !== 'paid' && paymentsOk && (
           <SendMenu
             busy={busy}
@@ -1133,6 +1190,58 @@ function TakePaymentModal({ inv, cfg, onClose, onPaid }) {
           </>
         )}
       </div>
+    </div>
+  )
+}
+
+// ---- Bill-to override modal ---------------------------------------------------
+// Change the name / email / phone shown ON the invoice document (emailed
+// invoice, pay page, PDF) — e.g. a property manager's end client for
+// insurance. Works on any status, including sent and paid: the invoice stays
+// assigned to the real customer, and sends/reminders/autopay are untouched.
+function BillToModal({ inv, onClose, onSaved }) {
+  const [name, setName] = useState(inv.billToName || '')
+  const [email, setEmail] = useState(inv.billToEmail || '')
+  const [phone, setPhone] = useState(inv.billToPhone || '')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState(null)
+
+  async function save(e) {
+    e.preventDefault()
+    setBusy(true)
+    setErr(null)
+    try {
+      await updateBillTo(inv.id, inv.number, { name, email, phone })
+      onSaved((name || '').trim())
+    } catch (e2) {
+      setErr(e2.message || String(e2))
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div onClick={() => !busy && onClose()} style={overlay}>
+      <form onClick={(e) => e.stopPropagation()} onSubmit={save} style={{ ...modal, width: 460 }}>
+        <div style={{ fontWeight: 700, fontSize: 16 }}>Name on invoice</div>
+        <div style={{ fontSize: 12.5, color: '#7c8a82', marginTop: 3, marginBottom: 14 }}>
+          Invoice {inv.number} · assigned to <b style={{ color: '#1a2420' }}>{inv.customerName || 'the client'}</b>. Leave everything blank to show their own info again.
+        </div>
+        {err && <div style={{ ...errorBox, marginBottom: 12 }}>{err}</div>}
+        <Field label="Name shown on the invoice">
+          <input value={name} onChange={(e) => setName(e.target.value)} style={inp} placeholder={inv.customerName || 'e.g. the end client’s name'} autoFocus />
+        </Field>
+        <div style={twoCol}>
+          <Field label="Email shown (optional)"><input value={email} onChange={(e) => setEmail(e.target.value)} style={inp} placeholder={inv.customerEmail || '—'} /></Field>
+          <Field label="Phone shown (optional)"><input value={phone} onChange={(e) => setPhone(e.target.value)} style={inp} placeholder={inv.customerPhone || '—'} /></Field>
+        </div>
+        <div style={{ background: '#f7f9f7', border: '1px solid #e6eae6', borderRadius: 10, padding: '9px 12px', fontSize: 11.5, color: '#7c8a82', marginTop: 4, marginBottom: 14 }}>
+          Display only — the emailed invoice, pay page and PDF will show this name. The invoice itself, payment links, texts and reminders stay on {inv.customerName || 'the client'}’s record.
+        </div>
+        <div style={{ display: 'flex', gap: 9 }}>
+          <button type="button" onClick={onClose} disabled={busy} style={cancelBtn}>Cancel</button>
+          <button type="submit" disabled={busy} style={{ ...primaryBtn, opacity: busy ? 0.6 : 1 }}>{busy ? 'Saving…' : 'Save'}</button>
+        </div>
+      </form>
     </div>
   )
 }

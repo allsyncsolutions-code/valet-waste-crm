@@ -9,6 +9,7 @@ import { supabase } from '../lib/supabaseClient.js'
 import { loadRunner, tokenizeCard } from '../lib/runnerJs.js'
 import { RichText } from '../components/RichText.jsx'
 import { TipPicker } from '../components/TipPicker.jsx'
+import { printInvoiceDoc } from '../lib/printInvoice.js'
 
 const GREEN = '#1f7a4d'
 const money = (v) => `$${Number(v || 0).toFixed(2)}`
@@ -141,29 +142,25 @@ export default function PayPage({ slug, invoiceId }) {
   if (loadErr) return shell(<div style={{ ...card, textAlign: 'center', color: '#c0492f', fontSize: 13.5 }}>{loadErr}</div>)
   if (!info) return shell(<div style={{ ...card, textAlign: 'center', color: '#9aa69e' }}>Loading…</div>)
 
-  if (paid || inv.status === 'paid') {
-    const charged = paid ? (paid.charged ?? Number(inv.total || 0)) : Number(inv.total || 0) + Number(inv.tip_amount || 0)
-    return shell(
-      <div style={{ ...card, textAlign: 'center', padding: '28px 20px' }}>
-        <div style={{ fontSize: 34 }}>✓</div>
-        <div style={{ fontSize: 17, fontWeight: 800, color: GREEN, marginTop: 6 }}>Invoice {inv.number} is paid</div>
-        <div style={{ fontSize: 13.5, color: '#5d6b63', marginTop: 8 }}>
-          {paid ? <>Thank you! We've received your payment of <b>{money(charged)}</b>{Number(tip) > 0 ? ` (including a ${money(tip)} tip — thank you!)` : ''}.{paid.saved ? ' Your card is saved for autopay.' : ''}</> : 'This invoice has already been paid — nothing else to do.'}
-        </div>
-      </div>,
-    )
-  }
-
   if (inv.status === 'void') {
     return shell(<div style={{ ...card, textAlign: 'center', color: '#9aa69e', fontSize: 13.5 }}>Invoice {inv.number} was voided — there's nothing to pay.</div>)
   }
 
-  return shell(
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      {err && <div style={{ background: '#fbeae6', color: '#c0492f', borderRadius: 9, padding: '9px 12px', fontSize: 13 }}>{err}</div>}
+  const isPaid = !!(paid || inv.status === 'paid')
 
-      {/* invoice document */}
-      <div style={{ ...card, padding: 0, overflow: 'hidden' }}>
+  // ⬇ Download PDF — prints just the invoice document (the browser's dialog
+  // has "Save as PDF"), so customers can keep a copy for records/insurance.
+  const pdfBtn = (
+    <div className="print-hide" style={{ display: 'flex', justifyContent: 'flex-end' }}>
+      <button onClick={() => printInvoiceDoc(inv.number)} style={{ background: '#fff', border: `1px solid #cfe0d5`, color: GREEN, borderRadius: 9, padding: '8px 14px', fontSize: 12.5, fontWeight: 700, cursor: 'pointer' }}>⬇ Download PDF</button>
+    </div>
+  )
+
+  // The invoice document — the ONE thing that prints (⬇ Download PDF). Kept
+  // visible when the invoice is already paid so customers can download a copy
+  // for their records / insurance.
+  const docCard = (
+    <div className="print-doc" style={{ ...card, padding: 0, overflow: 'hidden' }}>
         {/* masthead: logo + business name (left) · contact info (right) */}
         <div style={{ padding: '16px 18px 12px', display: 'flex', alignItems: 'flex-start', gap: 12 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, minWidth: 0 }}>
@@ -189,7 +186,10 @@ export default function PayPage({ slug, invoiceId }) {
         {/* title + number · bill to */}
         <div style={{ padding: '14px 18px 4px', display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'flex-start' }}>
           <div style={{ flex: 1, minWidth: 140 }}>
-            <div style={{ fontSize: 20, fontWeight: 800, letterSpacing: '.04em', color: '#15281d' }}>INVOICE</div>
+            <div style={{ fontSize: 20, fontWeight: 800, letterSpacing: '.04em', color: '#15281d' }}>
+              INVOICE
+              {isPaid && <span style={{ fontSize: 10.5, letterSpacing: '.08em', color: '#fff', background: GREEN, borderRadius: 6, padding: '3px 8px', marginLeft: 9, verticalAlign: '3px' }}>PAID ✓</span>}
+            </div>
             <div style={{ fontSize: 12.5, color: '#5d6b63', marginTop: 2 }}>{inv.number}</div>
             <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 5 }}>
               {inv.issue_date ? `Issued ${fmtD(inv.issue_date)}` : ''}{inv.due_date ? ` · Due ${fmtD(inv.due_date)}` : ''}
@@ -282,6 +282,31 @@ export default function PayPage({ slug, invoiceId }) {
           </div>
         )}
       </div>
+  )
+
+  if (isPaid) {
+    const charged = paid ? (paid.charged ?? Number(inv.total || 0)) : Number(inv.total || 0) + Number(inv.tip_amount || 0)
+    return shell(
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div className="print-hide" style={{ ...card, textAlign: 'center', padding: '22px 20px' }}>
+          <div style={{ fontSize: 34 }}>✓</div>
+          <div style={{ fontSize: 17, fontWeight: 800, color: GREEN, marginTop: 6 }}>Invoice {inv.number} is paid</div>
+          <div style={{ fontSize: 13.5, color: '#5d6b63', marginTop: 8 }}>
+            {paid ? <>Thank you! We've received your payment of <b>{money(charged)}</b>{Number(tip) > 0 ? ` (including a ${money(tip)} tip — thank you!)` : ''}.{paid.saved ? ' Your card is saved for autopay.' : ''}</> : 'This invoice has already been paid — nothing else to do.'}
+          </div>
+        </div>
+        {pdfBtn}
+        {docCard}
+      </div>,
+    )
+  }
+
+  return shell(
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {err && <div style={{ background: '#fbeae6', color: '#c0492f', borderRadius: 9, padding: '9px 12px', fontSize: 13 }}>{err}</div>}
+
+      {pdfBtn}
+      {docCard}
 
       {/* card form */}
       {!payment.available ? (

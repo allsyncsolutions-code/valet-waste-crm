@@ -244,6 +244,7 @@ function invoiceEmailText(c: Record<string, unknown>, s: Record<string, unknown>
     `Hi ${c.name || "there"},`,
     ``,
     `Invoice ${inv.number} from ${company} is ready.`,
+    inv.bill_to_name ? `Billed to: ${inv.bill_to_name}${inv.bill_to_email ? ` (${inv.bill_to_email})` : ""}` : "",
     ...lines,
     `Subtotal: ${money(inv.subtotal)}`,
     Number(inv.discount) ? `Discount: -${money(inv.discount)}` : "",
@@ -297,6 +298,17 @@ function invoiceEmailHtml(c: Record<string, unknown>, s: Record<string, unknown>
   const company = s.company_name || "Valet Waste FL"
   const money = (v: unknown) => "$" + Number(v || 0).toFixed(2)
   const esc = (t: unknown) => String(t ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" } as Record<string, string>)[ch])
+  // Bill-to override (e.g. a property manager's end client, for insurance):
+  // rendered ONLY when set — invoices without an override stay pixel-identical.
+  // The greeting still uses the real customer (the email recipient).
+  const billTo = [inv.bill_to_name, inv.bill_to_email, inv.bill_to_phone].some((v) => String(v || "").trim())
+    ? `<div style="margin:0 0 16px;padding:12px 14px;background:#f7faf8;border:1px solid #e6ece8;border-radius:10px">
+        <div style="font-size:11px;color:#7c8a82;text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px">Billed to</div>
+        ${inv.bill_to_name ? `<div style="font-size:14px;font-weight:700;color:#1a2420">${esc(inv.bill_to_name)}</div>` : ""}
+        ${inv.bill_to_email ? `<div style="font-size:12.5px;color:#5d6b63;margin-top:2px">${esc(inv.bill_to_email)}</div>` : ""}
+        ${inv.bill_to_phone ? `<div style="font-size:12.5px;color:#5d6b63;margin-top:2px">${esc(inv.bill_to_phone)}</div>` : ""}
+      </div>`
+    : ""
   // Proof-of-service photos ride INSIDE each line item — the customer sees
   // exactly which pictures belong to which charge.
   const thumbs = (it: Record<string, unknown>) => {
@@ -325,6 +337,7 @@ function invoiceEmailHtml(c: Record<string, unknown>, s: Record<string, unknown>
       <div style="font-size:13px;opacity:.85;margin-top:2px">Invoice ${esc(inv.number)}${inv.due_date ? ` · Due ${esc(String(inv.due_date).slice(0, 10))}` : ""}</div>
     </div>
     <div style="padding:26px">
+      ${billTo}
       <p style="margin:0 0 18px;font-size:15px;color:#1a2420">Hi ${esc(c.name || "there")}, your invoice is ready. Total due: <b>${money(inv.total)}</b></p>
       <table style="width:100%;border-collapse:collapse">
         <tr style="background:#f7faf8">
@@ -518,7 +531,7 @@ Deno.serve(async (req) => {
     if (action === "email_invoice") {
       if (!body.invoice_id) return json({ error: "Missing invoice_id." }, 400)
       const inv = (await sbGet(
-        `invoices?id=eq.${enc(String(body.invoice_id))}&select=id,number,customer_id,status,payment_url,subtotal,discount,total,due_date,issue_date,notes`,
+        `invoices?id=eq.${enc(String(body.invoice_id))}&select=id,number,customer_id,status,payment_url,subtotal,discount,total,due_date,issue_date,notes,bill_to_name,bill_to_email,bill_to_phone`,
       ))[0]
       if (!inv) return json({ error: "Invoice not found." }, 404)
       if (inv.status === "void") return json({ error: "This invoice is void." }, 400)

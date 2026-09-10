@@ -558,26 +558,38 @@ function InvoicesTab({ data, onPay }) {
         </div>
       )}
       {!data.invoices.length && <div style={{ ...card, textAlign: 'center', color: '#9aa69e', fontSize: 13 }}>No invoices yet.</div>}
-      {data.invoices.map((inv, i) => (
-        <div key={i} style={{ ...card, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-          <div>
-            <div style={{ fontWeight: 700, fontSize: 14 }}>{inv.number}</div>
-            <div style={{ fontSize: 12, color: '#7c8a82' }}>
-              {inv.due_date ? `Due ${fmtD(inv.due_date)}` : fmtD(inv.issue_date)}
-              {inv.status === 'paid' && Number(inv.tip_amount) > 0 ? ` · tipped ${money(inv.tip_amount)}` : ''}
+      {data.invoices.map((inv, i) => {
+        const docUrl = inv.payment_url || inv.stripe_payment_url
+        return (
+          <div key={i} style={{ ...card, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>{inv.number}</div>
+              <div style={{ fontSize: 12, color: '#7c8a82' }}>
+                {inv.due_date ? `Due ${fmtD(inv.due_date)}` : fmtD(inv.issue_date)}
+                {inv.status === 'paid' && Number(inv.tip_amount) > 0 ? ` · tipped ${money(inv.tip_amount)}` : ''}
+              </div>
             </div>
+            <span style={{ flex: 1 }} />
+            <div style={{ fontWeight: 800, fontSize: 15 }}>{money(inv.total)}</div>
+            {inv.status === 'paid' ? (
+              <span style={chip('#e7f1eb', GREEN)}>PAID</span>
+            ) : docUrl ? (
+              <button onClick={() => onPay && onPay(inv.id)} style={{ ...btnPrimary, padding: '8px 16px' }}>Pay now</button>
+            ) : (
+              <span style={chip('#faf3e2', '#8a6414')}>OPEN</span>
+            )}
+            {docUrl && (
+              <a
+                href={docUrl}
+                target="_blank"
+                rel="noreferrer"
+                title="View the invoice and download it as a PDF"
+                style={{ ...btnGhost, padding: '8px 13px', textDecoration: 'none', display: 'inline-block' }}
+              >⬇ PDF</a>
+            )}
           </div>
-          <span style={{ flex: 1 }} />
-          <div style={{ fontWeight: 800, fontSize: 15 }}>{money(inv.total)}</div>
-          {inv.status === 'paid' ? (
-            <span style={chip('#e7f1eb', GREEN)}>PAID</span>
-          ) : inv.payment_url || inv.stripe_payment_url ? (
-            <button onClick={() => onPay && onPay(inv.id)} style={{ ...btnPrimary, padding: '8px 16px' }}>Pay now</button>
-          ) : (
-            <span style={chip('#faf3e2', '#8a6414')}>OPEN</span>
-          )}
-        </div>
-      ))}
+        )
+      })}
     </div>
   )
 }

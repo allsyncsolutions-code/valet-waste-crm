@@ -621,7 +621,7 @@ Deno.serve(async (req) => {
       const cust = (await sbGet(`customers?portal_slug=eq.${enc(String(slug))}&select=id,name,email,phone`))[0]
       if (!cust) return json({ error: "This payment link isn't valid." }, 404)
       const inv = (await sbGet(
-        `invoices?id=eq.${enc(invoiceId)}&customer_id=eq.${cust.id}&select=id,number,status,total,tip_amount,subtotal,discount,due_date,issue_date,notes,invoice_line_items(title,description,quantity,unit_price,amount,position,stop_id)`,
+        `invoices?id=eq.${enc(invoiceId)}&customer_id=eq.${cust.id}&select=id,number,status,total,tip_amount,subtotal,discount,due_date,issue_date,notes,bill_to_name,bill_to_email,bill_to_phone,invoice_line_items(title,description,quantity,unit_price,amount,position,stop_id)`,
       ))[0]
       if (!inv) return json({ error: "This payment link isn't valid." }, 404)
       const settings = await getSettings()
@@ -683,9 +683,12 @@ Deno.serve(async (req) => {
           address: settings.company_address || null,
         },
         terms: settings.invoice_terms || null,
-        customer_name: cust.name,
-        customer_email: cust.email || null,
-        customer_phone: cust.phone || null,
+        // Bill-to override wins when set (e.g. a property manager's end
+        // client) — the pay page document shows it; payment itself still runs
+        // against the assigned customer.
+        customer_name: inv.bill_to_name || cust.name,
+        customer_email: inv.bill_to_email || cust.email || null,
+        customer_phone: inv.bill_to_phone || cust.phone || null,
         invoice: {
           id: inv.id, number: inv.number, status: inv.status,
           total: inv.total, tip_amount: Number(inv.tip_amount || 0), subtotal: inv.subtotal, discount: inv.discount,
