@@ -11,9 +11,12 @@
 //   route_stops.complete_notified_at:  atomic at-most-once guard per stop.
 //
 // Wording comes from app_settings.sms_checkout_template (editable in Settings).
-// SMS goes out through the existing `sms` function's `send` action; while
-// texting is paused (or the contact has no phone but has an email) the notice
-// goes by email instead, with a one-tap opt-out link in the footer (0052).
+// Channel (since 2026-09-11): app push FIRST when the client has the app — a
+// delivered push REPLACES the text; otherwise SMS goes out through the existing
+// `sms` function's `send` action, and while texting is paused (or the contact
+// has no phone but has an email) the notice goes by email instead, with a
+// one-tap opt-out link in the footer (0052). Clients manage their channel
+// toggles in their portal 🔔 card (mig 0058).
 //
 // Deploy with JWT verification OFF (clients call with the anon key):
 //   supabase functions deploy notify-complete --no-verify-jwt
@@ -27,10 +30,42 @@ const CORS = {
 }
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+const PORTAL_ORIGIN = Deno.env.get("PORTAL_ORIGIN") || "https://valet-waste-crm.vercel.app"
 const rest = {
   apikey: SERVICE_KEY,
   Authorization: `Bearer ${SERVICE_KEY}`,
   "Content-Type": "application/json",
+}
+
+// Expo push to the customer's registered app tokens (client app registers via
+// the portal fn, mig 0058). Hardened shape: per-device record check (single-
+// message pushes return an object, not an array) + DeviceNotRegistered prune.
+// Returns delivered count (0 = caller falls back to SMS/email).
+async function sendCustomerPush(customerId: string, title: string, body: string, url: string): Promise<number> {
+  try {
+    const r0 = await fetch(`${SUPABASE_URL}/rest/v1/push_tokens?customer_id=eq.${customerId}&select=token&limit=20`, { headers: rest })
+    const tokens = await r0.json()
+    if (!Array.isArray(tokens)) return 0
+    let sent = 0
+    for (const t of tokens) {
+      try {
+        const r = await fetch("https://exp.host/--/api/v2/push/send", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ to: t.token, title, body, sound: "default", data: { url } }),
+        })
+        const d = await r.json().catch(() => ({} as any))
+        const rec: any = Array.isArray(d?.data) ? d?.data?.[0] : d?.data
+        if (r.ok && rec?.status === "ok") sent++
+        else if (String(rec?.details?.error || "") === "DeviceNotRegistered") {
+          await fetch(`${SUPABASE_URL}/rest/v1/push_tokens?token=eq.${encodeURIComponent(t.token)}`, { method: "DELETE", headers: rest })
+        }
+      } catch (_e) { /* best effort per token */ }
+    }
+    return sent
+  } catch (_e) {
+    return 0
+  }
 }
 
 const DEFAULT_TPL = "Hi {customerName}, your {serviceType} service at {address} is complete. Thank you for choosing {companyName}!"
@@ -140,7 +175,7 @@ async function notifyComplete(stopId: string, sentBy?: string | null) {
 
   const r = await fetch(
     `${SUPABASE_URL}/rest/v1/route_stops?id=eq.${stopId}&select=id,service,complete_notified_at,` +
-      `properties(name,address,service,customer_id,customers(id,name,contact_name,phone,contact_phone,email,notify_on_service,notify_optout_token))`,
+      `properties(name,address,service,customer_id,customers(id,name,contact_name,phone,contact_phone,email,portal_slug,notify_on_service,notify_sms,notify_push,notify_email,notify_optout_token))`,
     { headers: rest },
   )
   const rows = await r.json()
@@ -153,7 +188,8 @@ async function notifyComplete(stopId: string, sentBy?: string | null) {
   if (!cust) return { ok: true, skipped: "no_customer" }
   const phone = (cust.contact_phone || cust.phone || "").trim() // POC number wins; main phone is the default
   const email = (cust.email || "").trim()
-  if (!phone && !email) return { ok: true, skipped: "no_contact" }
+  // Push-only contacts (no phone, no email) are still reachable via the app.
+  if (!phone && !email && cust.notify_push === false) return { ok: true, skipped: "no_contact" }
 
   const override = cust.notify_on_service // true / false / null
   let send = false, reason = ""
@@ -175,14 +211,26 @@ async function notifyComplete(stopId: string, sentBy?: string | null) {
     address: (prop.address || prop.name || "your property").trim(),
     companyName: (String(settings.company_name || "").trim() || "Valet Waste FL"),
   })
+  const smsAllowed = cust.notify_sms !== false // client-managed channel (portal 🔔 card)
+  const emailAllowed = cust.notify_email !== false
 
   try {
-    if (phone) {
+    // Push-first (client request, 2026-09-11): a delivered app push REPLACES
+    // the text. If push can't deliver (no token / Expo error / channel off),
+    // fall through to the normal text/email paths — a notice is never lost.
+    if (cust.notify_push !== false) {
+      const url = cust.portal_slug
+        ? `${PORTAL_ORIGIN}/?portal=${encodeURIComponent(cust.portal_slug)}`
+        : PORTAL_ORIGIN
+      const pushed = await sendCustomerPush(cust.id, String(settings.company_name || "Valet Waste FL").trim() || "Valet Waste FL", body, url)
+      if (pushed > 0) return { ok: true, sent: true, via: "push", reason }
+    }
+    if (phone && smsAllowed) {
       const res = await sendVia(phone, body, cust.id, sentBy)
       if (res?.paused) {
         // Texting paused business-wide: email instead of silently dropping
         // the notice (and don't burn the at-most-once claim if we can't).
-        if (email) {
+        if (email && emailAllowed) {
           await sendEmail(email, "Your Valet Waste service is complete", body, cust)
           return { ok: true, sent: true, via: "email", reason, note: "texts paused — emailed instead" }
         }
@@ -191,9 +239,15 @@ async function notifyComplete(stopId: string, sentBy?: string | null) {
       }
       return { ok: true, sent: true, reason, provider: res?.provider }
     }
-    // No phone on file — email is the channel.
-    await sendEmail(email, "Your Valet Waste service is complete", body, cust)
-    return { ok: true, sent: true, via: "email", reason }
+    // No phone, or the client turned texts off in their portal — email is the
+    // remaining channel if they allow it.
+    if (email && emailAllowed) {
+      await sendEmail(email, "Your Valet Waste service is complete", body, cust)
+      return { ok: true, sent: true, via: "email", reason }
+    }
+    // Every channel is off or unusable — don't burn the at-most-once claim.
+    await releaseComplete(stopId)
+    return { ok: true, skipped: "no_channel" }
   } catch (e) {
     await releaseComplete(stopId)
     return { ok: false, error: e instanceof Error ? e.message : String(e) }

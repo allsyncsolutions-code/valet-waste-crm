@@ -250,6 +250,7 @@ export default function PortalPage({ slug, code, previewCustomerId, shareToken }
         <HomeTab
           data={data} nextPickup={nextPickup} pendingQuotes={pendingQuotes} excessCount={excessCount}
           go={setTab} shared={shared} onShare={!shared && !preview ? copyShareLink : null}
+          token={token} preview={preview}
         />
       )}
       {tab === 'pickups' && <PickupsTab data={data} />}
@@ -273,7 +274,7 @@ export default function PortalPage({ slug, code, previewCustomerId, shareToken }
 }
 
 // ---- Home ---------------------------------------------------------------------
-function HomeTab({ data, nextPickup, pendingQuotes, excessCount, go, shared, onShare }) {
+function HomeTab({ data, nextPickup, pendingQuotes, excessCount, go, shared, onShare, token, preview }) {
   const payment = data.payment || {}
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -380,6 +381,8 @@ function HomeTab({ data, nextPickup, pendingQuotes, excessCount, go, shared, onS
         ))}
       </div>
 
+      {!shared && <NotifyCard data={data} token={token} preview={preview} />}
+
       {!shared && <button onClick={() => go('request')} style={{ ...btnPrimary, padding: '13px 0', fontSize: 14.5, borderRadius: 12 }}>+ Request service</button>}
 
       {/* property managers: view-only link for their homeowners */}
@@ -392,6 +395,67 @@ function HomeTab({ data, nextPickup, pendingQuotes, excessCount, go, shared, onS
           <button onClick={onShare} style={{ ...btnGhost, flex: 'none' }}>Copy view-only link</button>
         </div>
       )}
+    </div>
+  )
+}
+
+// ---- Notification prefs ---------------------------------------------------------
+// Client-managed channels (Texts / App notifications / Email). Re-enabling
+// Texts also clears the email-unsubscribe master opt-out (portal fn).
+function NotifyCard({ data, token, preview }) {
+  const prefs0 = data.notify_prefs || { sms: true, push: true, email: true, opted_out: false }
+  const [prefs, setPrefs] = useState(prefs0)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+
+  async function toggle(ch) {
+    if (preview || busy) return
+    const before = prefs
+    const next = { ...prefs, [ch]: !prefs[ch] }
+    setPrefs(next)
+    setBusy(true)
+    setErr('')
+    try {
+      await portalApi({ action: 'set_notify_prefs', token, [ch]: next[ch] })
+      if (ch === 'sms' && next.sms) setPrefs((p) => ({ ...p, opted_out: false }))
+    } catch (e) {
+      setPrefs(before)
+      setErr(e.message || String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const row = (key, icon, label, hint) => (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 0', borderTop: '1px solid #f0f2ef' }}>
+      <span style={{ fontSize: 15, flex: 'none' }}>{icon}</span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 13, fontWeight: 600 }}>{label}</div>
+        <div style={{ fontSize: 11.5, color: '#9aa69e' }}>{hint}</div>
+      </div>
+      <button
+        onClick={() => toggle(key)}
+        disabled={busy || preview}
+        style={{ flex: 'none', background: prefs[key] ? '#e7f1eb' : '#f0f2ef', color: prefs[key] ? GREEN : '#9aa69e', border: `1px solid ${prefs[key] ? '#cfe5d8' : '#e0e4e0'}`, borderRadius: 20, padding: '5px 13px', fontSize: 12, fontWeight: 700, cursor: preview ? 'default' : 'pointer', opacity: busy ? 0.6 : 1 }}
+      >{prefs[key] ? 'On' : 'Off'}</button>
+    </div>
+  )
+
+  return (
+    <div style={card}>
+      <div style={{ fontWeight: 700, fontSize: 14 }}>🔔 Notifications</div>
+      <div style={{ fontSize: 12, color: '#9aa69e', marginTop: 2, marginBottom: 4 }}>
+        How we keep you posted about pickups and service. When app notifications are on, they take the place of arrival/completion texts.
+      </div>
+      {prefs.opted_out && (
+        <div style={{ background: '#faf3e2', color: '#8a6414', borderRadius: 9, padding: '8px 11px', fontSize: 12, marginTop: 6 }}>
+          You're unsubscribed from service notifications (email link). Turn <b>Texts</b> back on below to re-enable everything.
+        </div>
+      )}
+      {row('sms', '📱', 'Texts', 'Arrival & completion text messages')}
+      {row('push', '🔔', 'App notifications', 'Alerts in the app — sign in once and allow notifications')}
+      {row('email', '✉️', 'Email', 'Service and invoice emails')}
+      {err && <div style={{ color: '#c0492f', fontSize: 12, marginTop: 6 }}>Couldn't save — {err}</div>}
     </div>
   )
 }
@@ -435,22 +499,38 @@ function PickupsTab({ data }) {
 }
 
 // ---- Photos --------------------------------------------------------------------
+// Every photo we have for this client, grouped per visit — driver service
+// photos (all time, with date/address/service/visit-note) merged with the
+// staff "address file" photos. Falls back to the old list for old payloads.
 function PhotosTab({ data }) {
+  const photos = data.photos || data.property_photos || []
+  const groups = []
+  for (const p of photos) {
+    const key = `${String(p.date || '').slice(0, 10)}|${p.address || ''}`
+    let g = groups.find((x) => x.key === key)
+    if (!g) { g = { key, date: p.date, address: p.address, service: '', note: '', items: [] }; groups.push(g) }
+    if (p.service && !g.service) g.service = p.service
+    if (p.note && !g.note) g.note = p.note
+    g.items.push(p)
+  }
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-      {!data.property_photos.length && <div style={{ ...card, textAlign: 'center', color: '#9aa69e', fontSize: 13 }}>No property photos yet.</div>}
-      {data.property_photos.map((p, i) => (
-        <div key={i} style={card}>
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap', marginBottom: p.url || p.note ? 8 : 0 }}>
-            <span style={{ fontWeight: 700, fontSize: 13.5 }}>{fmtD(p.date)}</span>
-            <span style={{ fontSize: 12.5, color: '#7c8a82' }}>{p.address}</span>
+      {!photos.length && <div style={{ ...card, textAlign: 'center', color: '#9aa69e', fontSize: 13 }}>No photos yet — photos from your services appear here after each visit.</div>}
+      {groups.map((g) => (
+        <div key={g.key} style={card}>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+            <span style={{ fontWeight: 700, fontSize: 13.5 }}>{fmtD(g.date)}</span>
+            <span style={{ fontSize: 12.5, color: '#7c8a82', flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{g.address}</span>
+            {g.service && <span style={chip('#e7f1eb', GREEN)}>{g.service}</span>}
           </div>
-          {p.note && <div style={{ fontSize: 13, color: '#5d6b63', marginBottom: p.url ? 8 : 0 }}>{p.note}</div>}
-          {p.url && (
-            <a href={p.url} target="_blank" rel="noreferrer">
-              <img src={p.url} alt="property" style={{ maxWidth: '100%', maxHeight: 300, borderRadius: 10, border: '1px solid #e6eae6' }} />
-            </a>
-          )}
+          {g.note && <div style={{ fontSize: 13, color: '#5d6b63', marginTop: 6 }}>📝 {g.note}</div>}
+          <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+            {g.items.filter((p) => p.url).map((p, j) => (
+              <a key={j} href={p.url} target="_blank" rel="noreferrer">
+                <img src={p.url} alt="service" style={{ width: 104, height: 104, objectFit: 'cover', borderRadius: 10, border: '1px solid #e6eae6' }} />
+              </a>
+            ))}
+          </div>
         </div>
       ))}
     </div>

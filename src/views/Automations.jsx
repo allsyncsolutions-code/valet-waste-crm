@@ -28,6 +28,7 @@ export default function Automations({ app }) {
   const [runMsg, setRunMsg] = useState('')
   const [cfgOpen, setCfgOpen] = useState(false)
   const [alertCfgOpen, setAlertCfgOpen] = useState(false)
+  const [svcCfgOpen, setSvcCfgOpen] = useState(false)
 
   async function refresh() {
     setLoading(true)
@@ -103,6 +104,9 @@ export default function Automations({ app }) {
                   {a.kind === 'auto_invoice_reminders' && (
                     <button onClick={() => setCfgOpen(true)} disabled={busyId === a.id} style={{ background: '#fff', border: '1px solid #1f7a4d55', color: '#1f7a4d', borderRadius: 8, padding: '6px 12px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>⚙️ Edit reminders</button>
                   )}
+                  {a.kind === 'service_reminders' && (
+                    <button onClick={() => setSvcCfgOpen(true)} disabled={busyId === a.id} style={{ background: '#fff', border: '1px solid #1f7a4d55', color: '#1f7a4d', borderRadius: 8, padding: '6px 12px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>⚙️ Edit reminders</button>
+                  )}
                   {a.status === 'enabled' && (
                     <button onClick={() => runNow(a)} disabled={busyId === a.id} style={{ background: '#1f7a4d', border: '1px solid #1f7a4d', color: '#fff', borderRadius: 8, padding: '6px 12px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>Run now</button>
                   )}
@@ -122,6 +126,9 @@ export default function Automations({ app }) {
 
       {cfgOpen && (
         <ReminderScheduleModal onClose={() => setCfgOpen(false)} onSaved={refresh} />
+      )}
+      {svcCfgOpen && (
+        <ServiceRemindersModal onClose={() => setSvcCfgOpen(false)} onSaved={refresh} />
       )}
       {alertCfgOpen && (
         <RequestAlertsModal onClose={() => setAlertCfgOpen(false)} onSaved={refresh} />
@@ -276,13 +283,102 @@ function ReminderScheduleModal({ onClose, onSaved }) {
         )}
 
         <div style={{ fontSize: 11, color: '#9aa69e', marginBottom: 14, lineHeight: 1.55 }}>
-          Push notifications need the customer to have signed into the app — no clients have app push yet, so Push is dormant until then (selecting it is harmless).
+          Push goes to clients who have signed into the app and allowed notifications (they're prompted at their next login). Clients without the app are simply skipped — they keep getting texts as usual.
         </div>
 
         <div style={{ display: 'flex', gap: 9 }}>
           <button onClick={onClose} disabled={saving} style={cancelBtn}>Close</button>
           <button onClick={runNow} disabled={saving || !autoRow} style={ghostBtn}>Run check now</button>
           <button onClick={save} disabled={saving || !autoRow} style={{ ...primaryBtn, opacity: saving ? 0.6 : 1 }}>{saving ? 'Saving…' : 'Save'}</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ---- Day-before service reminder editor ---------------------------------------
+// Edits the service_reminders automation: a push (default) + optional email
+// the morning before a client's scheduled pickup day. Clients manage their
+// own channel toggles (Texts / Push / Email) in their portal's 🔔 card; this
+// only picks the channels the OFFICE sends day-before reminders on.
+function ServiceRemindersModal({ onClose, onSaved }) {
+  const [row, setRow] = useState(null)
+  const [enabled, setEnabled] = useState(false)
+  const [pushOn, setPushOn] = useState(true)
+  const [emailOn, setEmailOn] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState('')
+  const [msg, setMsg] = useState('')
+
+  useEffect(() => {
+    loadAutomations().then((all) => {
+      const r = all.find((a) => a.kind === 'service_reminders')
+      if (r) {
+        setRow(r)
+        setEnabled(r.status === 'enabled')
+        setPushOn(r.config?.push !== false)
+        setEmailOn(!!r.config?.email)
+      } else {
+        setErr('Automation row not found — migration 0058 seeds it.')
+      }
+    }).catch((e) => setErr(e.message || String(e)))
+  }, [])
+
+  async function save() {
+    if (!row) { setErr('Automation row not found — migration 0058 seeds it.'); return }
+    setSaving(true); setErr(''); setMsg('')
+    try {
+      await saveAutomationConfig(row.id, { ...row.config, push: pushOn, email: emailOn }, enabled ? 'enabled' : 'paused', 'Day-before service reminders')
+      setMsg(`Saved ✓ — reminders are ${enabled ? 'ON: every morning ~7:30 AM ET, clients with a pickup the next day get a heads-up' : 'paused'}.`)
+      onSaved && onSaved()
+    } catch (e) { setErr(e.message || String(e)) }
+    setSaving(false)
+  }
+
+  async function runNow() {
+    if (!window.confirm('Run the reminder check now? This sends REAL notifications for pickups scheduled tomorrow.')) return
+    setErr(''); setMsg('Running…')
+    try {
+      const d = await runAutomationsNow('service_reminders')
+      setMsg(`Run: ${d?.ran?.[0]?.result || d?.note || 'no result'}`)
+      onSaved && onSaved()
+    } catch (e) { setErr(e.message || String(e)) }
+  }
+
+  const chip = (active) => ({
+    border: '1px solid #dde2dd', background: active ? '#e7f1eb' : '#fff', color: active ? '#1f7a4d' : '#5d6b63',
+    borderRadius: 7, padding: '3px 8px', fontSize: 11, fontWeight: 600, cursor: 'pointer',
+  })
+
+  return (
+    <div onClick={() => !saving && onClose()} style={overlay}>
+      <div onClick={(e) => e.stopPropagation()} style={{ ...modal, width: 520 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+          <div style={{ fontWeight: 700, fontSize: 16 }}>🚮 Day-before pickup reminders</div>
+          <span style={{ flex: 1 }} />
+          <button
+            onClick={() => setEnabled((v) => !v)}
+            style={{ background: enabled ? '#1f7a4d' : '#eef1ee', color: enabled ? '#fff' : '#5d6b63', border: 'none', borderRadius: 20, padding: '6px 14px', fontSize: 12.5, fontWeight: 700, cursor: 'pointer' }}
+          >{enabled ? 'ON' : 'OFF'}</button>
+        </div>
+        <div style={{ fontSize: 12, color: '#7c8a82', marginBottom: 14, lineHeight: 1.5 }}>
+          The morning before a client's scheduled pickup day, they get a heads-up ("Your pickup at 123 Main St is tomorrow"). Checked daily ~7:30 AM ET, once per day — clients who opted out of service notifications or turned a channel off in their portal are skipped automatically.
+        </div>
+
+        {err && <div style={errorBox}>{err}</div>}
+        {msg && <div style={{ marginBottom: 12, background: '#eef7f1', border: '1px solid #cfe7da', color: '#1f7a4d', borderRadius: 11, padding: '9px 13px', fontSize: 12.5 }}>{msg}</div>}
+
+        <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 7 }}>Send via</div>
+        <div style={{ display: 'flex', gap: 7, marginBottom: 12 }}>
+          <button onClick={() => setPushOn((v) => !v)} style={chip(pushOn)}>🔔 Push (app)</button>
+          <button onClick={() => setEmailOn((v) => !v)} style={chip(emailOn)}>✉️ Email</button>
+          <span style={{ fontSize: 10.5, color: '#9aa69e', alignSelf: 'center' }}>Push needs the client signed into the app</span>
+        </div>
+
+        <div style={{ display: 'flex', gap: 9 }}>
+          <button onClick={onClose} disabled={saving} style={cancelBtn}>Close</button>
+          <button onClick={runNow} disabled={saving || !enabled} title={enabled ? 'Check tomorrow\'s pickups and send now' : 'Turn ON and Save first'} style={ghostBtn}>Run check now</button>
+          <button onClick={save} disabled={saving} style={{ ...primaryBtn, opacity: saving ? 0.6 : 1 }}>{saving ? 'Saving…' : 'Save'}</button>
         </div>
       </div>
     </div>

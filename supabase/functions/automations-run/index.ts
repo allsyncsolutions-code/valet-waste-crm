@@ -48,6 +48,10 @@ async function sbPost(path: string, body: unknown) {
   if (!r.ok) throw new Error(`POST ${path}: ${r.status} ${await r.text()}`)
   return await r.json()
 }
+async function sbDelete(path: string) {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, { method: "DELETE", headers: restHeaders })
+  if (!r.ok) console.error(`DELETE ${path}: ${r.status} ${await r.text()}`)
+}
 
 const fmtMoney = (v: number) => `$${Number(v || 0).toFixed(2)}`
 const fmtDay = (ts: string | null) => {
@@ -176,7 +180,9 @@ async function sendStaffPush(title: string, body: string, url?: string): Promise
 }
 
 // Expo push to the customer's registered app tokens (customer-keyed rows on
-// push_tokens; staff profile tokens are intentionally not used here).
+// push_tokens; staff profile tokens are intentionally not used here). Checks
+// the per-device status record (single-message pushes return an object, not
+// an array) and prunes tokens Expo reports as uninstalled.
 async function sendCustomerPush(customerId: string, title: string, body: string, url: string): Promise<number> {
   const tokens = await sbGet(`push_tokens?customer_id=eq.${customerId}&select=token&limit=20`)
   let sent = 0
@@ -187,7 +193,12 @@ async function sendCustomerPush(customerId: string, title: string, body: string,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ to: t.token, title, body, sound: "default", data: { url } }),
       })
-      if (r.ok) sent++
+      const d = await r.json().catch(() => ({} as any))
+      const rec: any = Array.isArray(d?.data) ? d?.data?.[0] : d?.data
+      if (r.ok && rec?.status === "ok") sent++
+      else if (String(rec?.details?.error || "") === "DeviceNotRegistered") {
+        await sbDelete(`push_tokens?token=eq.${encodeURIComponent(t.token)}`)
+      }
     } catch (_e) { /* best effort per token */ }
   }
   return sent
@@ -204,7 +215,7 @@ async function runInvoiceReminders(auto: any): Promise<string> {
 
   const custIds = [...new Set(invoices.map((i: any) => i.customer_id).filter(Boolean))]
   const customers: Record<string, any> = {}
-  for (const c of await sbGet(`customers?id=in.(${custIds.join(",")})&select=id,name,email,phone,contact_phone,portal_slug,notify_on_service`)) customers[c.id] = c
+  for (const c of await sbGet(`customers?id=in.(${custIds.join(",")})&select=id,name,email,phone,contact_phone,portal_slug,notify_on_service,notify_sms,notify_push,notify_email`)) customers[c.id] = c
   const settings = (await sbGet(`app_settings?id=eq.1&select=company_name`))[0] || {}
   const company = settings.company_name || "Valet Waste FL"
 
@@ -254,7 +265,9 @@ async function runInvoiceReminders(auto: any): Promise<string> {
     }).trim()
 
     let e = 0, t = 0, p = 0
-    const emailOn = !!r.email && !!cust.email
+    // Client-managed channels (portal 🔔 card, mig 0058) gate each rule's
+    // channels on top of the rule selection itself.
+    const emailOn = !!r.email && !!cust.email && cust.notify_email !== false
     if (emailOn) {
       try { await sendCustomerEmail(cust.email, `Reminder: invoice ${inv.number} — ${amount}`, text, payUrl, amount, company); e++ } catch (_err) { /* try other channels */ }
     }
@@ -262,7 +275,7 @@ async function runInvoiceReminders(auto: any): Promise<string> {
     // TEXTS — the email channel (if the rule has one) still applies.
     // Point-of-contact number wins over the main phone (0055).
     const textTo = (cust.contact_phone || cust.phone || "").trim()
-    if (r.sms && textTo && cust.notify_on_service !== false) {
+    if (r.sms && textTo && cust.notify_on_service !== false && cust.notify_sms !== false) {
       try {
         const res = await fetch(`${SUPABASE_URL}/functions/v1/sms`, {
           method: "POST",
@@ -279,7 +292,7 @@ async function runInvoiceReminders(auto: any): Promise<string> {
         }
       } catch (_err) { /* best effort */ }
     }
-    if (r.push) {
+    if (r.push && cust.notify_push !== false) {
       try { p = await sendCustomerPush(cust.id, company, text.slice(0, 180), payUrl) } catch (_err) { /* best effort */ }
     }
     if (e + t + p > 0) {
@@ -300,6 +313,111 @@ async function runInvoiceReminders(auto: any): Promise<string> {
   if (pushed) ch.push(`${pushed} pushed`)
   if (smsFellBack) ch.push(`${smsFellBack} sms→email fallback`)
   return `${parts[0]} (${ch.join(", ")}) across ${invoices.length} open invoices.`
+}
+
+// ---- service_reminders ---------------------------------------------------------
+// Day-before pickup reminder ("Your pickup at 123 Main St is tomorrow"). Push
+// by default, optional email; runs on the 7:30 AM ET daily tick so it lands
+// the morning before service day. Schedule logic mirrors
+// src/lib/routesData.js scheduleHitsDate (pickup_days hold full lowercase
+// weekday names); one-time day overrides (skip / move) are respected.
+const WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]
+
+function scheduleHits(sched: { day_of_week: string; frequency: string; start_date: string | null }, dateStr: string): boolean {
+  const date = new Date(dateStr + "T12:00:00Z")
+  if (WEEKDAYS[date.getUTCDay()] !== sched.day_of_week) return false
+  if (sched.start_date && new Date(sched.start_date + "T12:00:00Z") > date) return false
+  const nth = Math.floor((date.getUTCDate() - 1) / 7) + 1
+  switch (sched.frequency) {
+    case "weekly": return true
+    case "biweekly": {
+      if (!sched.start_date) return true
+      const weeks = Math.round((date.getTime() - new Date(sched.start_date + "T12:00:00Z").getTime()) / (7 * 86400000))
+      return weeks % 2 === 0
+    }
+    case "monthly": return nth === 1
+    case "1st_3rd": return nth === 1 || nth === 3
+    case "2nd_4th": return nth === 2 || nth === 4
+    default: return false // on_call etc. never auto-remind
+  }
+}
+
+async function sendPlainCustomerEmail(to: string, subject: string, text: string, company: string) {
+  const key = Deno.env.get("SENDGRID_API_KEY")
+  if (!key) throw new Error("SENDGRID_API_KEY is not configured.")
+  const from = Deno.env.get("SENDGRID_FROM") || "valetwastefl@allsynccrm.com"
+  const html =
+    `<div style="font-family:system-ui,-apple-system,sans-serif;max-width:520px;margin:0 auto;padding:24px 16px;color:#1a2420">` +
+    `<p style="font-size:15px;line-height:1.65;white-space:pre-wrap">${escapeHtml(text)}</p>` +
+    `<p style="font-size:12.5px;color:#7c8a82;margin-top:18px">— ${escapeHtml(company)}</p></div>`
+  const r = await fetch("https://api.sendgrid.com/v3/mail/send", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ personalizations: [{ to: [{ email: to }] }], from: { email: from, name: company }, subject, content: [{ type: "text/html", value: html }] }),
+  })
+  if (!r.ok) throw new Error(`SendGrid ${r.status}: ${await r.text()}`)
+}
+
+async function runServiceReminders(auto: any): Promise<string> {
+  const today = etToday()
+  const tomorrow = addDays(today, 1)
+  const cfg = auto?.config || {}
+  if (cfg.lastSentDate === tomorrow) return `Already sent for ${tomorrow} — skipping (manual re-run the same day is a no-op).`
+  const pushOn = cfg.push !== false
+  const emailOn = !!cfg.email
+
+  const props = await sbGet(
+    `properties?paused=is.false&select=id,address,name,service,customer_id,pickup_days,pickup_frequency,pickup_start_date&limit=2000`,
+  )
+  let overrides: any[] = []
+  try {
+    overrides = await sbGet(`property_day_overrides?select=property_id,skip_date,service_date&limit=3000`)
+  } catch (_e) { /* overrides table empty/unavailable → schedules only */ }
+  const skipTomorrow = new Set(overrides.filter((o: any) => o.skip_date === tomorrow).map((o: any) => o.property_id))
+  const extraTomorrow = new Set(overrides.filter((o: any) => o.service_date === tomorrow).map((o: any) => o.property_id))
+
+  const due = props.filter((p: any) =>
+    p.customer_id && (extraTomorrow.has(p.id) ||
+      (!skipTomorrow.has(p.id) && (p.pickup_days || []).some((d: string) =>
+        scheduleHits({ day_of_week: d, frequency: p.pickup_frequency || "weekly", start_date: p.pickup_start_date || null }, tomorrow)))))
+  if (!due.length) {
+    await sbPatch(`automations?id=eq.${auto.id}`, { config: { ...cfg, lastSentDate: tomorrow }, updated_at: new Date().toISOString() })
+    return `No pickups scheduled for ${fmtNiceDay(tomorrow)} — nothing sent.`
+  }
+
+  const custIds = [...new Set(due.map((p: any) => p.customer_id))]
+  const customers: Record<string, any> = {}
+  for (const c of await sbGet(`customers?id=in.(${custIds.join(",")})&select=id,name,email,portal_slug,notify_on_service,notify_sms,notify_push,notify_email`)) customers[c.id] = c
+  const settings = (await sbGet(`app_settings?id=eq.1&select=company_name`))[0] || {}
+  const company = settings.company_name || "Valet Waste FL"
+
+  let pushed = 0, emailed = 0, noApp = 0, optedOut = 0
+  for (const cid of custIds) {
+    const cust = customers[cid]
+    if (!cust) continue
+    if (cust.notify_on_service === false) { optedOut++; continue }
+    const mine = due.filter((p: any) => p.customer_id === cid)
+    const addresses = mine.map((p: any) => p.address || p.name)
+    const body = mine.length === 1
+      ? `Your ${mine[0].service || "pickup"} at ${addresses[0]} is tomorrow, ${fmtNiceDay(tomorrow)}.`
+      : `Your pickups tomorrow, ${fmtNiceDay(tomorrow)}: ${addresses.join(" · ")}.`
+    const url = cust.portal_slug ? `${PORTAL_ORIGIN}/?portal=${encodeURIComponent(cust.portal_slug)}` : PORTAL_ORIGIN
+    let sentAny = false
+    if (pushOn && cust.notify_push !== false) {
+      try { const n = await sendCustomerPush(cust.id, company, body, url); pushed += n; if (n) sentAny = true } catch (_e) { /* best effort */ }
+    }
+    if (emailOn && cust.email && cust.notify_email !== false) {
+      try { await sendPlainCustomerEmail(cust.email, `Pickup tomorrow — ${company}`, body, company); emailed++; sentAny = true } catch (_e) { /* best effort */ }
+    }
+    if (!sentAny) noApp++
+  }
+  await sbPatch(`automations?id=eq.${auto.id}`, { config: { ...cfg, lastSentDate: tomorrow }, updated_at: new Date().toISOString() })
+  const ch: string[] = []
+  if (pushed) ch.push(`${pushed} pushed`)
+  if (emailed) ch.push(`${emailed} emailed`)
+  if (noApp) ch.push(`${noApp} not reachable (no app token${emailOn ? "/email" : ""})`)
+  if (optedOut) ch.push(`${optedOut} opted out`)
+  return `${due.length} pickup${due.length === 1 ? "" : "s"} scheduled for ${fmtNiceDay(tomorrow)} across ${custIds.length} client${custIds.length === 1 ? "" : "s"}${ch.length ? ` — ${ch.join(", ")}` : ""}.`
 }
 
 // ---- lawn_invoice_weekly_lines ----------------------------------------------
@@ -981,6 +1099,7 @@ Deno.serve(async (req) => {
       try {
         if (a.kind === "outstanding_digest") result = await runOutstandingDigest()
         if (a.kind === "auto_invoice_reminders") result = await runInvoiceReminders(a)
+        if (a.kind === "service_reminders") result = await runServiceReminders(a)
         if (a.kind === "lawn_invoice_weekly_lines") result = await runLawnInvoiceLines()
         if (a.kind === "draft_invoice_monthend_reminder") result = await runDraftInvoiceReminder()
         if (a.kind === "new_request_alerts") result = await runNewRequestAlerts(a)

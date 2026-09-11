@@ -7,8 +7,17 @@
 //                                  button per account (no slug needed)
 //   redeem {slug, code}          → one-time code → 30-day portal session token
 //   data {token}                 → portal payload: properties, pickups+photos,
-//                                  property photos, invoices, quotes, requests,
-//                                  saved-card status, balance due
+//                                  ALL photos (driver service photos with date/
+//                                  address/note + staff address-file photos),
+//                                  invoices, quotes, requests, saved-card
+//                                  status, balance due, notification prefs
+//   register_push {token, push_token, platform}
+//                                  → app client login/open registers this
+//                                  device's Expo push token for the customer
+//   unregister_push {token, push_token} → client sign-out drops the device token
+//   set_notify_prefs {token, sms?, push?, email?}
+//                                  → client-managed notification channels;
+//                                  re-enabling texts clears the master opt-out
 //   setup_session {token, origin, consent} → returns Runner.js config
 //                                  (publicKey, mid, env) so the portal can
 //                                  render the inline card form; consent required
@@ -65,6 +74,18 @@ async function sbPost(path: string, body: unknown) {
 async function sbPatch(path: string, body: unknown) {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, { method: "PATCH", headers: restHeaders, body: JSON.stringify(body) })
   if (!r.ok) console.error(`PATCH ${path}: ${r.status} ${await r.text()}`)
+}
+async function sbDelete(path: string) {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, { method: "DELETE", headers: restHeaders })
+  if (!r.ok) console.error(`DELETE ${path}: ${r.status} ${await r.text()}`)
+}
+async function sbUpsert(path: string, body: unknown, onConflict: string) {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}?on_conflict=${onConflict}`, {
+    method: "POST",
+    headers: { ...restHeaders, Prefer: "resolution=merge-duplicates" },
+    body: JSON.stringify(body),
+  })
+  if (!r.ok) throw new Error(`UPSERT ${path}: ${r.status} ${await r.text()}`)
 }
 
 const enc = encodeURIComponent
@@ -361,7 +382,7 @@ async function createMagicLink(customerId: string, slug: string): Promise<string
 
 // ---- session helper ----------------------------------------------------------
 const CUST_COLS =
-  "id,name,email,phone,portal_slug,autopay_consent,autopay_consented_at,run_vault_id,run_vault_holder_id,run_card_brand,run_card_last4"
+  "id,name,email,phone,portal_slug,autopay_consent,autopay_consented_at,run_vault_id,run_vault_holder_id,run_card_brand,run_card_last4,notify_on_service,notify_sms,notify_push,notify_email"
 
 async function customerFromToken(token: string): Promise<any | null> {
   if (!token) return null
@@ -447,6 +468,33 @@ async function portalData(cust: any) {
     }))
   }
 
+  // Photos tab: EVERYTHING with details — driver service photos (stop_photos,
+  // all time, not just the Pickups tab's 90-day window) merged with the staff
+  // "address file" photos above. Invoice-attached photos deliberately stay on
+  // the invoice/pay pages (most borrow a stop_photo path and would double-show).
+  let servicePhotos: any[] = []
+  if (propIds.length) {
+    try {
+      const stops = await sbGet(
+        `route_stops?property_id=in.(${propIds.join(",")})&check_in=not.is.null&select=id,property_id,service,checkin_note,routes!inner(service_date),stop_photos(path,created_at)&order=check_in.desc&limit=400`,
+      )
+      for (const s of stops) {
+        for (const p of s.stop_photos || []) {
+          servicePhotos.push({
+            date: s.routes?.service_date || p.created_at,
+            address: propById[s.property_id]?.address || "",
+            service: s.service || propById[s.property_id]?.service || "",
+            note: s.checkin_note || null,
+            url: publicUrl("stop-photos", p.path),
+          })
+        }
+      }
+    } catch (_e) { /* photos never break the portal payload */ }
+  }
+  const photos = [...servicePhotos, ...propertyPhotos]
+    .filter((p: any) => !!p.url)
+    .sort((a: any, b: any) => String(b.date || "").localeCompare(String(a.date || "")))
+
   const invoices = await sbGet(
     `invoices?customer_id=eq.${cust.id}&status=neq.draft&select=id,number,status,total,tip_amount,due_date,issue_date,payment_url,run_trans_id&order=issue_date.desc&limit=36`,
   )
@@ -475,6 +523,15 @@ async function portalData(cust: any) {
     pickups,
     excess,
     property_photos: propertyPhotos,
+    photos,
+    notify_prefs: {
+      sms: cust.notify_sms !== false,
+      push: cust.notify_push !== false,
+      email: cust.notify_email !== false,
+      // Master opt-out from the email-footer unsubscribe — silences service
+      // notifications on every channel until re-enabled in this portal.
+      opted_out: cust.notify_on_service === false,
+    },
     invoices,
     balance_due: balanceDue,
     quotes,
@@ -609,6 +666,57 @@ Deno.serve(async (req) => {
         expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
       })
       return json({ ok: true, token: sessionToken, name: cust.name })
+    }
+
+    if (action === "register_push") {
+      // App client login/open: register this device's Expo push token against
+      // the signed-in customer (portal-session auth; rows written with the
+      // service key, so push_tokens.profile_id stays nullable-only for us).
+      if (!token) return json({ error: "Not signed in." }, 401)
+      const cust = await customerFromToken(String(token))
+      if (!cust) return json({ error: "Session expired — sign in again." }, 401)
+      const pushToken = String(body.push_token || "").trim()
+      if (!pushToken.startsWith("ExpoPushToken[")) return json({ error: "Invalid push token." }, 400)
+      await sbUpsert("push_tokens", {
+        customer_id: cust.id,
+        profile_id: null,
+        token: pushToken,
+        platform: String(body.platform || "unknown"),
+        updated_at: new Date().toISOString(),
+      }, "token")
+      return json({ ok: true })
+    }
+
+    if (action === "unregister_push") {
+      // Client sign-out: drop this device's token (other devices keep theirs).
+      if (!token) return json({ ok: true })
+      const cust = await customerFromToken(String(token))
+      if (!cust) return json({ ok: true })
+      const pushToken = String(body.push_token || "").trim()
+      if (pushToken) await sbDelete(`push_tokens?customer_id=eq.${cust.id}&token=eq.${enc(pushToken)}`)
+      return json({ ok: true })
+    }
+
+    if (action === "set_notify_prefs") {
+      // Client-managed notification channels (🔔 card in the portal). Turning
+      // texts back ON also clears the email-footer master opt-out and removes
+      // the "No Service Notifications" tag, so footer opt-outs are reversible.
+      if (!token) return json({ error: "Not signed in." }, 401)
+      const cust = await customerFromToken(String(token))
+      if (!cust) return json({ error: "Session expired — sign in again." }, 401)
+      const patch: Record<string, unknown> = {}
+      if (typeof body.sms === "boolean") patch.notify_sms = body.sms
+      if (typeof body.push === "boolean") patch.notify_push = body.push
+      if (typeof body.email === "boolean") patch.notify_email = body.email
+      if (body.sms === true && cust.notify_on_service === false) {
+        patch.notify_on_service = null
+        try {
+          const tag = (await sbGet(`tags?name=ilike.${enc("No Service Notifications")}&select=id&limit=1`))[0]
+          if (tag) await sbDelete(`customer_tags?customer_id=eq.${cust.id}&tag_id=eq.${tag.id}`)
+        } catch (_e) { /* tag cleanup is best-effort */ }
+      }
+      if (Object.keys(patch).length) await sbPatch(`customers?id=eq.${cust.id}`, patch)
+      return json({ ok: true })
     }
 
     if (action === "pay_info") {
