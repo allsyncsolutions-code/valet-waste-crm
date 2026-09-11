@@ -12,7 +12,8 @@ import {
   isFixed,
 } from '../lib/routeModel.js'
 import { optimizeOrder, routeMetrics } from '../lib/optimize.js'
-import { formatMiles, formatDuration, metersToMiles } from '../lib/geo.js'
+import { formatMiles, formatDuration, metersToMiles, hasCoords, SERVICE_MIN_PER_STOP } from '../lib/geo.js'
+import { fetchRoadPath, fetchDriveMatrix } from '../lib/osrm.js'
 import { hasSupabase, supabase } from '../lib/supabaseClient.js'
 import {
   loadRouteSlice,
@@ -35,6 +36,7 @@ import {
   updateRouteDef,
   copyPreviousWeekday,
   moveStopToRoute,
+  copyStopToRoute,
   moveStopToDate,
   createDayOverride,
   skipStop,
@@ -224,6 +226,58 @@ export default function RoutesView({ app }) {
     return fixed.length ? fixed[fixed.length - 1] : depot
   }
 
+  // Road-following line + real totals (OSRM — free, keyless). Refetched only
+  // when the ordered geocoded stop list changes; silently falls back to
+  // straight lines + heuristic metrics when the public server is slow/down.
+  const [road, setRoad] = useState(null)
+  const roadKeyRef = useRef('')
+  useEffect(() => {
+    const located = stops.filter(hasCoords)
+    const key = `${routeCode}|${routeSel}|${depot.lat},${depot.lng}|${located.map((s) => s.id).join(',')}`
+    if (located.length < 2 || key === roadKeyRef.current) return
+    roadKeyRef.current = key
+    let alive = true
+    setRoad(null)
+    fetchRoadPath([depot, ...located])
+      .then((r) => {
+        if (alive && r) setRoad({ path: r.path, meters: r.meters, minutes: r.seconds / 60 + stops.length * SERVICE_MIN_PER_STOP })
+      })
+      .catch(() => {})
+    return () => { alive = false }
+  }, [stops, depot, routeCode, routeSel])
+
+  const [optimizing, setOptimizing] = useState(false)
+  async function handleOptimize() {
+    if (optimizing) return
+    setOptimizing(true)
+    try {
+      const before = routeMetrics(stops, depot)
+      const { fixed, movable } = splitFixed(stops)
+      const start = optimizeStart()
+      // Order by REAL road drive times when OSRM answers in time; the
+      // haversine estimate orders it otherwise (same NN + 2-opt either way).
+      let drive = null
+      const geoMovable = movable.filter(hasCoords)
+      if (geoMovable.length > 2 && hasCoords(start)) {
+        const points = [start, ...geoMovable]
+        const res = await fetchDriveMatrix(points).catch(() => null)
+        if (res) drive = { points, durations: res.durations }
+      }
+      const { ordered } = optimizeOrder(movable, start, drive)
+      const next = resequence([...fixed, ...ordered])
+      setStops(next)
+      const after = routeMetrics(next, depot)
+      setSaved({
+        miles: Math.max(0, metersToMiles(before.meters - after.meters)),
+        minutes: Math.max(0, before.minutes - after.minutes),
+      })
+      setOptimized(true)
+      withWrite(() => persistOrder(next))
+    } finally {
+      setOptimizing(false)
+    }
+  }
+
   async function withWrite(fn) {
     writingRef.current = true
     try {
@@ -286,21 +340,6 @@ export default function RoutesView({ app }) {
     } finally {
       setResetBusy(false)
     }
-  }
-
-  function handleOptimize() {
-    const before = routeMetrics(stops, depot)
-    const { fixed, movable } = splitFixed(stops)
-    const { ordered } = optimizeOrder(movable, optimizeStart())
-    const next = resequence([...fixed, ...ordered])
-    setStops(next)
-    const after = routeMetrics(next, depot)
-    setSaved({
-      miles: Math.max(0, metersToMiles(before.meters - after.meters)),
-      minutes: Math.max(0, before.minutes - after.minutes),
-    })
-    setOptimized(true)
-    withWrite(() => persistOrder(next))
   }
 
   function startEditAddress(st) {
@@ -899,6 +938,19 @@ export default function RoutesView({ app }) {
     })
   }
 
+  async function handleCopyToRoute(stop, targetCode) {
+    if (!targetCode) return
+    setErr(null)
+    try {
+      const res = await copyStopToRoute(stop, targetCode, routeSel)
+      if (res.alreadyThere) setErr(`${stop.name} is already on Route ${targetCode} for ${prettyDate(routeSel)}.`)
+      else setNotice(`Copied ${stop.name} onto Route ${targetCode} for ${prettyDate(routeSel)} — it now shows yellow on both routes. Whoever completes it first auto-skips the other copy.`)
+      await refresh(routeSel)
+    } catch (e) {
+      setErr(e.message || String(e))
+    }
+  }
+
   // ---- day picker (real dates; dots mark days with a scheduled pickup) ----
   const todayD = new Date()
   const base = new Date(todayD.getFullYear(), todayD.getMonth(), todayD.getDate() - todayD.getDay() + 1 + weekOffset * 7) // Monday of the week
@@ -1066,17 +1118,17 @@ export default function RoutesView({ app }) {
             <button onClick={handleUndo} title={planUndoLabel} style={{ ...ghostBtn, color: '#8a6414', borderColor: '#d8c9b0', background: '#fdf8ec' }}>↩ {planUndoLabel}</button>
           )}
           <button onClick={handleResetDay} disabled={resetBusy || !stops.length} title={`Remove every stop from ${currentDef.name} for ${prettyDate(routeSel)} — clients and properties are untouched, and you get an Undo right after`} style={{ ...ghostBtn, color: '#c0492f', borderColor: '#e8cfc8', background: '#fdf6f4', opacity: resetBusy || !stops.length ? 0.6 : 1 }}>{resetBusy ? 'Resetting…' : '⟲ Reset day'}</button>
-          <button onClick={handleOptimize} disabled={loading || !stops.length} style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'linear-gradient(135deg,#1f7a4d,#155e3a)', color: '#fff', border: 'none', borderRadius: 10, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: loading ? 'default' : 'pointer', opacity: loading || !stops.length ? 0.6 : 1 }}>
-            <span>✦</span> Optimize
+          <button onClick={handleOptimize} disabled={loading || optimizing || !stops.length} style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'linear-gradient(135deg,#1f7a4d,#155e3a)', color: '#fff', border: 'none', borderRadius: 10, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: loading ? 'default' : 'pointer', opacity: loading || optimizing || !stops.length ? 0.6 : 1 }}>
+            <span>✦</span> {optimizing ? 'Optimizing…' : 'Optimize'}
           </button>
         </div>
       </div>
 
       {/* metrics bar */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap', marginBottom: 14, background: '#15281d', color: '#dff0e6', borderRadius: 13, padding: '12px 16px' }}>
-        <Metric label="Distance" value={formatMiles(current.meters)} />
+        <Metric label="Distance" value={formatMiles(road ? road.meters : current.meters)} />
         <Divider />
-        <Metric label="Est. time" value={formatDuration(current.minutes)} />
+        <Metric label="Est. time" value={formatDuration(road ? road.minutes : current.minutes)} />
         <Divider />
         <Metric label="Stops" value={`${stops.length}`} sub={`${doneCount} done`} />
         <div style={{ flex: 1 }} />
@@ -1087,7 +1139,7 @@ export default function RoutesView({ app }) {
         )}
         {!optimized && (
           <div style={{ fontFamily: MONO, fontSize: 11, color: '#7fb89a' }}>
-            {loading ? 'loading route…' : 'est. via straight-line heuristic — swap in Mapbox/OSRM for road-accurate'}
+            {loading ? 'loading route…' : road ? 'road-accurate (OSRM)' : 'estimate — straight-line (road service unreachable)'}
           </div>
         )}
       </div>
@@ -1107,7 +1159,7 @@ export default function RoutesView({ app }) {
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1.4fr 1fr', gap: 16 }}>
         {/* MAP */}
         <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, overflow: 'hidden', minHeight: 300 }}>
-          <RouteMap depot={depot} stops={stops} height={isMobile ? 320 : 520} onStopClick={(s) => app.openClient(s.customerId, s.propertyId)} />
+          <RouteMap depot={depot} stops={stops} path={road ? road.path : null} height={isMobile ? 320 : 520} onStopClick={(s) => app.openClient(s.customerId, s.propertyId)} />
         </div>
 
         {/* STOP SEQUENCE */}
@@ -1146,8 +1198,9 @@ export default function RoutesView({ app }) {
             {visibleStops.map((st) => {
               const meta = STATUS_META[st.status] || STATUS_META.pending
               const locked = isFixed(st)
+              const sharedCodes = st.sharedCodes || []
               return (
-                <div key={st.id} style={{ display: 'flex', gap: 10, padding: '7px 8px', borderBottom: '1px solid #f1f3f0' }}>
+                <div key={st.id} style={{ display: 'flex', gap: 10, padding: '7px 8px', borderBottom: '1px solid #f1f3f0', background: sharedCodes.length ? '#fdf8ef' : undefined }}>
                   <div style={{ width: 24, height: 24, flex: 'none', borderRadius: '50%', background: meta.bg, color: meta.fg, border: st.status === 'enroute' ? '2px solid #46c585' : 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontSize: 11, fontWeight: 600 }}>{st.seq}</div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     {editStopId === st.id ? (
@@ -1174,6 +1227,9 @@ export default function RoutesView({ app }) {
                           >{st.name}</span>
                           {st.needsReview && <span title="Flagged for review" style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#c0492f', background: '#fbeae6', padding: '1px 5px', borderRadius: 4, letterSpacing: '.03em' }}>⚠ REVIEW</span>}
                           {st.lat == null && <span title="No map pin — address likely needs a city/ZIP" style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#c08a2e', background: '#fbf3e2', padding: '1px 5px', borderRadius: 4 }}>NO PIN</span>}
+                          {sharedCodes.length > 0 && (
+                            <span title={`Also on Route ${sharedCodes.join(' & ')} today — the address is shared between routes (alternate/backup run). Whoever completes their copy first auto-skips the other.`} style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#8a6d1e', background: '#f6efdd', padding: '1px 5px', borderRadius: 4 }}>⧉ ALSO ON {sharedCodes.join('/')}</span>
+                          )}
                         </div>
                         <div style={{ fontSize: 11.5, color: '#7c8a82' }}>{st.address && st.address !== st.name ? st.address : st.service}{st.clientName && st.clientName !== st.name ? ` · ${st.clientName}` : ''}</div>
                         {(st.tags || []).length > 0 && (
@@ -1220,12 +1276,20 @@ export default function RoutesView({ app }) {
                         )}
                         <a href={`https://www.google.com/maps/dir/?api=1&destination=${st.lat},${st.lng}`} target="_blank" rel="noreferrer" style={{ ...miniBtn, textDecoration: 'none', color: '#1f7a4d' }} title="Navigate">➤ Nav</a>
                         {routeDefs.length > 1 && (
+                          <>
                           <select value="" onChange={(e) => handleMoveToRoute(st.id, e.target.value)} title="Move to another route (hands it to that route's driver)" style={{ ...miniBtn, paddingRight: 4, cursor: 'pointer' }}>
                             <option value="">→ Route…</option>
                             {routeDefs.filter((rd) => rd.code !== routeCode).map((rd) => (
                               <option key={rd.code} value={rd.code}>{rd.code} · {rd.name}</option>
                             ))}
                           </select>
+                          <select value="" onChange={(e) => handleCopyToRoute(st, e.target.value)} title="Copy onto another route for today — both routes carry the address (highlighted yellow); whoever completes it first auto-skips the other copy" style={{ ...miniBtn, color: '#8a6d1e', paddingRight: 4, cursor: 'pointer' }}>
+                            <option value="">⧉ Copy to…</option>
+                            {routeDefs.filter((rd) => rd.code !== routeCode && !sharedCodes.includes(rd.code)).map((rd) => (
+                              <option key={rd.code} value={rd.code}>{rd.code} · {rd.name}</option>
+                            ))}
+                          </select>
+                          </>
                         )}
                         <div style={{ flex: 1 }} />
                         <button onClick={() => handleRemove(st.id)} style={{ ...miniBtn, color: '#c0492f' }} title="Remove from route">×</button>
@@ -1304,8 +1368,8 @@ export default function RoutesView({ app }) {
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                         <span style={{ fontWeight: 600, fontSize: 13.5 }}>{p.name}</span>
                         {p.needsReview && <span title="Flagged for review" style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#c0492f', background: '#fbeae6', padding: '1px 5px', borderRadius: 4, letterSpacing: '.03em' }}>⚠ REVIEW</span>}
-                        {elsewhereCodes[p.id] && (
-                          <span title={`Already on Route ${elsewhereCodes[p.id]} today — adding it here puts the same address on both routes for the day (alternate/backup run)`} style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#5a3e78', background: '#f1e9f8', padding: '1px 5px', borderRadius: 4 }}>⧉ {elsewhereCodes[p.id]}</span>
+                        {(elsewhereCodes[p.id] || []).length > 0 && (
+                          <span title={`Already on Route ${(elsewhereCodes[p.id] || []).join(' & ')} today — adding it here puts the same address on both routes for the day (alternate/backup run)`} style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#8a6d1e', background: '#f6efdd', padding: '1px 5px', borderRadius: 4 }}>⧉ {(elsewhereCodes[p.id] || []).join('/')}</span>
                         )}
                       </div>
                       <div style={{ fontSize: 11.5, color: '#7c8a82', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>

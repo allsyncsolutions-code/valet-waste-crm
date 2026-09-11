@@ -38,7 +38,7 @@ export function routeMetrics(stops, depot) {
   return { meters, minutes }
 }
 
-function nearestNeighbor(stops, start) {
+function nearestNeighbor(stops, start, dist = drivingMeters) {
   const remaining = stops.slice()
   const order = []
   let cur = start
@@ -46,7 +46,7 @@ function nearestNeighbor(stops, start) {
     let bestIdx = 0
     let bestD = Infinity
     for (let i = 0; i < remaining.length; i++) {
-      const d = drivingMeters(cur, remaining[i])
+      const d = dist(cur, remaining[i])
       if (d < bestD) {
         bestD = d
         bestIdx = i
@@ -59,8 +59,7 @@ function nearestNeighbor(stops, start) {
 }
 
 // 2-opt: repeatedly reverse segments that shorten the open tour from `start`.
-function twoOpt(order, start) {
-  const dist = (a, b) => drivingMeters(a, b)
+function twoOpt(order, start, dist = drivingMeters) {
   let improved = true
   let best = order.slice()
   while (improved) {
@@ -87,7 +86,12 @@ function twoOpt(order, start) {
 
 // Optimize the order of `stops` starting from `start` (depot or current truck
 // location). Returns the reordered stops plus estimated distance/time.
-export function optimizeOrder(stops, start) {
+//
+// `drive` (optional) swaps in REAL road drive times: { points, durations }
+// where points[0] is `start` and points[1..n] are the geocoded stops in order
+// (OSRM table — see osrm.js). Any shape mismatch falls back to the haversine
+// estimate, so the caller never has to branch.
+export function optimizeOrder(stops, start, drive = null) {
   // Only stops with usable coordinates can be sequenced by distance; keep any
   // ungeocoded stops and append them at the end so none are lost.
   const geo = stops.filter(hasCoords)
@@ -95,8 +99,20 @@ export function optimizeOrder(stops, start) {
   if (geo.length <= 2) {
     return { ordered: [...geo, ...nogeo], ...routeMetrics(stops, start) }
   }
-  const nn = nearestNeighbor(geo, start)
-  const optimized = twoOpt(nn, start)
+  let dist = drivingMeters
+  if (drive && drive.durations && drive.points &&
+      drive.points[0] === start && drive.points.length === geo.length + 1) {
+    const idx = new Map([[start, 0]])
+    geo.forEach((s, i) => idx.set(s, i + 1))
+    const m = drive.durations
+    dist = (a, b) => {
+      const ia = idx.get(a)
+      const ib = idx.get(b)
+      return ia != null && ib != null && m[ia] && m[ia][ib] != null ? m[ia][ib] : drivingMeters(a, b)
+    }
+  }
+  const nn = nearestNeighbor(geo, start, dist)
+  const optimized = twoOpt(nn, start, dist)
   const ordered = [...optimized, ...nogeo]
   return { ordered, ...routeMetrics(ordered, start) }
 }

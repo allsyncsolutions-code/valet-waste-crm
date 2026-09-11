@@ -3117,6 +3117,29 @@ async function cleanupUnconfirmed(a: any) {
   return { ok: true, date, removed, paused: pausedIds.size, note: "Removed from the route and PAUSED (recoverable on the Clients screen — nothing deleted)." }
 }
 
+// Real road drive-time matrix (OSRM public server — free, keyless). Returns
+// null on any failure/timeout so callers fall back to straight-line miles.
+const OSRM_BASE = "https://router.project-osrm.org"
+async function osrmDriveSeconds(points: { lat: number; lng: number }[]): Promise<number[][] | null> {
+  try {
+    const coordStr = points.map((p) => `${Number(p.lng).toFixed(6)},${Number(p.lat).toFixed(6)}`).join(";")
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), 7000)
+    try {
+      const r = await fetch(`${OSRM_BASE}/table/v1/driving/${coordStr}?annotations=duration`, { signal: ctrl.signal })
+      if (!r.ok) return null
+      const j = await r.json()
+      if (j.code !== "Ok" || !j.durations) return null
+      for (const row of j.durations) if (row.some((v: number | null) => v == null)) return null
+      return j.durations
+    } finally {
+      clearTimeout(timer)
+    }
+  } catch (_e) {
+    return null
+  }
+}
+
 async function optimizeRouteTool(a: any) {
   const code = String(a.route_code ?? "").trim().toUpperCase()
   const date = a.date ? String(a.date) : today()
@@ -3134,6 +3157,15 @@ async function optimizeRouteTool(a: any) {
   const unlocated = todo.filter((s: any) => { const l = locate(s); return l.lat == null || l.lng == null })
   if (fixed.length) { const l = locate(fixed[fixed.length - 1]); if (l.lat != null) { curLat = l.lat; curLng = l.lng } }
   if ((curLat == null || curLng == null) && located.length) { const l = locate(located[0]); curLat = l.lat; curLng = l.lng }
+  // Prefer real road drive times when OSRM answers (matches the web Optimize);
+  // any failure silently falls back to straight-line nearest-neighbor below.
+  let durations: number[][] | null = null
+  if (curLat != null && curLng != null && located.length > 1) {
+    durations = await osrmDriveSeconds([{ lat: curLat, lng: curLng }, ...located.map((s: any) => locate(s))])
+  }
+  const matIdx = new Map<any, number>()
+  located.forEach((s: any, i: number) => matIdx.set(s, i + 1))
+  let curMat = 0 // matrix row for the current position (0 = start point)
   const ordered: any[] = []
   const pool = [...located]
   while (pool.length && curLat != null && curLng != null) {
@@ -3141,14 +3173,17 @@ async function optimizeRouteTool(a: any) {
     let bd = Infinity
     for (let i = 0; i < pool.length; i++) {
       const l = locate(pool[i])
-      const dmi = milesBetween(curLat, curLng, l.lat, l.lng)
-      if (dmi < bd) { bd = dmi; bi = i }
+      const row = durations ? durations[curMat] : null
+      const mj = matIdx.get(pool[i])
+      const d = row && mj != null && row[mj] != null ? row[mj] : milesBetween(curLat, curLng, l.lat, l.lng)
+      if (d < bd) { bd = d; bi = i }
     }
     const [nxt] = pool.splice(bi, 1)
     ordered.push(nxt)
     const l = locate(nxt)
     curLat = l.lat
     curLng = l.lng
+    curMat = matIdx.get(nxt) ?? curMat
   }
   const finalOrder = [...fixed, ...ordered, ...pool, ...unlocated]
   const before = (stops as any[]).map((s: any) => ({ stop_id: s.id, seq: s.seq }))
@@ -3163,6 +3198,7 @@ async function optimizeRouteTool(a: any) {
     reordered: ordered.length,
     kept_in_place: fixed.length,
     missing_coords: unlocated.length,
+    road_times: !!durations,
     order: finalOrder.map((s: any, i: number) => `${i + 1}. ${s.properties?.address || s.properties?.name}`),
   }
 }
