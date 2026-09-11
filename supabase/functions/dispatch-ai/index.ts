@@ -90,6 +90,7 @@ const DEFAULT_TONE = "spicy"
 const FIELD_OPS = `FIELD MODE — "Check My Location" (route/data cleanup):
 Drivers tap Check My Location at each stop and you receive their GPS. They are DRIVING — ask ONE short question per turn, and only when the answer isn't already on the table. The flow:
 1) find_nearby_properties with the GPS. If ONE match clearly wins (it's the nearest by a wide margin — say under ~0.15 mi with the next candidate far behind), do NOT ask "is that where you are?" — announce it ("That's 1711 Main St, 32277."), pin_stop it, and continue the flow. Only ask the one-line full-address confirm (always with zip) when two DIFFERENT addresses are genuinely plausible — lookalike streets in different zips or two close scores.
+   PIN CHECK: the driver is standing AT the winning address, so if its distance reads more than ~250 ft the STORED PIN is wrong (that's what sends Directions to the wrong place). Call set_property_pin with the DRIVER'S GPS and mention it in one line — "that pin was off, fixed it while I'm here." Under ~250 ft the pin is fine; leave it alone.
    DUPLICATES: the SAME address on file twice (under two different clients) is expected and harmless — find_nearby_properties already collapses those into one match for you. NEVER ask the driver which client it belongs to, never list both, never stop the flow. Work the copy you were handed, and once — at the end of that stop's reply — say something like "heads up, that address is on file twice; review it in Clients at the end of the day." Then move on. Lookalike-but-different addresses (different street or zip) are a real question; identical addresses are not.
 2) If they say no and give a different address, or nothing on file is close: ask who the client is. find_clients to match; create_client if new (name alone is fine for now).
 3) Ask: one-time stop, or every <today's weekday>? If recurring, edit_property to add that weekday to pickup_days.
@@ -389,6 +390,20 @@ const tools = [
         needs_review: { type: "boolean", description: "True to flag this property for review. Ignored if mark_reviewed is set." },
         paused: { type: "boolean", description: "true PAUSES this address — pulls its pending stops off today's/future routes and keeps it off route builds until resumed. false resumes it. For a whole client use pause_properties." },
       },
+    },
+  },
+  {
+    name: "set_property_pin",
+    description:
+      "Update a property's map pin (lat/lng) to the DRIVER'S current GPS. Use during Check My Location when the driver is physically at the right address but the stored pin is wrong — that's what sends Directions to the wrong place. The tell: find_nearby_properties' winning match shows a LARGE distance (you're standing at the address, so hundreds of feet means the PIN is off, not the driver). Pass the driver's GPS numbers, never the stored ones. Only call after the match is confirmed.",
+    input_schema: {
+      type: "object",
+      properties: {
+        property_id: { type: "string", description: "The property id from find_nearby_properties (required)." },
+        lat: { type: "number", description: "Driver's current GPS latitude." },
+        lng: { type: "number", description: "Driver's current GPS longitude." },
+      },
+      required: ["property_id", "lat", "lng"],
     },
   },
   {
@@ -1123,6 +1138,7 @@ function logForTool(name: string, out: any): Promise<void> | undefined {
     case "move_stops": return out.moved ? logActivity("stops_moved", `Moved ${out.moved} stop${out.moved === 1 ? "" : "s"} ${out.from}→${out.to} (${out.date})`, "route") : undefined
     case "bulk_add_properties": return logActivity("properties_imported", `Imported ${out.inserted} properties for ${out.client}`, "customer", out.customer_id)
     case "edit_property": return out.needs_clarification ? undefined : logActivity("property_updated", `Updated property ${out.address}${out.needs_review === false ? " (reviewed)" : ""}`, "property", out.id)
+    case "set_property_pin": return out.ok ? logActivity("property_pin_fixed", `Map pin corrected from the field${out.moved_ft != null ? ` (was ${out.moved_ft} ft off)` : ""} — Directions now goes to the right spot`, "property", out.id) : undefined
     case "flag_properties": return out.changed ? logActivity("properties_flagged", `${out.needs_review ? "Flagged" : "Cleared review on"} ${out.changed} propert${out.changed === 1 ? "y" : "ies"}`, "customer") : undefined
     case "pause_properties": return out.changed ? logActivity("properties_paused", `${out.paused ? "Paused" : "Resumed"} ${out.changed} address${out.changed === 1 ? "" : "es"}${out.stops_removed ? ` (${out.stops_removed} stops off routes)` : ""}`, "customer") : undefined
     case "add_property_photo": return out.needs_clarification ? undefined : logActivity("property_photo_added", `Logged a ${out.date} photo on ${out.address}`, "property", out.id)
@@ -1765,6 +1781,33 @@ async function editProperty(a: any) {
     out.note = "Resumed — back on route builds for its pickup days."
   }
   return out
+}
+
+// Field self-heal for wrong map pins: write the DRIVER'S GPS to the property
+// so Directions/nav stops landing at the wrong spot. Continental-US sanity box
+// mirrors the app's hasCoords guard; a written pin is never re-geocoded.
+async function setPropertyPinTool(a: any) {
+  const id = String(a.property_id || "").trim()
+  const lat = Number(a.lat)
+  const lng = Number(a.lng)
+  if (!id) throw new Error("property_id is required (from find_nearby_properties).")
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) throw new Error("Pass the driver's GPS numbers for lat and lng.")
+  if (lat < 24 || lat > 50 || lng < -125 || lng > -66) {
+    throw new Error("Those coordinates fall outside the service area — double-check the driver's GPS.")
+  }
+  const [before] = await sbGet(`properties?id=eq.${enc(id)}&select=id,address,name,lat,lng`)
+  if (!before) throw new Error("Property not found.")
+  await sbPatch(`properties?id=eq.${enc(id)}`, { lat, lng })
+  const driftFt = before.lat != null && before.lng != null
+    ? Math.round(milesBetween(lat, lng, before.lat, before.lng) * 5280)
+    : null
+  return {
+    ok: true,
+    id: before.id,
+    address: before.address || before.name,
+    moved_ft: driftFt,
+    note: "Pin updated to the driver's spot — Directions + route maps now use it.",
+  }
 }
 
 async function flagProperties(a: any) {
@@ -3209,6 +3252,7 @@ async function runTool(name: string, input: any): Promise<unknown> {
     case "list_properties": return await listProperties(input)
     case "list_needs_review": return await listNeedsReview(input)
     case "edit_property": return await editProperty(input)
+    case "set_property_pin": return await setPropertyPinTool(input)
     case "flag_properties": return await flagProperties(input)
     case "pause_properties": return await pauseProperties(input)
     case "find_duplicates": return await findDuplicates(input)
