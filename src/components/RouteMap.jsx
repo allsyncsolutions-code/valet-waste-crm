@@ -5,9 +5,13 @@ import { STATUS_META } from '../lib/routeModel.js'
 import { hasCoords } from '../lib/geo.js'
 
 // Live route map. Renders the depot + numbered stop markers in sequence order
-// and draws the route polyline. Pure Leaflet (free OSM tiles) so there's no
-// per-mapload billing. Re-draws whenever the ordered stop list changes.
-export default function RouteMap({ depot, stops, height = 460, onStopClick }) {
+// and draws the route line — the real road geometry when `path` is provided
+// (OSRM), straight lines between stops as the fallback. Pure Leaflet (free OSM
+// tiles) so there's no per-mapload billing. Re-draws whenever the ordered stop
+// list changes.
+const SHARED_MARKER = { bg: '#f6d353', fg: '#5c4a12' } // yellow = address shared with another route today
+
+export default function RouteMap({ depot, stops, path = null, height = 460, onStopClick }) {
   const elRef = useRef(null)
   const mapRef = useRef(null)
   const layerRef = useRef(null)
@@ -59,23 +63,30 @@ export default function RouteMap({ depot, stops, height = 460, onStopClick }) {
     const located = stops.filter(hasCoords)
     located.forEach((s) => {
       const meta = STATUS_META[s.status] || STATUS_META.pending
+      // Yellow while it still needs doing — the same address is on another
+      // route today (alternate/backup run); done/skipped keep status colors.
+      const shared = (s.sharedCodes || []).length > 0 && s.status === 'pending'
+      const mk = shared ? SHARED_MARKER : meta
       pts.push([s.lat, s.lng])
       L.marker([s.lat, s.lng], {
         icon: L.divIcon({
           className: '',
-          html: `<div style="width:26px;height:26px;border-radius:50%;background:${meta.bg};color:${meta.fg};border:${
+          html: `<div style="width:26px;height:26px;border-radius:50%;background:${mk.bg};color:${mk.fg};border:${
             s.status === 'enroute' ? '2px solid #46c585' : '2px solid #fff'
           };display:flex;align-items:center;justify-content:center;font:600 12px 'IBM Plex Mono',monospace;box-shadow:0 1px 4px rgba(0,0,0,.3);cursor:pointer">${s.seq}</div>`,
           iconSize: [26, 26],
           iconAnchor: [13, 13],
         }),
       })
-        .bindTooltip(`${s.seq}. ${s.name}`, { direction: 'top' })
+        .bindTooltip(`${s.seq}. ${s.name}${shared ? ` (⧉ also on Route ${(s.sharedCodes || []).join('/')})` : ''}`, { direction: 'top' })
         .on('click', () => { if (onStopClick) onStopClick(s) })
         .addTo(layer)
     })
 
-    L.polyline(pts, {
+    // Real road geometry when the caller fetched it (OSRM); straight shot between
+    // stops otherwise. Same style either way so the fallback isn't jarring.
+    const line = path && path.length > 1 ? path : pts
+    L.polyline(line, {
       color: '#1f7a4d',
       weight: 3.5,
       opacity: 0.85,
@@ -88,7 +99,7 @@ export default function RouteMap({ depot, stops, height = 460, onStopClick }) {
       // No stops yet — center on the configured starting location.
       map.setView([depot.lat, depot.lng], 12)
     }
-  }, [depot, stops])
+  }, [depot, stops, path])
 
   return <div ref={elRef} style={{ width: '100%', height, background: '#e9eee9' }} />
 }

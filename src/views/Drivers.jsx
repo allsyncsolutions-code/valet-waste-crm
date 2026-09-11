@@ -575,11 +575,16 @@ function StopRow({ s, busy, photos = [], pending = [], syncing = 0, uploading, o
   const fileRef = useRef(null)   // gallery / file picker
   const camRef = useRef(null)    // dedicated camera capture (opens rear cam on mobile)
   return (
-    <div style={{ padding: '8px 4px', borderTop: '1px solid #f1f3f0', opacity: s.status === 'skipped' ? 0.75 : 1 }}>
+    <div style={{ padding: '8px 4px', borderTop: '1px solid #f1f3f0', opacity: s.status === 'skipped' ? 0.75 : 1, background: (s.sharedCodes || []).length ? '#fdf8ef' : undefined }}>
       <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
         <div style={{ width: 22, height: 22, flex: 'none', borderRadius: '50%', background: meta.bg, color: meta.fg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontSize: 10.5, fontWeight: 600 }}>{s.seq}</div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div onClick={onOpenClient || undefined} title={onOpenClient ? `Open ${s.clientName || 'client'}'s record` : undefined} style={{ fontWeight: 600, fontSize: 13, cursor: onOpenClient ? 'pointer' : 'default', color: onOpenClient ? '#1f7a4d' : '#1a2420' }}>{s.name}</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div onClick={onOpenClient || undefined} title={onOpenClient ? `Open ${s.clientName || 'client'}'s record` : undefined} style={{ fontWeight: 600, fontSize: 13, cursor: onOpenClient ? 'pointer' : 'default', color: onOpenClient ? '#1f7a4d' : '#1a2420' }}>{s.name}</div>
+            {(s.sharedCodes || []).length > 0 && (
+              <span title={`Same address is also on Route ${s.sharedCodes.join(' & ')} today (alternate/backup run). Whoever completes their copy first auto-skips the other.`} style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#8a6d1e', background: '#f6efdd', padding: '1px 5px', borderRadius: 4 }}>⧉ {s.sharedCodes.join('/')}</span>
+            )}
+          </div>
           <div onClick={onOpenClient || undefined} style={{ fontSize: 11.5, color: '#7c8a82', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', cursor: onOpenClient ? 'pointer' : 'default' }}>{s.address || s.service}</div>
           {!!s.notes && (
             <div title={s.notes} style={{ fontSize: 11.5, color: '#8a6d1e', marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>🗒 {s.notes}</div>

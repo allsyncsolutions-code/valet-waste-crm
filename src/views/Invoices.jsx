@@ -944,7 +944,10 @@ function SendMenu({ busy, hasPhone, hasEmail, onSms, onEmail, onBoth }) {
         {busy ? 'Working…' : 'Send'} <span style={{ fontSize: 10, opacity: 0.85 }}>▾</span>
       </button>
       {open && (
-        <div style={{ position: 'absolute', top: 'calc(100% + 6px)', left: 0, zIndex: 30, minWidth: 190, background: '#fff', border: '1px solid #e0e7e2', borderRadius: 10, boxShadow: '0 8px 24px rgba(26,36,32,.12)', padding: 5, display: 'flex', flexDirection: 'column' }}>
+        /* Opens UPWARD: the Send button sits at the bottom of the invoice
+           document, whose wrapper has overflow:hidden for rounded corners —
+           a downward dropdown gets clipped by the invoice's bottom edge. */
+        <div style={{ position: 'absolute', bottom: 'calc(100% + 6px)', left: 0, zIndex: 30, minWidth: 190, background: '#fff', border: '1px solid #e0e7e2', borderRadius: 10, boxShadow: '0 8px 24px rgba(26,36,32,.12)', padding: 5, display: 'flex', flexDirection: 'column' }}>
           {item('Send SMS', '📱', hasPhone, onSms, 'No phone number on file for this customer')}
           {item('Send Email', '✉️', hasEmail, onEmail, 'No email on file for this customer')}
           {item('Send Both', '📲', hasPhone && hasEmail, onBoth, 'Needs both a phone number and an email on file')}

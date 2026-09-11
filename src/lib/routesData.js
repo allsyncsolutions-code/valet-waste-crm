@@ -143,9 +143,10 @@ export async function loadRouteSlice(code = 'B', date = null, line = null) {
   const onRoute = new Set(stops.map((s) => s.propertyId))
   // Properties already placed on ANOTHER route this date are not "unrouted" —
   // a stop only needs to be on one route for the day, so don't flag it while
-  // planning a different route. The propertyId → code map also labels those
-  // stops in the "+ Add stops" picker, where they stay selectable: putting the
-  // same address on a second (alternate/backup) route for the day is allowed.
+  // planning a different route. The propertyId → [codes] map also labels those
+  // stops (yellow "⧉" chip) on this route's list and in the "+ Add stops"
+  // picker, where they stay selectable: putting the same address on a second
+  // (alternate/backup) route for the day is allowed.
   let placedElsewhere = new Set()
   let elsewhereCodes = {}
   if (date) {
@@ -153,12 +154,19 @@ export async function loadRouteSlice(code = 'B', date = null, line = null) {
     if (dayRoutes && dayRoutes.length) {
       const { data: dayStops } = await supabase.from('route_stops').select('property_id, route_id').in('route_id', dayRoutes.map((r) => r.id))
       for (const s of dayStops || []) {
+        if (!s.property_id) continue
         placedElsewhere.add(s.property_id)
         const code = (dayRoutes.find((r) => r.id === s.route_id) || {}).code
-        if (code) elsewhereCodes[s.property_id] = code
+        if (code) {
+          const list = (elsewhereCodes[s.property_id] = elsewhereCodes[s.property_id] || [])
+          if (!list.includes(code)) list.push(code)
+        }
       }
     }
   }
+  // Ride the codes on each stop so every consumer (row highlight, map marker)
+  // gets them without re-deriving the lookup.
+  const stopsWithShared = stops.map((s) => ({ ...s, sharedCodes: (s.propertyId && elsewhereCodes[s.propertyId]) || [] }))
   // "Unrouted" means due on THIS date but not yet placed on the route — not the
   // whole customer base. Properties scheduled for other days are added on demand
   // via "+ Add stops". After a clean build this list is empty.
@@ -191,7 +199,7 @@ export async function loadRouteSlice(code = 'B', date = null, line = null) {
   const depot = route.depot_lat != null
     ? { name: route.depot_name || homeDepot.name, lat: route.depot_lat, lng: route.depot_lng }
     : homeDepot
-  return { route, depot, stops, unrouted, placedElsewhereIds: [...placedElsewhere], elsewhereCodes }
+  return { route, depot, stops: stopsWithShared, unrouted, placedElsewhereIds: [...placedElsewhere], elsewhereCodes }
 }
 
 // Persist a new visit order (writes seq for every stop).
@@ -661,7 +669,7 @@ export async function loadDayDispatch(date, line) {
   if (line) q = q.eq('business_line', line)
   const { data, error } = await q.order('code', { ascending: true })
   if (error) throw error
-  return (data || []).map((r) => ({
+  const routes = (data || []).map((r) => ({
     id: r.id,
     code: r.code,
     name: r.name || `Route ${r.code}`,
@@ -695,6 +703,24 @@ export async function loadDayDispatch(date, line) {
         jobPrice: s.job_price != null ? Number(s.job_price) : null,
       })),
   }))
+  // Address shared across routes today (alternate/backup runs): every stop gets
+  // sharedCodes = the OTHER routes carrying the same property, so every board
+  // (Field, My Day, mobile) renders the yellow ⧉ highlight without re-deriving.
+  const codesByProp = new Map()
+  for (const r of routes) {
+    for (const s of r.stops) {
+      if (!s.propertyId) continue
+      if (!codesByProp.has(s.propertyId)) codesByProp.set(s.propertyId, new Set())
+      codesByProp.get(s.propertyId).add(r.code)
+    }
+  }
+  for (const r of routes) {
+    for (const s of r.stops) {
+      const codes = (s.propertyId && codesByProp.get(s.propertyId)) || new Set()
+      s.sharedCodes = [...codes].filter((c) => c !== r.code)
+    }
+  }
+  return routes
 }
 
 // Routes (with their stops) across a DATE RANGE — powers the "My Schedule"
@@ -819,6 +845,35 @@ export async function moveStopToRoute(stopId, targetCode, date) {
   const { error } = await supabase.from('route_stops').update({ route_id: target.id, seq }).eq('id', stopId)
   if (error) throw error
   return { route: target }
+}
+
+// COPY a stop onto another route for the same date (creating that route if
+// needed) — the "can't run it today, let the other driver cover it" move. The
+// original stop stays put, so both routes carry the address for the day (each
+// renders with the yellow ⧉ highlight). Completing either copy auto-skips the
+// other pending ones (migration 0057), so the client is billed/texted once.
+export async function copyStopToRoute(stop, targetCode, date) {
+  if (!date) throw new Error('A date is required.')
+  const target = await ensureRoute(targetCode, date)
+  const { data: existing, error: eErr } = await supabase.from('route_stops').select('property_id, seq').eq('route_id', target.id)
+  if (eErr) throw eErr
+  const have = new Set((existing || []).map((e) => e.property_id))
+  if (stop.propertyId && have.has(stop.propertyId)) {
+    return { copied: 0, alreadyThere: true, route: target }
+  }
+  const seq = (existing || []).reduce((m, e) => Math.max(m, e.seq || 0), 0) + 1
+  const { error } = await supabase.from('route_stops').insert({
+    route_id: target.id,
+    property_id: stop.propertyId,
+    seq,
+    status: 'pending',
+    service: stop.service,
+    time_window: stop.window || null,
+    lat: stop.lat,
+    lng: stop.lng,
+  })
+  if (error) throw error
+  return { copied: 1, route: target }
 }
 
 export async function removeStopFromRoute(stopId) {

@@ -284,14 +284,20 @@ function JobCard({ s, open, onToggle, busy, photos = [], pending = [], syncing =
   const camRef = useRef(null)    // dedicated camera capture (opens rear cam on mobile)
   const hasCoords = s.lat != null && s.lng != null && !(Number(s.lat) === 0 && Number(s.lng) === 0)
   const dest = hasCoords ? `${s.lat},${s.lng}` : encodeURIComponent(s.address || '')
+  const sharedCodes = s.sharedCodes || []
 
   return (
-    <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, marginBottom: 10, overflow: 'hidden' }}>
+    <div style={{ background: sharedCodes.length ? '#fdf8ef' : '#fff', border: `1px solid ${sharedCodes.length ? '#e2cfa6' : '#e6eae6'}`, borderRadius: 13, marginBottom: 10, overflow: 'hidden' }}>
       {/* header row */}
       <div onClick={onToggle} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '13px 15px', cursor: 'pointer' }}>
         <div style={{ width: 24, height: 24, flex: 'none', borderRadius: '50%', background: meta.bg, color: meta.color, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontSize: 11, fontWeight: 700 }}>{s.seq}</div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontWeight: 700, fontSize: 14, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.clientName || s.name}</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div style={{ fontWeight: 700, fontSize: 14, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.clientName || s.name}</div>
+            {sharedCodes.length > 0 && (
+              <span title={`Same address is also on Route ${sharedCodes.join(' & ')} today (alternate/backup run). Whoever completes their copy first auto-skips the other.`} style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#8a6d1e', background: '#f6efdd', padding: '1px 5px', borderRadius: 4 }}>⧉ {sharedCodes.join('/')}</span>
+            )}
+          </div>
           <div style={{ fontSize: 12, color: '#7c8a82', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.address}{s.window ? ` · ${s.window}` : ''}</div>
         </div>
         <span style={{ fontFamily: MONO, fontSize: 10, fontWeight: 700, color: meta.color, background: meta.bg, borderRadius: 6, padding: '4px 8px', flex: 'none' }}>{meta.label}</span>
