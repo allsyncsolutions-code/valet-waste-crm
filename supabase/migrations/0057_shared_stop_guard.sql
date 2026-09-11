@@ -19,14 +19,15 @@ as $$
 declare
   v_date date;
   v_line text;
+  v_code text;
   sib record;
 begin
-  select service_date, business_line into v_date, v_line
+  select service_date, business_line, code into v_date, v_line, v_code
     from public.routes where id = new.route_id;
   if v_date is null then return new; end if;
 
   for sib in
-    select rs.id, ru.code
+    select rs.id
       from public.route_stops rs
       join public.routes ru on ru.id = rs.route_id
      where rs.property_id is not null
@@ -38,7 +39,7 @@ begin
   loop
     update public.route_stops
        set status = 'skipped',
-           skip_reason = 'Done on Route ' || sib.code,
+           skip_reason = 'Done on Route ' || v_code,
            skipped_by = 'system',
            skipped_at = now()
      where id = sib.id;
