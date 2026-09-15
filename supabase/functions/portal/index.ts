@@ -97,10 +97,13 @@ const publicUrl = (bucket: string, path: string) => `${SUPABASE_URL}/storage/v1/
 
 // Client-attached request photos arrive as data URLs; park the decoded bytes
 // in the public stop-photos bucket (same one driver check-in photos use).
+// Encode path SEGMENTS only — encoding the slashes themselves (%2F) breaks
+// the storage object route.
 async function storageUpload(path: string, bytes: Uint8Array, contentType: string) {
-  const r = await fetch(`${SUPABASE_URL}/storage/v1/object/stop-photos/${enc(path)}`, {
+  const safePath = path.split("/").map(enc).join("/")
+  const r = await fetch(`${SUPABASE_URL}/storage/v1/object/stop-photos/${safePath}`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${SERVICE_KEY}`, "Content-Type": contentType, "x-upsert": "true" },
+    headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}`, "Content-Type": contentType, "x-upsert": "true" },
     body: bytes,
   })
   if (!r.ok) throw new Error(`storage upload ${path}: ${r.status} ${await r.text()}`)
@@ -109,13 +112,14 @@ async function storageUpload(path: string, bytes: Uint8Array, contentType: strin
 // Accepts up to 4 image data URLs (the portal resizes to ~1280px JPEG before
 // sending), uploads each, returns the storage paths. Bad entries are skipped,
 // not fatal — the request itself must still go through.
-async function saveRequestPhotos(input: unknown): Promise<string[]> {
+async function saveRequestPhotos(input: unknown): Promise<{ paths: string[]; errors: string[] }> {
   const paths: string[] = []
-  if (!Array.isArray(input)) return paths
+  const errors: string[] = []
+  if (!Array.isArray(input)) return { paths, errors }
   for (const raw of input.slice(0, 4)) {
     const m = /^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/.exec(String(raw || ""))
-    if (!m) continue
-    if (m[2].length > 4_000_000) continue // ~3MB decoded cap; portal sends far less
+    if (!m) { errors.push("unrecognized entry skipped"); continue }
+    if (m[2].length > 4_000_000) { errors.push("image too large, skipped"); continue }
     const bytes = Uint8Array.from(atob(m[2]), (c) => c.charCodeAt(0))
     const ext = m[1] === "png" ? "png" : m[1] === "webp" ? "webp" : "jpg"
     const path = `requests/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}.${ext}`
@@ -123,10 +127,12 @@ async function saveRequestPhotos(input: unknown): Promise<string[]> {
       await storageUpload(path, bytes, `image/${m[1]}`)
       paths.push(path)
     } catch (e) {
-      console.error("request photo upload failed", e instanceof Error ? e.message : e)
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error("request photo upload failed", msg)
+      errors.push(msg)
     }
   }
-  return paths
+  return { paths, errors }
 }
 
 function randomToken(bytes = 32): string {
@@ -1046,7 +1052,7 @@ Deno.serve(async (req) => {
       const kind = ["extra_pickup", "junk_removal", "lawn_care", "billing", "other"].includes(body.kind) ? body.kind : "other"
       const message = String(body.message || "").slice(0, 1000)
       const propertyIds = Array.isArray(body.property_ids) ? body.property_ids.slice(0, 50) : []
-      const photoPaths = await saveRequestPhotos(body.photos)
+      const { paths: photoPaths, errors: photoErrors } = await saveRequestPhotos(body.photos)
       const inserted = await sbPost("portal_requests", {
         customer_id: cust.id, kind, message: message || null, property_ids: propertyIds,
         photos: photoPaths,
@@ -1066,7 +1072,7 @@ Deno.serve(async (req) => {
       const photoTxt = photoPaths.length ? ` [${photoPaths.length} photo${photoPaths.length > 1 ? "s" : ""} attached — see the Dashboard triage]` : ""
       await textAdmins(`📥 ${cust.name} requested ${kindLabel[kind]}${addrTxt} via their portal.${message ? ` "${message.slice(0, 220)}"` : ""}${photoTxt} — Trashy Randy`)
       if (reqId) await alertNewPortalRequest(String(reqId), cust.name || "A client", alertLabel[kind] || "Service request", addrTxt, `${message || "(no description)"}${photoTxt}`)
-      return json({ ok: true })
+      return json({ ok: true, photos_saved: photoPaths.length, photo_errors: photoErrors })
     }
 
     return json({ error: "Unknown action." }, 400)
