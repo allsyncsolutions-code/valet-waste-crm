@@ -23,7 +23,7 @@ export const STATUS_META = {
 export async function loadOpenRequests() {
   const { data, error } = await supabase
     .from('portal_requests')
-    .select('id,kind,message,status,created_at,notified_at,replied_at,replied_by,resolved_at,resolved_by,resolution_note,customer_id,property_ids,customers(name,email)')
+    .select('id,kind,message,status,created_at,notified_at,replied_at,replied_by,resolved_at,resolved_by,resolution_note,customer_id,property_ids,photos,customers(name,email)')
     .neq('status', 'done')
     .order('created_at', { ascending: false })
     .limit(50)
@@ -51,6 +51,8 @@ export async function loadOpenRequests() {
     resolvedAt: r.resolved_at,
     resolvedBy: r.resolved_by,
     addresses: (r.property_ids || []).map((id) => addrOf[id]).filter(Boolean),
+    // client-attached photos (mig 0059) — public URLs from the stop-photos bucket
+    photoUrls: (r.photos || []).map((p) => supabase.storage.from('stop-photos').getPublicUrl(p).data.publicUrl),
   }))
 }
 

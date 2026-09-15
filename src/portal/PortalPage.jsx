@@ -65,18 +65,23 @@ const card = { background: '#fff', border: '1px solid #e6eae6', borderRadius: 14
 const btnPrimary = { background: GREEN, color: '#fff', border: 'none', borderRadius: 9, padding: '10px 18px', fontSize: 13.5, fontWeight: 700, cursor: 'pointer' }
 const btnGhost = { background: '#fff', color: '#5d6b63', border: '1px solid #dde2dd', borderRadius: 9, padding: '10px 18px', fontSize: 13.5, fontWeight: 600, cursor: 'pointer' }
 const chip = (bg, fg) => ({ fontSize: 11.5, fontWeight: 700, color: fg, background: bg, borderRadius: 7, padding: '3px 9px', letterSpacing: '.02em' })
-const inputStyle = { border: '1px solid #d8ddd6', borderRadius: 9, padding: '10px 12px', fontSize: 14, outline: 'none', width: '100%', boxSizing: 'border-box' }
+// 16px everywhere: iOS Safari auto-zooms focused inputs <16px, which pushes
+// the caret off-view and reads to clients as "can't type in the box".
+const inputStyle = { border: '1px solid #d8ddd6', borderRadius: 9, padding: '10px 12px', fontSize: 16, outline: 'none', width: '100%', boxSizing: 'border-box' }
 
-export default function PortalPage({ slug, code, previewCustomerId, shareToken }) {
+export default function PortalPage({ slug, code, previewCustomerId, shareToken, publicLogin }) {
   const preview = !!previewCustomerId
   const shared = !!shareToken // homeowner view-only link: no login, no billing
-  const [phase, setPhase] = useState('loading') // loading | email | sent | ready
+  const [phase, setPhase] = useState('loading') // loading | email | sent | public | ready
   const [email, setEmail] = useState('')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [data, setData] = useState(null)
   const [tab, setTab] = useState('home')
   const [notice, setNotice] = useState('')
+  const [loginCode, setLoginCode] = useState('') // public login: 6-digit code
+  const [loginStep, setLoginStep] = useState('email') // email | code | accounts
+  const [loginAccounts, setLoginAccounts] = useState([]) // email matched several accounts
 
   const token = !preview && !shared ? localStorage.getItem(tokenKey(slug)) : null
 
@@ -109,6 +114,7 @@ export default function PortalPage({ slug, code, previewCustomerId, shareToken }
       setTab('home')
       try {
         if (shared || preview) { await loadData(); return }
+        if (publicLogin) { setPhase('public'); return }
 
         const params = new URLSearchParams(window.location.search)
         const payInvoice = params.get('pay_invoice')
@@ -152,6 +158,40 @@ export default function PortalPage({ slug, code, previewCustomerId, shareToken }
     setBusy(false)
   }
 
+  // ---- public login (no per-client link): email → 6-digit code → account ----
+  // Same request_code/redeem_code actions the mobile app uses. On success we
+  // store the session and navigate to the standard ?portal=<slug> page.
+  async function sendLoginCode(e) {
+    e.preventDefault()
+    if (busy || !email.trim()) return
+    setBusy(true)
+    setErr('')
+    try {
+      await portalApi({ action: 'request_code', email: email.trim() })
+      setLoginStep('code')
+    } catch (e2) { setErr(e2.message || String(e2)) }
+    setBusy(false)
+  }
+
+  async function redeemLoginCode(e) {
+    e.preventDefault()
+    if (busy || loginCode.trim().length < 6) return
+    setBusy(true)
+    setErr('')
+    try {
+      const r = await portalApi({ action: 'redeem_code', email: email.trim(), code: loginCode.trim() })
+      const accounts = r.accounts || []
+      if (accounts.length === 1) adoptLoginAccount(accounts[0])
+      else { setLoginStep('accounts'); setLoginAccounts(accounts) }
+    } catch (e2) { setErr(e2.message || String(e2)) }
+    setBusy(false)
+  }
+
+  function adoptLoginAccount(acct) {
+    localStorage.setItem(tokenKey(acct.slug), acct.token)
+    window.location.replace(`/?portal=${encodeURIComponent(acct.slug)}`)
+  }
+
   const pendingQuotes = useMemo(() => (data?.quotes || []).filter((q) => q.status === 'sent'), [data])
   const excessCount = useMemo(() => (data?.excess || []).length, [data])
   const nextPickup = useMemo(() => {
@@ -185,6 +225,59 @@ export default function PortalPage({ slug, code, previewCustomerId, shareToken }
   )
 
   if (phase === 'loading') return shell(<div style={{ ...card, textAlign: 'center', color: '#9aa69e' }}>Loading…</div>)
+
+  // Generic client login (no per-client link): email → 6-digit code → account.
+  if (phase === 'public') {
+    return shell(
+      <div style={{ ...card, maxWidth: 460, margin: '40px auto' }}>
+        <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 8 }}>Sign in to your portal</div>
+        {err && <div style={{ background: '#fbeae6', color: '#c0492f', borderRadius: 9, padding: '9px 12px', fontSize: 13, marginBottom: 12 }}>{err}</div>}
+        {loginStep === 'email' && (
+          <>
+            <div style={{ fontSize: 13.5, color: '#5d6b63', marginBottom: 14, lineHeight: 1.5 }}>
+              Enter the email on file with your account and we'll send you a 6-digit login code.
+            </div>
+            <form onSubmit={sendLoginCode} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <input
+                type="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com"
+                autoComplete="email" style={{ ...inputStyle, padding: '11px 13px' }}
+              />
+              <button type="submit" disabled={busy} style={{ ...btnPrimary, padding: '11px 0' }}>
+                {busy ? 'Sending…' : 'Email me a login code'}
+              </button>
+            </form>
+          </>
+        )}
+        {loginStep === 'code' && (
+          <>
+            <div style={{ fontSize: 13.5, color: '#5d6b63', marginBottom: 14, lineHeight: 1.5 }}>
+              We emailed a 6-digit code to <b>{email.trim()}</b>. It expires in 10 minutes.
+            </div>
+            <form onSubmit={redeemLoginCode} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <input
+                inputMode="numeric" autoComplete="one-time-code" value={loginCode}
+                onChange={(e) => setLoginCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                placeholder="123456" autoFocus
+                style={{ ...inputStyle, padding: '11px 13px', fontSize: 22, fontWeight: 700, letterSpacing: 8, textAlign: 'center' }}
+              />
+              <button type="submit" disabled={busy || loginCode.trim().length < 6} style={{ ...btnPrimary, padding: '11px 0', opacity: loginCode.trim().length < 6 ? 0.55 : 1 }}>
+                {busy ? 'Checking…' : 'Open my portal'}
+              </button>
+            </form>
+            <button onClick={() => { setLoginStep('email'); setLoginCode(''); setErr('') }} style={{ marginTop: 14, background: 'none', border: 'none', color: GREEN, fontSize: 13, fontWeight: 600, cursor: 'pointer', padding: 0 }}>Use a different email or resend the code</button>
+          </>
+        )}
+        {loginStep === 'accounts' && (
+          <>
+            <div style={{ fontSize: 13.5, color: '#5d6b63', marginBottom: 14 }}>That email is on more than one account with us — pick yours:</div>
+            {loginAccounts.map((a) => (
+              <button key={a.slug} onClick={() => adoptLoginAccount(a)} style={{ ...card, width: '100%', textAlign: 'left', cursor: 'pointer', marginBottom: 8, fontSize: 14.5, fontWeight: 700, color: '#1a2420' }}>{a.name} ›</button>
+            ))}
+          </>
+        )}
+      </div>,
+    )
+  }
 
   if (phase === 'email' || phase === 'sent') {
     return shell(
@@ -980,10 +1073,38 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
 }
 
 // ---- Request service --------------------------------------------------------------
+// Photo attachments are resized in the browser (~1280px JPEG) and sent as data
+// URLs; the portal fn uploads them to storage. File input works in the app's
+// WebView too (native photo picker on iOS/Android).
+const MAX_REQUEST_PHOTOS = 4
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader()
+    fr.onload = () => resolve(fr.result)
+    fr.onerror = () => reject(new Error('Could not read that photo.'))
+    fr.readAsDataURL(file)
+  })
+}
+
+async function shrinkToDataUrl(dataUrl) {
+  const img = new Image()
+  await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = dataUrl })
+  const max = 1280
+  const scale = Math.min(1, max / Math.max(img.width || 1, img.height || 1))
+  const w = Math.max(1, Math.round((img.width || max) * scale))
+  const h = Math.max(1, Math.round((img.height || max) * scale))
+  const c = document.createElement('canvas')
+  c.width = w; c.height = h
+  c.getContext('2d').drawImage(img, 0, 0, w, h)
+  return c.toDataURL('image/jpeg', 0.82)
+}
+
 function RequestTab({ data, token, preview, onChanged }) {
   const [kind, setKind] = useState('extra_pickup')
   const [selected, setSelected] = useState([])
   const [message, setMessage] = useState('')
+  const [photos, setPhotos] = useState([]) // [{ dataUrl }]
   const [busy, setBusy] = useState(false)
   const [done, setDone] = useState(false)
   const [err, setErr] = useState('')
@@ -992,16 +1113,35 @@ function RequestTab({ data, token, preview, onChanged }) {
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
   }
 
+  async function addPhotos(files) {
+    if (preview || !files?.length) return
+    setErr('')
+    const room = MAX_REQUEST_PHOTOS - photos.length
+    const picked = [...files].filter((f) => f.type.startsWith('image/')).slice(0, room)
+    if (!picked.length) return
+    try {
+      const shrunk = []
+      for (const f of picked) shrunk.push(await shrinkToDataUrl(await fileToDataUrl(f)))
+      setPhotos((prev) => [...prev, ...shrunk.map((dataUrl) => ({ dataUrl }))].slice(0, MAX_REQUEST_PHOTOS))
+    } catch (e) {
+      setErr(`Couldn't add those photos — ${e.message || e}. You can still send the request without them.`)
+    }
+  }
+
   async function submit(e) {
     e.preventDefault()
     if (preview) return
+    if (!message.trim() && !photos.length) {
+      if (!window.confirm('Send this request without a description? A note or photo helps us handle it faster.')) return
+    }
     setBusy(true)
     setErr('')
     try {
-      await portalApi({ action: 'request_service', token, kind, property_ids: selected, message })
+      await portalApi({ action: 'request_service', token, kind, property_ids: selected, message, photos: photos.map((p) => p.dataUrl) })
       setDone(true)
       setMessage('')
       setSelected([])
+      setPhotos([])
       await onChanged()
     } catch (e2) { setErr(e2.message || String(e2)) }
     setBusy(false)
@@ -1044,8 +1184,38 @@ function RequestTab({ data, token, preview, onChanged }) {
           <textarea
             value={message} onChange={(e) => setMessage(e.target.value)} rows={3}
             placeholder={kind === 'extra_pickup' ? 'e.g. "Extra bags out back after the weekend event — can you swing by tomorrow?"' : 'Describe what you need…'}
-            style={{ ...inputStyle, resize: 'vertical', fontFamily: 'inherit' }}
+            autoCapitalize="sentences" autoCorrect="on" spellCheck
+            style={{ ...inputStyle, resize: 'vertical', fontFamily: 'inherit', lineHeight: 1.5 }}
           />
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12, marginBottom: 2 }}>
+            <label
+              title={preview ? 'Disabled in admin preview' : photos.length >= MAX_REQUEST_PHOTOS ? `Up to ${MAX_REQUEST_PHOTOS} photos` : undefined}
+              style={{ ...btnGhost, display: 'inline-flex', alignItems: 'center', gap: 6, opacity: preview || photos.length >= MAX_REQUEST_PHOTOS ? 0.55 : 1, cursor: preview ? 'default' : 'pointer' }}
+            >
+              📷 {photos.length ? `Add more photos (${photos.length}/${MAX_REQUEST_PHOTOS})` : 'Add photos of the job'}
+              <input
+                type="file" accept="image/*" multiple
+                disabled={preview || photos.length >= MAX_REQUEST_PHOTOS}
+                onChange={(e) => { addPhotos(e.target.files); e.target.value = '' }}
+                style={{ display: 'none' }}
+              />
+            </label>
+            {busy && photos.length > 0 && <span style={{ fontSize: 12, color: '#9aa69e' }}>Uploading photos with your request…</span>}
+          </div>
+          {photos.length > 0 && (
+            <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+              {photos.map((p, i) => (
+                <div key={i} style={{ position: 'relative' }}>
+                  <img src={p.dataUrl} alt="attached" style={{ width: 84, height: 84, objectFit: 'cover', borderRadius: 9, border: '1px solid #e6eae6' }} />
+                  <span
+                    onClick={() => setPhotos((prev) => prev.filter((_, j) => j !== i))}
+                    style={{ position: 'absolute', top: -7, right: -7, width: 22, height: 22, borderRadius: 11, background: '#1a2420', color: '#fff', fontSize: 12, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}
+                  >✕</span>
+                </div>
+              ))}
+            </div>
+          )}
           <button
             type="submit" disabled={busy || preview}
             title={preview ? 'Disabled in admin preview' : undefined}
@@ -1061,6 +1231,7 @@ function RequestTab({ data, token, preview, onChanged }) {
             <div key={r.id} style={{ display: 'flex', gap: 10, alignItems: 'center', padding: '8px 0', borderTop: '1px solid #f0f2ef', fontSize: 12.5 }}>
               <span style={{ fontWeight: 600 }}>{kindLabel(r.kind)}</span>
               <span style={{ color: '#9aa69e', flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.message || ''}</span>
+              {(r.photos || []).length > 0 && <a href={r.photos[0]} target="_blank" rel="noreferrer" style={{ fontSize: 11.5, color: GREEN, fontWeight: 600, textDecoration: 'none' }}>📷 {(r.photos || []).length}</a>}
               <span style={{ color: '#9aa69e' }}>{fmtD(r.created_at)}</span>
               <span style={r.status === 'done' ? chip('#e7f1eb', GREEN) : chip('#f0f2ef', '#7c8a82')}>{r.status.toUpperCase()}</span>
             </div>

@@ -27,7 +27,11 @@
 //   remove_card {token}          → delete vault payment account + clear autopay
 //   quote_respond {token, quote_id, response, note} → approve/decline a quote,
 //                                  Randy texts admins
-//   request_service {token, kind, property_ids, message} → log request; staff
+//   request_service {token, kind, property_ids, message, photos} → log request
+//                                  (photos: up to 4 image data URLs, resized
+//                                  client-side; stored in stop-photos under
+//                                  requests/<date>/ and shown in staff triage);
+//                                  staff
 //                                  get instant email + app push (see
 //                                  alertNewPortalRequest) and Randy texts admins
 //   admin_data {customer_id}     → staff-JWT-authorized copy of `data` for the
@@ -90,6 +94,40 @@ async function sbUpsert(path: string, body: unknown, onConflict: string) {
 
 const enc = encodeURIComponent
 const publicUrl = (bucket: string, path: string) => `${SUPABASE_URL}/storage/v1/object/public/${bucket}/${path}`
+
+// Client-attached request photos arrive as data URLs; park the decoded bytes
+// in the public stop-photos bucket (same one driver check-in photos use).
+async function storageUpload(path: string, bytes: Uint8Array, contentType: string) {
+  const r = await fetch(`${SUPABASE_URL}/storage/v1/object/stop-photos/${enc(path)}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${SERVICE_KEY}`, "Content-Type": contentType, "x-upsert": "true" },
+    body: bytes,
+  })
+  if (!r.ok) throw new Error(`storage upload ${path}: ${r.status} ${await r.text()}`)
+}
+
+// Accepts up to 4 image data URLs (the portal resizes to ~1280px JPEG before
+// sending), uploads each, returns the storage paths. Bad entries are skipped,
+// not fatal — the request itself must still go through.
+async function saveRequestPhotos(input: unknown): Promise<string[]> {
+  const paths: string[] = []
+  if (!Array.isArray(input)) return paths
+  for (const raw of input.slice(0, 4)) {
+    const m = /^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/.exec(String(raw || ""))
+    if (!m) continue
+    if (m[2].length > 4_000_000) continue // ~3MB decoded cap; portal sends far less
+    const bytes = Uint8Array.from(atob(m[2]), (c) => c.charCodeAt(0))
+    const ext = m[1] === "png" ? "png" : m[1] === "webp" ? "webp" : "jpg"
+    const path = `requests/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}.${ext}`
+    try {
+      await storageUpload(path, bytes, `image/${m[1]}`)
+      paths.push(path)
+    } catch (e) {
+      console.error("request photo upload failed", e instanceof Error ? e.message : e)
+    }
+  }
+  return paths
+}
 
 function randomToken(bytes = 32): string {
   const a = new Uint8Array(bytes)
@@ -507,7 +545,7 @@ async function portalData(cust: any) {
   )
 
   const requests = await sbGet(
-    `portal_requests?customer_id=eq.${cust.id}&select=id,kind,message,status,created_at&order=created_at.desc&limit=10`,
+    `portal_requests?customer_id=eq.${cust.id}&select=id,kind,message,status,created_at,photos&order=created_at.desc&limit=10`,
   )
 
   const settings = await getSettings()
@@ -535,7 +573,10 @@ async function portalData(cust: any) {
     invoices,
     balance_due: balanceDue,
     quotes,
-    requests,
+    requests: (requests as any[]).map((r) => ({
+      ...r,
+      photos: (Array.isArray(r.photos) ? r.photos : []).map((p: string) => publicUrl("stop-photos", p)),
+    })),
     payment: {
       available: !!(settings.run_mid && settings.run_public_key),
       publicKey: settings.run_public_key || null,
@@ -1005,7 +1046,11 @@ Deno.serve(async (req) => {
       const kind = ["extra_pickup", "junk_removal", "lawn_care", "billing", "other"].includes(body.kind) ? body.kind : "other"
       const message = String(body.message || "").slice(0, 1000)
       const propertyIds = Array.isArray(body.property_ids) ? body.property_ids.slice(0, 50) : []
-      const inserted = await sbPost("portal_requests", { customer_id: cust.id, kind, message: message || null, property_ids: propertyIds })
+      const photoPaths = await saveRequestPhotos(body.photos)
+      const inserted = await sbPost("portal_requests", {
+        customer_id: cust.id, kind, message: message || null, property_ids: propertyIds,
+        photos: photoPaths,
+      })
       const reqId = inserted?.[0]?.id
       let addrTxt = ""
       if (propertyIds.length) {
@@ -1018,8 +1063,9 @@ Deno.serve(async (req) => {
       const alertLabel: Record<string, string> = {
         extra_pickup: "Extra pickup", junk_removal: "Junk removal", lawn_care: "Lawn care", billing: "Billing question", other: "Service request",
       }
-      await textAdmins(`📥 ${cust.name} requested ${kindLabel[kind]}${addrTxt} via their portal.${message ? ` "${message.slice(0, 220)}"` : ""} — Trashy Randy`)
-      if (reqId) await alertNewPortalRequest(String(reqId), cust.name || "A client", alertLabel[kind] || "Service request", addrTxt, message)
+      const photoTxt = photoPaths.length ? ` [${photoPaths.length} photo${photoPaths.length > 1 ? "s" : ""} attached — see the Dashboard triage]` : ""
+      await textAdmins(`📥 ${cust.name} requested ${kindLabel[kind]}${addrTxt} via their portal.${message ? ` "${message.slice(0, 220)}"` : ""}${photoTxt} — Trashy Randy`)
+      if (reqId) await alertNewPortalRequest(String(reqId), cust.name || "A client", alertLabel[kind] || "Service request", addrTxt, `${message || "(no description)"}${photoTxt}`)
       return json({ ok: true })
     }
 

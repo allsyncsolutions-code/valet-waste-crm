@@ -9,9 +9,12 @@ import PayPage from './portal/PayPage.jsx'
 // ?share=<token> is the read-only homeowner view (no login, no billing).
 // ?portal=<slug>&pay_invoice=<id> is a STANDALONE pay page: no portal chrome,
 // no sign-in — just that one invoice and a card form (PayPage).
+// ?login=client is the generic public login (no per-client slug) — the link
+// to put on the marketing website: email → 6-digit code → their portal.
 const params = new URLSearchParams(window.location.search)
 const portalSlug = params.get('portal')
 const shareToken = params.get('share')
+const clientLogin = params.get('login') === 'client'
 // A magic-link login (?code=…) still goes through the full portal flow even
 // if pay_invoice is present — the code must be redeemed for a session there.
 const payInvoice = params.get('code') ? null : params.get('pay_invoice')
@@ -22,6 +25,8 @@ createRoot(document.getElementById('root')).render(
       <PayPage slug={portalSlug} invoiceId={payInvoice} />
     ) : portalSlug || shareToken ? (
       <PortalPage slug={portalSlug} code={params.get('code')} shareToken={shareToken} />
+    ) : clientLogin ? (
+      <PortalPage publicLogin />
     ) : (
       <AuthGate />
     )}

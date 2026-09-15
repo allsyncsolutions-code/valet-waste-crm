@@ -76,7 +76,18 @@ export default function RequestTriage({ requests, onChanged, onClose, app }) {
               {r.addresses.length > 0 && (
                 <div style={{ fontSize: 11.5, color: '#7c8a82', marginBottom: 5 }}>📍 {r.addresses.join('; ')}</div>
               )}
-              <div style={{ fontSize: 13, color: '#1a2420', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', lineHeight: 1.5 }}>{r.message || '(no message — just the request)'}</div>
+              <div style={{ fontSize: 13, color: '#1a2420', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', lineHeight: 1.5 }}>
+                {r.message || (r.photoUrls?.length ? '(no description — photos only)' : '(no message — just the request)')}
+              </div>
+              {r.photoUrls?.length > 0 && (
+                <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+                  {r.photoUrls.map((u, i) => (
+                    <a key={i} href={u} target="_blank" rel="noreferrer" title="Open full size">
+                      <img src={u} alt={`request photo ${i + 1}`} style={{ width: 76, height: 76, objectFit: 'cover', borderRadius: 9, border: '1px solid #e6eae6' }} />
+                    </a>
+                  ))}
+                </div>
+              )}
               {r.repliedAt && (
                 <div style={{ fontSize: 11.5, color: '#1f7a4d', marginTop: 6 }}>✉️ Replied by email{r.repliedBy ? ` (${r.repliedBy})` : ''} — {fmtWhen(r.repliedAt)}</div>
               )}

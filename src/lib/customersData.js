@@ -197,7 +197,7 @@ export async function loadClientFieldActivity(customerId, limit = 300) {
 export async function loadClientPortalRequests(customerId) {
   const { data, error } = await supabase
     .from('portal_requests')
-    .select('id, kind, message, status, created_at')
+    .select('id, kind, message, status, created_at, photos')
     .eq('customer_id', customerId)
     .order('created_at', { ascending: false })
   if (error) throw error
@@ -210,6 +210,7 @@ export async function loadClientPortalRequests(customerId) {
     kindLabel: KINDS[r.kind] || r.kind,
     message: r.message || '',
     status: r.status,
+    photoCount: (r.photos || []).length,
   }))
 }
 

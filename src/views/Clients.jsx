@@ -1208,7 +1208,7 @@ export default function Clients({ app }) {
                       <span style={{ flex: 'none', fontWeight: 600, width: 92 }}>{e.type}</span>
                       <span style={{ flex: 1, minWidth: 0, color: '#5d6b63', ...(e.message ? { whiteSpace: 'normal', overflowWrap: 'anywhere' } : { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }) }}>
                         {e.message
-                          ? <><span style={{ color: '#1f7a4d', fontWeight: 600 }}>{e.kindLabel}</span>{e.status === 'new' ? <span style={{ color: '#c0492f', fontWeight: 700 }}> (new)</span> : null} — {e.message}</>
+                          ? <><span style={{ color: '#1f7a4d', fontWeight: 600 }}>{e.kindLabel}</span>{e.status === 'new' ? <span style={{ color: '#c0492f', fontWeight: 700 }}> (new)</span> : null} — {e.message}{e.photoCount ? <span style={{ color: '#1f7a4d' }}> · 📷 {e.photoCount}</span> : null}</>
                           : <>{e.address || '—'}{e.route ? <span style={{ color: '#9aa69e' }}> · Rt {e.route}</span> : null}</>}
                       </span>
                       <span style={{ flex: 'none', color: '#9aa69e', fontFamily: MONO, fontSize: 11 }}>{fmtDate(e.ts)} · {fmtTime(e.ts)}</span>
