@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { MONO } from '../data.js'
-import { STATUS_META, setRequestStatus, replyToRequestEmail } from '../lib/requestsData.js'
+import { STATUS_META, setRequestStatus, replyToRequestEmail, approveNewPropertyRequest, nextDateForDays } from '../lib/requestsData.js'
 import { gmailStatus } from '../lib/gmailData.js'
 
 // Open-ticket triage for client portal requests. Every request that isn't
@@ -21,6 +21,7 @@ export default function RequestTriage({ requests, onChanged, onClose, app }) {
   const [flash, setFlash] = useState('')
   const [gmail, setGmail] = useState(null) // null = checking
   const [replyFor, setReplyFor] = useState(null) // request id with the compose box open
+  const [approveFor, setApproveFor] = useState(null) // request id with the approve panel open
 
   useEffect(() => { gmailStatus().then(setGmail).catch(() => setGmail({ connected: false })) }, [])
 
@@ -76,9 +77,18 @@ export default function RequestTriage({ requests, onChanged, onClose, app }) {
               {r.addresses.length > 0 && (
                 <div style={{ fontSize: 11.5, color: '#7c8a82', marginBottom: 5 }}>📍 {r.addresses.join('; ')}</div>
               )}
-              <div style={{ fontSize: 13, color: '#1a2420', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', lineHeight: 1.5 }}>
-                {r.message || (r.photoUrls?.length ? '(no description — photos only)' : '(no message — just the request)')}
-              </div>
+              {r.kind === 'new_property' && r.details && (
+                <div style={{ background: '#f4f8f5', border: '1px solid #d9e8de', borderRadius: 10, padding: '10px 12px', marginBottom: 8, fontSize: 12.5, lineHeight: 1.6 }}>
+                  <div><b>🏠 New address:</b> {r.details.address}</div>
+                  <div><b>Service:</b> {(r.details.days || []).map((d) => d.slice(0, 3)).join(' & ')} · {FREQ_LABELS[r.details.frequency] || r.details.frequency || 'weekly'}</div>
+                  {r.details.notes && <div style={{ whiteSpace: 'pre-wrap' }}><b>Access notes:</b> {r.details.notes}</div>}
+                </div>
+              )}
+              {!(r.kind === 'new_property' && r.details) && (
+                <div style={{ fontSize: 13, color: '#1a2420', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', lineHeight: 1.5 }}>
+                  {r.message || (r.photoUrls?.length ? '(no description — photos only)' : '(no message — just the request)')}
+                </div>
+              )}
               {r.photoUrls?.length > 0 && (
                 <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
                   {r.photoUrls.map((u, i) => (
@@ -93,12 +103,20 @@ export default function RequestTriage({ requests, onChanged, onClose, app }) {
               )}
 
               <div style={{ display: 'flex', gap: 7, marginTop: 11, flexWrap: 'wrap' }}>
-                <button onClick={() => mark(r, 'scheduled')} disabled={busyId === r.id || scheduled} style={{ ...ghostBtn, color: scheduled ? '#9aa69e' : '#155e9c', borderColor: scheduled ? '#e6eae6' : '#155e9c55' }}>{scheduled ? '📅 Scheduled ✓' : '📅 Scheduled'}</button>
-                <button onClick={() => mark(r, 'done')} disabled={busyId === r.id} style={primaryBtn}>{busyId === r.id ? 'Saving…' : '✓ Handled — close'}</button>
+                {r.kind === 'new_property' ? (
+                  <button onClick={() => setApproveFor((id) => (id === r.id ? null : r.id))} disabled={busyId === r.id} style={{ ...primaryBtn }}>✅ Approve & schedule</button>
+                ) : (
+                  <button onClick={() => mark(r, 'scheduled')} disabled={busyId === r.id || scheduled} style={{ ...ghostBtn, color: scheduled ? '#9aa69e' : '#155e9c', borderColor: scheduled ? '#e6eae6' : '#155e9c55' }}>{scheduled ? '📅 Scheduled ✓' : '📅 Scheduled'}</button>
+                )}
+                <button onClick={() => mark(r, 'done')} disabled={busyId === r.id} style={r.kind === 'new_property' ? ghostBtn : primaryBtn}>{busyId === r.id ? 'Saving…' : '✓ Handled — close'}</button>
                 <button onClick={() => setReplyFor((id) => (id === r.id ? null : r.id))} disabled={busyId === r.id} style={ghostBtn}>✉️ Reply by email</button>
                 <span style={{ flex: 1 }} />
                 <button onClick={() => { onClose(); app.openClient(r.customerId) }} style={{ ...ghostBtn, color: '#1f7a4d', borderColor: '#1f7a4d55' }}>Client →</button>
               </div>
+
+              {approveFor === r.id && (
+                <ApprovePanel req={r} busy={busyId === r.id} onBusy={(b) => setBusyId(b ? r.id : null)} onDone={async (msg) => { setApproveFor(null); flashNote(msg); await onChanged() }} onCancel={() => setApproveFor(null)} />
+              )}
 
               {replyFor === r.id && (
                 <ReplyBox req={r} gmail={gmail} onSent={async () => { setReplyFor(null); flashNote(`✉️ Reply sent to ${r.email}.`); await onChanged() }} />
@@ -113,6 +131,85 @@ export default function RequestTriage({ requests, onChanged, onClose, app }) {
 
 const ghostBtn = { background: '#fff', color: '#5d6b63', border: '1px solid #e6eae6', borderRadius: 9, padding: '8px 13px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }
 const primaryBtn = { background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '8px 13px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }
+
+const FREQ_LABELS = { weekly: 'Weekly', biweekly: 'Every 2 weeks', monthly: 'Monthly', '1st_3rd': '1st & 3rd week', '2nd_4th': '2nd & 4th week' }
+const DOW = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+
+// Inline approval panel for a new_property request (mig 0060): prefilled with
+// the client's requested days/frequency/notes, staff can adjust, set price +
+// start date, then one click creates the property and closes the ticket. The
+// property lands on the Routes board via pickup_days and carries the NEW
+// badge for 30 days.
+function ApprovePanel({ req, busy, onBusy, onDone, onCancel }) {
+  const d = req.details || {}
+  const [days, setDays] = useState(d.days || [])
+  const [frequency, setFrequency] = useState(d.frequency || 'weekly')
+  const [startDate, setStartDate] = useState(nextDateForDays(d.days || []) || '')
+  const [price, setPrice] = useState('')
+  const [notes, setNotes] = useState(d.notes || '')
+  const [err, setErr] = useState('')
+
+  function toggleDay(day) {
+    setDays((prev) => (prev.includes(day) ? prev.filter((x) => x !== day) : [...prev, day]))
+  }
+
+  async function approve() {
+    if (!days.length) { setErr('Pick at least one service day.'); return }
+    const p = price.trim()
+    if (p && !Number.isFinite(Number(p))) { setErr('Price must be a number (or leave blank).'); return }
+    setErr('')
+    onBusy(true)
+    try {
+      await approveNewPropertyRequest(req, {
+        days, frequency,
+        startDate: startDate || undefined,
+        price: p === '' ? undefined : Number(p),
+        notes: notes.trim() || null,
+      })
+      onDone(`✅ Added to the schedule — ${d.address} starts ${startDate || nextDateForDays(days)}.`)
+    } catch (e) {
+      setErr(e.message || String(e))
+      onBusy(false)
+    }
+  }
+
+  return (
+    <div style={{ marginTop: 11, border: '1px solid #cfe0d5', borderRadius: 10, padding: 12, background: '#f8fbf9' }}>
+      <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8 }}>Approve — goes straight onto the schedule</div>
+      {err && <div style={errorBox}>{err}</div>}
+      <div style={{ fontSize: 11.5, color: '#7c8a82', marginBottom: 5 }}>Service days</div>
+      <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginBottom: 10 }}>
+        {DOW.map((day) => {
+          const on = days.includes(day)
+          return (
+            <button key={day} type="button" onClick={() => toggleDay(day)} style={{ background: on ? '#1f7a4d' : '#fff', color: on ? '#fff' : '#5d6b63', border: `1px solid ${on ? '#1f7a4d' : '#dde2dd'}`, borderRadius: 8, padding: '6px 10px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>{day.slice(0, 3)}</button>
+          )
+        })}
+      </div>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+        <label style={{ fontSize: 11.5, color: '#7c8a82', display: 'flex', alignItems: 'center', gap: 6 }}>
+          Frequency
+          <select value={frequency} onChange={(e) => setFrequency(e.target.value)} style={{ ...inp, width: 'auto', padding: '7px 9px', fontSize: 13 }}>
+            {Object.entries(FREQ_LABELS).map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+          </select>
+        </label>
+        <label style={{ fontSize: 11.5, color: '#7c8a82', display: 'flex', alignItems: 'center', gap: 6 }}>
+          First service
+          <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} style={{ ...inp, width: 'auto', padding: '7px 9px', fontSize: 13 }} />
+        </label>
+        <label style={{ fontSize: 11.5, color: '#7c8a82', display: 'flex', alignItems: 'center', gap: 6 }}>
+          Price $
+          <input value={price} onChange={(e) => setPrice(e.target.value)} placeholder="optional" inputMode="decimal" style={{ ...inp, width: 90, padding: '7px 9px', fontSize: 13 }} />
+        </label>
+      </div>
+      <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} placeholder="Access notes — gate code, bin location…" style={{ ...inp, fontSize: 13, lineHeight: 1.5, resize: 'vertical', marginBottom: 10 }} />
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+        <button onClick={onCancel} disabled={busy} style={ghostBtn}>Cancel</button>
+        <button onClick={approve} disabled={busy} style={primaryBtn}>{busy ? 'Adding…' : '✅ Approve & add'}</button>
+      </div>
+    </div>
+  )
+}
 
 // Inline composer for one request. Sends through the connected company Gmail;
 // the client's original message is quoted under whatever the staff member

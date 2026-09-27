@@ -54,12 +54,29 @@ const fmtNext = (d) => {
 
 const REQUEST_KINDS = [
   ['extra_pickup', 'Extra trash pickup'],
+  ['new_property', 'New property'],
   ['junk_removal', 'Junk removal'],
   ['lawn_care', 'Lawn care'],
   ['billing', 'Billing question'],
   ['other', 'Something else'],
 ]
 const kindLabel = (k) => (REQUEST_KINDS.find(([id]) => id === k) || [null, 'Request'])[1]
+
+// "New" tag window — same 30-day rule as the CRM Routes NEW badge (mig 0060).
+const isNewProperty = (createdAt) => {
+  if (!createdAt) return false
+  const t = new Date(createdAt).getTime()
+  return Number.isFinite(t) && Date.now() - t < 30 * 86400000
+}
+const NP_DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+const FREQ_OPTIONS = [['weekly', 'Weekly'], ['biweekly', 'Every 2 weeks'], ['monthly', 'Monthly'], ['1st_3rd', '1st & 3rd week'], ['2nd_4th', '2nd & 4th week']]
+const FREQ_SHORT = { weekly: 'weekly', biweekly: 'every 2 weeks', monthly: 'monthly', '1st_3rd': '1st & 3rd weeks', '2nd_4th': '2nd & 4th weeks' }
+// Readable summary stored in the request message — the staff alert email/text
+// and the triage card render it as-is.
+const newPropertyMessage = (d) => {
+  const days = (d.days || []).map((x) => x.slice(0, 3)).join(' & ')
+  return `New address: ${d.address}\nService: ${days} (${FREQ_SHORT[d.frequency] || d.frequency || 'weekly'})${d.notes ? `\nNotes: ${d.notes}` : ''}`
+}
 
 const card = { background: '#fff', border: '1px solid #e6eae6', borderRadius: 14, padding: '16px 18px' }
 const btnPrimary = { background: GREEN, color: '#fff', border: 'none', borderRadius: 9, padding: '10px 18px', fontSize: 13.5, fontWeight: 700, cursor: 'pointer' }
@@ -441,7 +458,10 @@ function HomeTab({ data, nextPickup, pendingQuotes, excessCount, go, shared, onS
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', background: '#f7f9f7', borderRadius: 9 }}>
               <span style={{ color: GREEN, fontSize: 14 }}>⌂</span>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.address}</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flex: 1, minWidth: 0 }}>{p.address}</div>
+                  {isNewProperty(p.created_at) && <span style={chip('#f6ebc8', '#8a6d1e')}>NEW</span>}
+                </div>
                 {p.service && <div style={{ fontSize: 11, color: '#7c8a82' }}>{p.service}</div>}
               </div>
               <div style={{ display: 'flex', gap: 4 }}>
@@ -1108,9 +1128,19 @@ function RequestTab({ data, token, preview, onChanged }) {
   const [busy, setBusy] = useState(false)
   const [done, setDone] = useState(false)
   const [err, setErr] = useState('')
+  // new_property (mig 0060): the structured answers asked when a client wants
+  // another address added to their service.
+  const [npAddress, setNpAddress] = useState('')
+  const [npDays, setNpDays] = useState([])
+  const [npFreq, setNpFreq] = useState('weekly')
+  const [npNotes, setNpNotes] = useState('')
 
   function toggleProp(id) {
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
+  }
+
+  function toggleNpDay(day) {
+    setNpDays((prev) => (prev.includes(day) ? prev.filter((x) => x !== day) : [...prev, day]))
   }
 
   async function addPhotos(files) {
@@ -1131,17 +1161,24 @@ function RequestTab({ data, token, preview, onChanged }) {
   async function submit(e) {
     e.preventDefault()
     if (preview) return
-    if (!message.trim() && !photos.length) {
+    if (kind === 'new_property') {
+      if (!npAddress.trim()) { setErr('Add the address for the new property.'); return }
+      if (!npDays.length) { setErr('Pick at least one service day.'); return }
+    } else if (!message.trim() && !photos.length) {
       if (!window.confirm('Send this request without a description? A note or photo helps us handle it faster.')) return
     }
     setBusy(true)
     setErr('')
     try {
-      await portalApi({ action: 'request_service', token, kind, property_ids: selected, message, photos: photos.map((p) => p.dataUrl) })
+      const details = kind === 'new_property'
+        ? { address: npAddress.trim(), days: npDays, frequency: npFreq, notes: npNotes.trim() || null }
+        : undefined
+      await portalApi({ action: 'request_service', token, kind, property_ids: selected, message: details ? newPropertyMessage(details) : message, photos: photos.map((p) => p.dataUrl), details })
       setDone(true)
       setMessage('')
       setSelected([])
       setPhotos([])
+      setNpAddress(''); setNpDays([]); setNpFreq('weekly'); setNpNotes('')
       await onChanged()
     } catch (e2) { setErr(e2.message || String(e2)) }
     setBusy(false)
@@ -1166,27 +1203,66 @@ function RequestTab({ data, token, preview, onChanged }) {
             ))}
           </div>
 
-          {data.properties.length > 0 && (
+          {kind === 'new_property' ? (
             <>
-              <div style={{ fontSize: 12.5, fontWeight: 600, color: '#5d6b63', marginBottom: 8 }}>Which address{data.properties.length > 1 ? 'es' : ''}? <span style={{ color: '#9aa69e', fontWeight: 400 }}>(optional)</span></div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 14, maxHeight: 180, overflowY: 'auto' }}>
-                {data.properties.map((p) => (
-                  <label key={p.id} style={{ display: 'flex', gap: 9, alignItems: 'center', fontSize: 13, cursor: 'pointer', padding: '6px 9px', background: selected.includes(p.id) ? '#e7f1eb' : '#f7f9f7', borderRadius: 8 }}>
-                    <input type="checkbox" checked={selected.includes(p.id)} onChange={() => toggleProp(p.id)} style={{ accentColor: GREEN }} />
-                    {p.address}
-                  </label>
-                ))}
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: '#5d6b63', marginBottom: 8 }}>New property address</div>
+              <input
+                value={npAddress} onChange={(e) => setNpAddress(e.target.value)}
+                placeholder="123 Main St, St. Augustine, FL 32084"
+                autoCapitalize="sentences" autoCorrect="on" spellCheck
+                style={{ ...inputStyle, marginBottom: 14 }}
+              />
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: '#5d6b63', marginBottom: 8 }}>Which day(s) should we come?</div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 14 }}>
+                {NP_DAYS.map((day) => {
+                  const on = npDays.includes(day)
+                  return (
+                    <button key={day} type="button" onClick={() => toggleNpDay(day)} style={{ background: on ? GREEN : '#fff', color: on ? '#fff' : '#5d6b63', border: `1px solid ${on ? GREEN : '#dde2dd'}`, borderRadius: 9, padding: '9px 12px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>{day.slice(0, 3)}</button>
+                  )
+                })}
               </div>
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: '#5d6b63', marginBottom: 8 }}>How often?</div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 14 }}>
+                {FREQ_OPTIONS.map(([id, label]) => {
+                  const on = npFreq === id
+                  return (
+                    <button key={id} type="button" onClick={() => setNpFreq(id)} style={{ background: on ? GREEN : '#fff', color: on ? '#fff' : '#5d6b63', border: `1px solid ${on ? GREEN : '#dde2dd'}`, borderRadius: 9, padding: '9px 12px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>{label}</button>
+                  )
+                })}
+              </div>
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: '#5d6b63', marginBottom: 8 }}>Access notes <span style={{ color: '#9aa69e', fontWeight: 400 }}>(gate code, bin location, anything we should know)</span></div>
+              <textarea
+                value={npNotes} onChange={(e) => setNpNotes(e.target.value)} rows={3}
+                placeholder='e.g. "Gate code 4417 — bins are behind the pool house on the left"'
+                autoCapitalize="sentences" autoCorrect="on" spellCheck
+                style={{ ...inputStyle, resize: 'vertical', fontFamily: 'inherit', lineHeight: 1.5 }}
+              />
+            </>
+          ) : (
+            <>
+              {data.properties.length > 0 && (
+                <>
+                  <div style={{ fontSize: 12.5, fontWeight: 600, color: '#5d6b63', marginBottom: 8 }}>Which address{data.properties.length > 1 ? 'es' : ''}? <span style={{ color: '#9aa69e', fontWeight: 400 }}>(optional)</span></div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 14, maxHeight: 180, overflowY: 'auto' }}>
+                    {data.properties.map((p) => (
+                      <label key={p.id} style={{ display: 'flex', gap: 9, alignItems: 'center', fontSize: 13, cursor: 'pointer', padding: '6px 9px', background: selected.includes(p.id) ? '#e7f1eb' : '#f7f9f7', borderRadius: 8 }}>
+                        <input type="checkbox" checked={selected.includes(p.id)} onChange={() => toggleProp(p.id)} style={{ accentColor: GREEN }} />
+                        {p.address}
+                      </label>
+                    ))}
+                  </div>
+                </>
+              )}
+
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: '#5d6b63', marginBottom: 8 }}>Tell us more</div>
+              <textarea
+                value={message} onChange={(e) => setMessage(e.target.value)} rows={3}
+                placeholder={kind === 'extra_pickup' ? 'e.g. "Extra bags out back after the weekend event — can you swing by tomorrow?"' : 'Describe what you need…'}
+                autoCapitalize="sentences" autoCorrect="on" spellCheck
+                style={{ ...inputStyle, resize: 'vertical', fontFamily: 'inherit', lineHeight: 1.5 }}
+              />
             </>
           )}
-
-          <div style={{ fontSize: 12.5, fontWeight: 600, color: '#5d6b63', marginBottom: 8 }}>Tell us more</div>
-          <textarea
-            value={message} onChange={(e) => setMessage(e.target.value)} rows={3}
-            placeholder={kind === 'extra_pickup' ? 'e.g. "Extra bags out back after the weekend event — can you swing by tomorrow?"' : 'Describe what you need…'}
-            autoCapitalize="sentences" autoCorrect="on" spellCheck
-            style={{ ...inputStyle, resize: 'vertical', fontFamily: 'inherit', lineHeight: 1.5 }}
-          />
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12, marginBottom: 2 }}>
             <label

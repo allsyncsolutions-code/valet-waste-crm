@@ -377,6 +377,23 @@ async function alertNewPortalRequest(reqId: string, customerName: string, kindLa
   }
 }
 
+// Human-readable one-block summary of a new_property request's `details` —
+// used for the `message` column fallback, texts, and alert emails.
+const DAY_SHORT: Record<string, string> = {
+  monday: "Mon", tuesday: "Tue", wednesday: "Wed", thursday: "Thu",
+  friday: "Fri", saturday: "Sat", sunday: "Sun",
+}
+const FREQ_LABEL: Record<string, string> = {
+  weekly: "Weekly", biweekly: "Every 2 weeks", monthly: "Monthly",
+  "1st_3rd": "1st & 3rd week", "2nd_4th": "2nd & 4th week",
+}
+function newPropertySummary(d: Record<string, unknown>): string {
+  const days = Array.isArray(d.days) ? (d.days as string[]).map((x) => DAY_SHORT[x] || x).join(" & ") : ""
+  const freq = FREQ_LABEL[String(d.frequency)] || String(d.frequency || "weekly")
+  const notes = d.notes ? `\nNotes: ${d.notes}` : ""
+  return `New address: ${d.address}\nService: ${days} (${freq.toLowerCase()})${notes}`
+}
+
 // ---- SendGrid ----------------------------------------------------------------
 async function sendEmail(to: string, subject: string, html: string, companyName: string) {
   const key = Deno.env.get("SENDGRID_API_KEY")
@@ -457,7 +474,7 @@ async function staffFromAuthHeader(req: Request): Promise<boolean> {
 // ---- portal data payload -------------------------------------------------------
 async function portalData(cust: any) {
   const props = await sbGet(
-    `properties?customer_id=eq.${cust.id}&select=id,name,address,service,pickup_days,pickup_frequency&order=address.asc&limit=200`,
+    `properties?customer_id=eq.${cust.id}&select=id,name,address,service,pickup_days,pickup_frequency,created_at&order=address.asc&limit=200`,
   )
   const propIds = props.map((p: any) => p.id)
   const propById: Record<string, any> = {}
@@ -563,6 +580,9 @@ async function portalData(cust: any) {
     properties: props.map((p: any) => ({
       id: p.id, name: p.name, address: p.address, service: p.service,
       pickup_days: p.pickup_days, pickup_frequency: p.pickup_frequency,
+      // 30-day "New" tag on the Home property list (mig 0060) — same window
+      // as the Routes NEW badge in the CRM.
+      created_at: p.created_at,
     })),
     pickups,
     excess,
@@ -1049,29 +1069,53 @@ Deno.serve(async (req) => {
     if (action === "request_service") {
       const cust = await customerFromToken(String(token || ""))
       if (!cust) return json({ error: "Session expired — sign in again." }, 401)
-      const kind = ["extra_pickup", "junk_removal", "lawn_care", "billing", "other"].includes(body.kind) ? body.kind : "other"
+      const kind = ["extra_pickup", "junk_removal", "lawn_care", "billing", "other", "new_property"].includes(body.kind) ? body.kind : "other"
       const message = String(body.message || "").slice(0, 1000)
       const propertyIds = Array.isArray(body.property_ids) ? body.property_ids.slice(0, 50) : []
+
+      // new_property (mig 0060): the structured answers live in `details`
+      // {address, days[], frequency, notes}; a readable summary ALSO lands in
+      // `message` so the staff email/push and the 0048 backstop poll render
+      // complete info without knowing the new shape.
+      let details: Record<string, unknown> | null = null
+      if (kind === "new_property") {
+        const d = body.details && typeof body.details === "object" ? body.details as Record<string, unknown> : {}
+        const address = String(d.address || "").trim().slice(0, 300)
+        const days = (Array.isArray(d.days) ? d.days : [])
+          .map((x: unknown) => String(x).toLowerCase())
+          .filter((x: string) => ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"].includes(x))
+          .slice(0, 7)
+        const frequency = ["weekly", "biweekly", "monthly", "1st_3rd", "2nd_4th"].includes(String(d.frequency)) ? String(d.frequency) : "weekly"
+        const notes = String(d.notes || "").trim().slice(0, 1000)
+        if (!address || !days.length) return json({ error: "Add the new address and pick at least one service day." }, 400)
+        details = { address, days, frequency, notes: notes || null }
+      }
+
       const { paths: photoPaths, errors: photoErrors } = await saveRequestPhotos(body.photos)
       const inserted = await sbPost("portal_requests", {
-        customer_id: cust.id, kind, message: message || null, property_ids: propertyIds,
+        customer_id: cust.id, kind,
+        message: message || (details ? newPropertySummary(details) : null),
+        property_ids: kind === "new_property" ? [] : propertyIds,
         photos: photoPaths,
+        details,
       })
       const reqId = inserted?.[0]?.id
       let addrTxt = ""
-      if (propertyIds.length) {
+      if (kind === "new_property" && details) {
+        addrTxt = ` @ ${details.address}`
+      } else if (propertyIds.length) {
         const ps = await sbGet(`properties?id=in.(${propertyIds.join(",")})&customer_id=eq.${cust.id}&select=address&limit=5`)
         addrTxt = ps.length ? ` @ ${ps.map((p: any) => p.address).join("; ")}` : ""
       }
       const kindLabel: Record<string, string> = {
-        extra_pickup: "an EXTRA PICKUP", junk_removal: "JUNK REMOVAL", lawn_care: "LAWN CARE", billing: "help with BILLING", other: "service",
+        extra_pickup: "an EXTRA PICKUP", junk_removal: "JUNK REMOVAL", lawn_care: "LAWN CARE", billing: "help with BILLING", other: "service", new_property: "a NEW PROPERTY be added",
       }
       const alertLabel: Record<string, string> = {
-        extra_pickup: "Extra pickup", junk_removal: "Junk removal", lawn_care: "Lawn care", billing: "Billing question", other: "Service request",
+        extra_pickup: "Extra pickup", junk_removal: "Junk removal", lawn_care: "Lawn care", billing: "Billing question", other: "Service request", new_property: "New property",
       }
       const photoTxt = photoPaths.length ? ` [${photoPaths.length} photo${photoPaths.length > 1 ? "s" : ""} attached — see the Dashboard triage]` : ""
       await textAdmins(`📥 ${cust.name} requested ${kindLabel[kind]}${addrTxt} via their portal.${message ? ` "${message.slice(0, 220)}"` : ""}${photoTxt} — Trashy Randy`)
-      if (reqId) await alertNewPortalRequest(String(reqId), cust.name || "A client", alertLabel[kind] || "Service request", addrTxt, `${message || "(no description)"}${photoTxt}`)
+      if (reqId) await alertNewPortalRequest(String(reqId), cust.name || "A client", alertLabel[kind] || "Service request", addrTxt, `${message || (details ? newPropertySummary(details) : "(no description)")}${photoTxt}`)
       return json({ ok: true, photos_saved: photoPaths.length, photo_errors: photoErrors })
     }
 
