@@ -79,6 +79,18 @@ export function tagsOf(customer) {
   return ((customer && customer.customer_tags) || []).map((ct) => ct.tag).filter(Boolean)
 }
 
+// "NEW" badge window (mig 0060, owner decision 2026-09-27): an address created
+// within the last 30 days gets the amber NEW badge in Routes (CRM + mobile)
+// and the client portal — a visual "give this one special attention" flag that
+// expires on its own. No column to maintain; derived from created_at.
+export const NEW_PROPERTY_WINDOW_DAYS = 30
+export function isNewProperty(createdAt) {
+  if (!createdAt) return false
+  const t = new Date(createdAt).getTime()
+  if (!Number.isFinite(t)) return false
+  return Date.now() - t < NEW_PROPERTY_WINDOW_DAYS * 86400000
+}
+
 function mapStop(row) {
   return {
     id: row.id,
@@ -95,6 +107,8 @@ function mapStop(row) {
     name: row.properties?.name || 'Unknown',
     address: row.properties?.address || '',
     needsReview: !!row.properties?.needs_review,
+    createdAt: row.properties?.created_at || null,
+    isNew: isNewProperty(row.properties?.created_at),
     customerId: row.properties?.customer_id || null,
     clientName: row.properties?.customers?.name || null,
     tags: tagsOf(row.properties?.customers),
@@ -126,7 +140,7 @@ export async function loadRouteSlice(code = 'B', date = null, line = null) {
 
   const { data: stopRows, error: sErr } = await supabase
     .from('route_stops')
-    .select('id, property_id, seq, status, service, time_window, lat, lng, skip_reason, skipped_by, properties(name, address, service, lat, lng, needs_review, customer_id, pickup_days, pickup_frequency, customers(name, customer_tags(tag:tags(id,name,color))))')
+    .select('id, property_id, seq, status, service, time_window, lat, lng, skip_reason, skipped_by, properties(name, address, service, lat, lng, needs_review, created_at, customer_id, pickup_days, pickup_frequency, customers(name, customer_tags(tag:tags(id,name,color))))')
     .eq('route_id', route.id)
     .order('seq', { ascending: true })
   if (sErr) throw sErr
@@ -134,7 +148,7 @@ export async function loadRouteSlice(code = 'B', date = null, line = null) {
 
   let pq = supabase
     .from('properties')
-    .select('id, name, address, service, lat, lng, pickup_days, pickup_frequency, pickup_start_date, needs_review')
+    .select('id, name, address, service, lat, lng, pickup_days, pickup_frequency, pickup_start_date, needs_review, created_at')
     .eq('paused', false) // paused addresses never show up as unrouted/due
   if (line) pq = pq.eq('business_line', line) // only this line's properties can be "unrouted" here
   const { data: props, error: pErr } = await pq
@@ -192,6 +206,8 @@ export async function loadRouteSlice(code = 'B', date = null, line = null) {
       lng: p.lng,
       status: 'pending',
       needsReview: !!p.needs_review,
+      createdAt: p.created_at || null,
+      isNew: isNewProperty(p.created_at),
       pickupDays: p.pickup_days || [],
       pickupFrequency: p.pickup_frequency || null,
     }))

@@ -54,6 +54,7 @@ import {
   removeStopsByIds,
   loadDayRouteSummaries,
   copyRouteStopsToDate,
+  isNewProperty,
 } from '../lib/routesData.js'
 import { loadDrivers } from '../lib/teamData.js'
 import { loadCustomers, updateProperty } from '../lib/customersData.js'
@@ -1200,7 +1201,7 @@ export default function RoutesView({ app }) {
               const locked = isFixed(st)
               const sharedCodes = st.sharedCodes || []
               return (
-                <div key={st.id} style={{ display: 'flex', gap: 10, padding: '7px 8px', borderBottom: '1px solid #f1f3f0', background: sharedCodes.length ? '#fdf8ef' : undefined }}>
+                <div key={st.id} style={{ display: 'flex', gap: 10, padding: '7px 8px', borderBottom: '1px solid #f1f3f0', background: st.isNew ? '#fbf6e7' : sharedCodes.length ? '#fdf8ef' : undefined }}>
                   <div style={{ width: 24, height: 24, flex: 'none', borderRadius: '50%', background: meta.bg, color: meta.fg, border: st.status === 'enroute' ? '2px solid #46c585' : 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontSize: 11, fontWeight: 600 }}>{st.seq}</div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     {editStopId === st.id ? (
@@ -1226,6 +1227,7 @@ export default function RoutesView({ app }) {
                             style={{ fontWeight: 600, fontSize: 13.5, cursor: st.customerId ? 'pointer' : 'default', color: st.customerId ? '#1f7a4d' : '#1a2420', textDecoration: st.customerId ? 'underline dotted 1px' : 'none', textUnderlineOffset: 3 }}
                           >{st.name}</span>
                           {st.needsReview && <span title="Flagged for review" style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#c0492f', background: '#fbeae6', padding: '1px 5px', borderRadius: 4, letterSpacing: '.03em' }}>⚠ REVIEW</span>}
+                          {st.isNew && <span title={`New address — added ${st.createdAt ? new Date(st.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'recently'}. Give it extra attention this first month.`} style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#8a6d1e', background: '#f6ebc8', border: '1px solid #e8d79a', padding: '1px 5px', borderRadius: 4, letterSpacing: '.03em' }}>★ NEW</span>}
                           {st.lat == null && <span title="No map pin — address likely needs a city/ZIP" style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#c08a2e', background: '#fbf3e2', padding: '1px 5px', borderRadius: 4 }}>NO PIN</span>}
                           {sharedCodes.length > 0 && (
                             <span title={`Also on Route ${sharedCodes.join(' & ')} today — the address is shared between routes (alternate/backup run). Whoever completes their copy first auto-skips the other.`} style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#8a6d1e', background: '#f6efdd', padding: '1px 5px', borderRadius: 4 }}>⧉ ALSO ON {sharedCodes.join('/')}</span>
@@ -1308,11 +1310,12 @@ export default function RoutesView({ app }) {
             <div style={{ padding: '10px 12px 4px' }}>
               <div style={{ fontFamily: MONO, fontSize: 11, color: '#b07a1e', marginBottom: 7 }}>UNROUTED ({unrouted.length})</div>
               {unrouted.map((st) => (
-                <div key={st.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 9px', border: '1px dashed #e2cfa6', borderRadius: 9, marginBottom: 7, background: '#fdf8ef' }}>
+                <div key={st.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 9px', border: `1px dashed ${st.isNew ? '#d8b64a' : '#e2cfa6'}`, borderRadius: 9, marginBottom: 7, background: st.isNew ? '#fbf6e7' : '#fdf8ef' }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                       <span style={{ fontWeight: 600, fontSize: 12.5 }}>{st.name}</span>
                       {st.needsReview && <span title="Flagged for review" style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#c0492f', background: '#fbeae6', padding: '1px 5px', borderRadius: 4, letterSpacing: '.03em' }}>⚠ REVIEW</span>}
+                      {st.isNew && <span title="New address — give it extra attention this first month" style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#8a6d1e', background: '#f6ebc8', border: '1px solid #e8d79a', padding: '1px 5px', borderRadius: 4, letterSpacing: '.03em' }}>★ NEW</span>}
                     </div>
                     <div style={{ fontSize: 11, color: '#9a7b3e' }}>{st.address && st.address !== st.name ? `${st.address} · ` : ''}{st.service}{st.window ? ` · ${st.window}` : ''}</div>
                     <div style={{ marginTop: 5, display: 'flex', gap: 5, alignItems: 'center' }}>

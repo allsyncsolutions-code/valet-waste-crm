@@ -886,7 +886,7 @@ async function runScheduledInvoiceSends(): Promise<string> {
 // retries anything un-notified (failed send, other insert paths). Texting is
 // paused (RingCentral, 2026-08-26), so email + push carry these alerts.
 const REQUEST_KIND_LABEL: Record<string, string> = {
-  extra_pickup: "Extra pickup", junk_removal: "Junk removal", lawn_care: "Lawn care", billing: "Billing question", other: "Service request",
+  extra_pickup: "Extra pickup", junk_removal: "Junk removal", lawn_care: "Lawn care", billing: "Billing question", other: "Service request", new_property: "New property",
 }
 
 function requestAlertConfig(auto: any) {

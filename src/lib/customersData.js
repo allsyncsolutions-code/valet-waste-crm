@@ -146,7 +146,11 @@ export async function loadProperties(customerId) {
 
 // Add one property (service address) to a customer. lat/lng stay null so the
 // geocode-pending pass fills them in afterward.
-export async function addProperty(customerId, fields) {
+// opts.notify (default true) fires the staff alert (SMS to admins + staff
+// email/push via the notify-new-property edge function). The request-triage
+// approval flow passes { notify: false } — that path already alerted staff
+// when the client submitted the request.
+export async function addProperty(customerId, fields, opts = {}) {
   const { data, error } = await supabase
     .from('properties')
     .insert({
@@ -166,6 +170,11 @@ export async function addProperty(customerId, fields) {
     .single()
   if (error) throw error
   logActivity({ type: 'property_added', summary: `Added address ${fields.address}`, entityType: 'property', entityId: data.id })
+  if (opts.notify !== false) {
+    supabase.functions.invoke('notify-new-property', { body: { propertyId: data.id } })
+      .then(({ error: nErr }) => { if (nErr) console.warn('notify-new-property failed', nErr) })
+      .catch((nErr) => console.warn('notify-new-property failed', nErr))
+  }
   return data.id
 }
 
@@ -201,7 +210,7 @@ export async function loadClientPortalRequests(customerId) {
     .eq('customer_id', customerId)
     .order('created_at', { ascending: false })
   if (error) throw error
-  const KINDS = { extra_pickup: 'Extra pickup', junk_removal: 'Junk removal', lawn_care: 'Lawn care', billing: 'Billing', other: 'Other' }
+  const KINDS = { extra_pickup: 'Extra pickup', junk_removal: 'Junk removal', lawn_care: 'Lawn care', billing: 'Billing', other: 'Other', new_property: 'New property' }
   return (data || []).map((r) => ({
     id: `pr-${r.id}`,
     ts: r.created_at,
