@@ -119,6 +119,40 @@ function mapStop(row) {
   }
 }
 
+// New properties awaiting placement (owner ask, 2026-09-27) — created within
+// the NEW-badge window that have NEVER been placed on a route and aren't
+// paused. They sit on the Dashboard until someone accepts one (it gets added
+// to a route, so it leaves this list) or rejects it (paused). Pure derived
+// state — no column to maintain.
+export async function loadPendingNewProperties(line = null) {
+  const since = new Date(Date.now() - NEW_PROPERTY_WINDOW_DAYS * 86400000).toISOString()
+  let q = supabase
+    .from('properties')
+    .select('id, name, address, pickup_days, pickup_frequency, created_at, customer_id, customers(name)')
+    .eq('paused', false)
+    .gte('created_at', since)
+    .order('created_at', { ascending: true })
+  if (line) q = q.eq('business_line', line)
+  const { data, error } = await q
+  if (error) throw error
+  const props = data || []
+  if (!props.length) return []
+  const { data: stopRows } = await supabase.from('route_stops').select('property_id').in('property_id', props.map((p) => p.id))
+  const placed = new Set((stopRows || []).map((s) => s.property_id))
+  return props
+    .filter((p) => !placed.has(p.id))
+    .map((p) => ({
+      id: p.id,
+      name: p.name,
+      address: p.address,
+      pickupDays: p.pickup_days || [],
+      pickupFrequency: p.pickup_frequency || 'weekly',
+      createdAt: p.created_at,
+      customerId: p.customer_id,
+      clientName: p.customers?.name || null,
+    }))
+}
+
 // Load one route's depot, ordered stops, and the unrouted properties.
 // A route is identified by code + service_date, so each day has its own route.
 export async function loadRouteSlice(code = 'B', date = null, line = null) {

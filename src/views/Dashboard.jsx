@@ -4,7 +4,9 @@ import { hasSupabase } from '../lib/supabaseClient.js'
 import { loadCustomers, subscribeCustomers } from '../lib/customersData.js'
 import { loadInvoices, subscribeInvoices, round2 } from '../lib/invoicesData.js'
 import { loadPropertyPickups, subscribeSchedules, freqLabel } from '../lib/schedulesData.js'
-import { scheduleHitsDate, loadDayOverrides } from '../lib/routesData.js'
+import { scheduleHitsDate, loadDayOverrides, loadPendingNewProperties } from '../lib/routesData.js'
+import { updateProperty } from '../lib/customersData.js'
+import { logActivity } from '../lib/activityData.js'
 import { loadOpenRequests, subscribeOpenRequests } from '../lib/requestsData.js'
 import RequestTriage from '../components/RequestTriage.jsx'
 
@@ -37,6 +39,7 @@ export default function Dashboard({ app }) {
   const [err, setErr] = useState(null)
   const [openRequests, setOpenRequests] = useState(null) // null = still loading
   const [triageOpen, setTriageOpen] = useState(false)
+  const [pendingNew, setPendingNew] = useState([]) // new properties not yet on a route
 
   async function refresh() {
     const [c, i, s, ov] = await Promise.all([
@@ -67,8 +70,23 @@ export default function Dashboard({ app }) {
     reloadRequests()
     const unsubR = subscribeOpenRequests(reloadRequests)
     const poll = setInterval(reloadRequests, 60000)
-    return () => { clearTimeout(t); unsubC && unsubC(); unsubI && unsubI(); unsubS && unsubS(); unsubR && unsubR(); clearInterval(poll) }
+    // New properties not yet placed on any route — same poll cadence.
+    const reloadPending = () => { loadPendingNewProperties(app.activeLine).then(setPendingNew).catch(() => {}) }
+    reloadPending()
+    const pollPending = setInterval(reloadPending, 60000)
+    return () => { clearTimeout(t); unsubC && unsubC(); unsubI && unsubI(); unsubS && unsubS(); unsubR && unsubR(); clearInterval(poll); clearInterval(pollPending) }
   }, [app.activeLine])
+
+  async function rejectProperty(p) {
+    if (!window.confirm(`Reject ${p.address}?\n\nIt stays a client address but drops off every route and this list until un-paused in the client record.`)) return
+    try {
+      await updateProperty(p.id, { paused: true })
+      logActivity({ type: 'property_rejected', summary: `Rejected (paused) new property ${p.address}`, entityType: 'property', entityId: p.id })
+      setPendingNew((prev) => prev.filter((x) => x.id !== p.id))
+    } catch (e) {
+      setErr('Could not reject the property: ' + (e.message || e))
+    }
+  }
 
   const stats = useMemo(() => {
     const activeClients = customers.filter((c) => c.status === 'active').length
@@ -109,6 +127,38 @@ export default function Dashboard({ app }) {
         <RequestTriage requests={openRequests || []} onChanged={() => { loadOpenRequests().then(setOpenRequests).catch(() => {}) }} onClose={() => setTriageOpen(false)} app={app} />
       )}
 
+      {/* New properties awaiting placement — they sit here until someone
+          accepts one (it gets added to a route) or rejects it (paused). */}
+      {!loading && pendingNew.length > 0 && (
+        <div style={{ marginBottom: 16, background: '#fbf6e7', border: '1px solid #e8d79a', borderRadius: 12, padding: '13px 16px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+            <div style={{ width: 30, height: 30, borderRadius: 8, background: '#f6ebc8', color: '#8a6d1e', display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 'none', fontWeight: 700 }}>🏠</div>
+            <div style={{ flex: 1, fontSize: 13, color: '#6d5711', lineHeight: 1.4 }}>
+              <b>{pendingNew.length} new propert{pendingNew.length === 1 ? 'y' : 'ies'} awaiting placement</b> — added in the last 30 days and not on any route yet.
+            </div>
+          </div>
+          {pendingNew.map((p) => {
+            const age = Math.max(0, Math.floor((Date.now() - new Date(p.createdAt).getTime()) / 86400000))
+            return (
+              <div key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderTop: '1px solid #efe3ba', flexWrap: 'wrap' }}>
+                <div style={{ flex: 1, minWidth: 220 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
+                    <span style={{ fontWeight: 700, fontSize: 13 }}>{p.address}</span>
+                    <span style={{ fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#8a6d1e', background: '#f6ebc8', border: '1px solid #e8d79a', padding: '1px 5px', borderRadius: 4 }}>★ NEW</span>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: '#9a8b4e', marginTop: 2 }}>
+                    {p.clientName || '—'} · {(p.pickupDays || []).map((d) => cap(d.slice(0, 3))).join(' & ') || 'no days set'} {p.pickupFrequency ? `(${freqLabel(p.pickupFrequency)})` : ''} · added {age === 0 ? 'today' : age + 'd ago'}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 7 }}>
+                  <button onClick={() => go('routes')} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 8, padding: '7px 13px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Accept → Routes</button>
+                  <button onClick={() => rejectProperty(p)} style={{ background: '#fff', color: '#8a6d1e', border: '1px solid #e8d79a', borderRadius: 8, padding: '7px 13px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>✕ Reject</button>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
       {loading && <div style={empty}>Loading dashboard…</div>}
 
       {!loading && !hasAnything && (
