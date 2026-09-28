@@ -229,9 +229,15 @@ async function sendSms(to: string, body: string, customerId?: string | null, pur
   // contacted (Telnyx included) and leave an audit row. The response carries no
   // `error` key on purpose — server-to-server callers (notify-*, automations)
   // treat `error` as fatal; they read `paused` instead and degrade to email.
-  if (settings.sms_paused) {
+  //
+  // Owner rule (2026-09-28): while client texting is paused, STAFF/ADMIN
+  // alerts still go out — new properties, portal requests, payment events.
+  // Deliberately narrow: anything customer-facing (arrival, complete,
+  // reminder, invoice, Randy replies, even manual texts) stays paused.
+  const PAUSE_EXEMPT_PURPOSES = new Set(["staff_alert", "portal", "payments", "invoice_preview"])
+  if (settings.sms_paused && !PAUSE_EXEMPT_PURPOSES.has(String(purpose || ""))) {
     await logMessage({ direction: "out", provider: "paused", to_number: toNum, body, status: "paused", customer_id: customerId || null, ...meta })
-    return { ok: false, paused: true, message: "Texting is paused (RingCentral limit) — no SMS was sent. Emails still go out." }
+    return { ok: false, paused: true, message: "Texting is paused (client notifications off; staff alerts still flow). No SMS was sent." }
   }
 
   // Per-customer text opt-out ('No Service Notifications' flag / tag): no
