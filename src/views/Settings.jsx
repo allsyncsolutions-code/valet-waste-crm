@@ -458,7 +458,7 @@ export default function Settings({ app }) {
     setSms((s) => ({ ...s, sms_paused: next }))
     try {
       await saveSmsConfig({ sms_paused: next })
-      setSmsMsg({ type: 'ok', text: next ? 'Texting paused — automated messages go out by email only.' : 'Texting resumed.' })
+      setSmsMsg({ type: 'ok', text: next ? 'Texting paused — client texts off; staff alerts (new properties, requests, payments) still go out by text.' : 'Texting resumed.' })
     } catch (e) {
       setSms((s) => ({ ...s, sms_paused: !next }))
       setSmsMsg({ type: 'err', text: e.message || String(e) })
@@ -890,7 +890,7 @@ export default function Settings({ app }) {
         )}
         {sms.sms_paused && (
           <div style={{ background: '#faf3e2', border: '1px solid #ecd9a8', color: '#8a6414', borderRadius: 10, padding: '10px 12px', fontSize: 12.5, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{ flex: 1 }}>⏸ <b>Texting is paused</b> (RingCentral limit). Nothing sends by SMS — automated messages deliver by email only. Customer replies still come in.</span>
+            <span style={{ flex: 1 }}>⏸ <b>Texting is paused</b> (RingCentral limit). Client texts don't send — automated client messages deliver by email only. Staff alerts (new properties, requests, payments) still go out by text. Customer replies still come in.</span>
             <button type="button" onClick={toggleSmsPaused} style={{ flex: 'none', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 8, padding: '7px 13px', fontSize: 12.5, fontWeight: 700, cursor: 'pointer' }}>Resume texting</button>
           </div>
         )}
@@ -912,7 +912,7 @@ export default function Settings({ app }) {
             >
               <span style={{ position: 'absolute', top: 3, left: sms.sms_paused ? 21 : 3, width: 18, height: 18, borderRadius: '50%', background: '#fff', transition: 'left .15s' }} />
             </span>
-            <span style={{ fontSize: 13.5, fontWeight: 600 }}>Pause all outbound texts <span style={{ fontWeight: 400, color: '#7c8a82' }}>(email-only mode — RingCentral limit)</span></span>
+            <span style={{ fontSize: 13.5, fontWeight: 600 }}>Pause client texts <span style={{ fontWeight: 400, color: '#7c8a82' }}>(staff alerts still send — new properties, requests, payments)</span></span>
           </label>
 
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 11 }}>
