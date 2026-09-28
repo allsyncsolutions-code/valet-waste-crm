@@ -39,6 +39,15 @@
 //   admin_invite {customer_id}   → staff-JWT-authorized: email the client their
 //                                  7-day portal invite (save-a-card / 5th-week-
 //                                  free pitch); also texts when a phone exists
+//   signup_config                → PUBLIC (no auth): Runner.js public key/mid/env
+//                                  + company name/logo so the marketing-site
+//                                  signup page can render + brand itself
+//   public_signup {…}            → PUBLIC (no auth): full web signup — creates
+//                                  the customer + property (flagged needs_review
+//                                  so it lands in the Dashboard "awaiting
+//                                  placement" queue), optionally vaults a card
+//                                  ($0 auth, 5th-week-free pitch), texts admins.
+//                                  Honeypot field `company` must be empty.
 //
 // Secrets: SENDGRID_API_KEY (required), SENDGRID_FROM. Run Merchant credentials
 // live in app_settings (set via the `payments` function's save_credentials).
@@ -1117,6 +1126,159 @@ Deno.serve(async (req) => {
       await textAdmins(`📥 ${cust.name} requested ${kindLabel[kind]}${addrTxt} via their portal.${message ? ` "${message.slice(0, 220)}"` : ""}${photoTxt} — Trashy Randy`)
       if (reqId) await alertNewPortalRequest(String(reqId), cust.name || "A client", alertLabel[kind] || "Service request", addrTxt, `${message || (details ? newPropertySummary(details) : "(no description)")}${photoTxt}`)
       return json({ ok: true, photos_saved: photoPaths.length, photo_errors: photoErrors })
+    }
+
+    if (action === "signup_config") {
+      // Public — the marketing-site signup page needs the Runner.js config to
+      // tokenize cards and the company name/logo to brand itself. Only
+      // publishable values leave this action (same payload the portal's own
+      // setup_session hands out, minus anything requiring a client session).
+      const settings = await getSettings()
+      if (!settings.run_mid || !settings.run_public_key) return json({ error: "Signup is temporarily unavailable — please call us to start service." }, 400)
+      return json({
+        ok: true,
+        publicKey: settings.run_public_key,
+        mid: settings.run_mid,
+        env: settings.run_env || "production",
+        company_name: settings.company_name || "Valet Waste",
+        logo_url: settings.logo_url || null,
+      })
+    }
+
+    if (action === "public_signup") {
+      // Public web signup (Trashbolt-style agreement, Approve-button e-consent).
+      // Order matters: the optional card is vaulted BEFORE any row is created
+      // (a vault failure must not leave a half-created account behind — the
+      // user fixes the card and resubmits the same form).
+      const ALL_DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+      const FREQS = ["weekly", "biweekly", "monthly", "1st_3rd", "2nd_4th"]
+
+      // Honeypot: bots fill the hidden "company" field. Pretend success so the
+      // bot doesn't learn anything; create nothing.
+      if (String(body.company || "").trim()) return json({ ok: true })
+
+      const str = (v: unknown, max = 200) => String(v ?? "").trim().slice(0, max)
+      const firstName = str(body.first_name, 80)
+      const lastName = str(body.last_name, 80)
+      const phone = str(body.phone, 30)
+      const email = str(body.email, 200).toLowerCase()
+      const street = str(body.street, 200)
+      const city = str(body.city, 100)
+      const state = str(body.state, 20)
+      const zip = str(body.zip, 20)
+      const serviceDay = ALL_DAYS.includes(str(body.service_day).toLowerCase()) ? str(body.service_day).toLowerCase() : null
+      const frequency = FREQS.includes(str(body.frequency)) ? str(body.frequency) : null
+      const startDate = /^\d{4}-\d{2}-\d{2}$/.test(str(body.start_date, 10)) ? str(body.start_date, 10) : null
+      const notes = str(body.notes, 1000)
+      const ebilling = !!body.ebilling
+
+      if (!firstName || !lastName) return json({ error: "Please enter your first and last name." }, 400)
+      if (phone.replace(/\D/g, "").length < 10) return json({ error: "Please enter a valid phone number." }, 400)
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ error: "Please enter a valid email address." }, 400)
+      if (!street || !city || !state || !zip) return json({ error: "Please enter your full service address." }, 400)
+      if (!serviceDay) return json({ error: "Please pick a service day." }, 400)
+      if (!frequency) return json({ error: "Please pick a service frequency." }, 400)
+      if (!body.agreed) return json({ error: "Please review the agreement and tap Approve to start service." }, 400)
+
+      // Billing address (defaults to the service address)
+      const bSame = body.billing_same !== false
+      const bStreet = bSame ? street : str(body.billing_street, 200)
+      const bCity = bSame ? city : str(body.billing_city, 100)
+      const bState = bSame ? state : str(body.billing_state, 20)
+      const bZip = bSame ? zip : str(body.billing_zip, 20)
+      if (!bStreet || !bCity || !bState || !bZip) return json({ error: "Please enter your full billing address." }, 400)
+
+      // Optional card-on-file (5th-week-free pitch). Browser tokenizes via
+      // Runner.js; we vault here with a $0 auth, same as save_card.
+      const card = body.card && typeof body.card === "object" ? body.card as Record<string, unknown> : null
+      let vault: Record<string, unknown> | null = null
+      if (card && card.account_token) {
+        const settings = await getSettings()
+        if (!settings.run_mid) return json({ error: "Payments aren't set up yet — please skip the card and we'll bill you after your first visit." }, 400)
+        const { token: runToken, mid, env } = await runAccessToken(settings)
+        const res = await runApi(env, runToken, "charge", {
+          method: "POST",
+          body: {
+            mid,
+            amount: "0.00",
+            account_token: String(card.account_token),
+            expiration: String(card.expiration || ""),
+            capture: "N",
+            vault: "Y",
+            cof: "C",
+            cof_sched: "N",
+            cof_perm: card.consent ? "Y" : "N",
+            name: `${firstName} ${lastName}`,
+            email,
+            cvn: card.cvn ? String(card.cvn) : undefined,
+            currency: "USD",
+          },
+        })
+        if (res.result && res.result !== "A") {
+          return json({ error: `${res.resp_text || "Your card couldn't be verified."} — you were not signed up; please fix the card or choose "bill me after my first visit" and try again.`, card_declined: true })
+        }
+        vault = {
+          run_vault_id: res.vault_id ?? null,
+          run_vault_holder_id: res.vault_holder_id ?? null,
+          run_card_brand: res.card_brand || res.card_type || null,
+          run_card_last4: String(res.card_number || "").slice(-4) || null,
+          run_card_exp: String(card.expiration) || null,
+          autopay_consent: !!card.consent,
+          autopay_consented_at: card.consent ? new Date().toISOString() : null,
+        }
+      }
+
+      // Consent record — the Approve button IS the signature; keep the evidence
+      // on the customer row (timestamp + IP), like the PandaDoc signer record.
+      const ip = (req.headers.get("x-forwarded-for") || "").split(",")[0].trim()
+      const nowIso = new Date().toISOString()
+      const addr = `${street}, ${city}, ${state} ${zip}`
+      const billAddr = bSame ? addr : `${bStreet}, ${bCity}, ${bState} ${bZip}`
+      const name = `${firstName} ${lastName}`
+      const consentNote = `Web signup agreement approved ${nowIso}${ip ? ` (IP ${ip})` : ""} — service day ${serviceDay}, ${frequency}.`
+      const noteParts = [consentNote]
+      if (!bSame) noteParts.push(`Billing address: ${billAddr}`)
+      if (ebilling) noteParts.push("Enrolled in e-billing.")
+      if (notes) noteParts.push(`Service notes: ${notes}`)
+      if (!vault) noteParts.push("No card on file — bill after first visit.")
+
+      const inserted = await sbPost("customers", {
+        name,
+        email,
+        phone,
+        address: billAddr,
+        status: "active",
+        business_line: "waste",
+        billing_type: "subscription",
+        notes: noteParts.join("\n"),
+        ...(vault || {}),
+      })
+      const custId = inserted?.[0]?.id
+      if (!custId) return json({ error: "Signup could not be saved — please call us to start service." }, 500)
+
+      const prop = await sbPost("properties", {
+        customer_id: custId,
+        name: `${name} — ${street}`,
+        address: addr,
+        service: "Trash",
+        notes: notes || null,
+        pickup_days: [serviceDay],
+        pickup_frequency: frequency,
+        pickup_start_date: startDate,
+        needs_review: true,
+        business_line: "waste",
+        paused: false,
+      })
+
+      // Admins get a text (staff_alert path — unaffected by the client-texting
+      // pause). The property itself lands in the Dashboard "awaiting placement"
+      // queue + ★ NEW badge until staff slot it onto a route.
+      const cardTxt = vault?.run_card_last4 ? ` Card on file ${String(vault.run_card_brand || "card").toUpperCase()} ••${vault.run_card_last4} (5th week free).` : " No card on file — bill after first visit."
+      const startTxt = startDate ? ` starting ${startDate}` : ""
+      const noteTxt = notes ? ` Notes: "${notes.slice(0, 160)}"` : ""
+      await textAdmins(`🌐 New web signup: ${name} @ ${addr} — ${serviceDay} ${frequency}${startTxt}.${cardTxt}${noteTxt} — Trashy Randy`)
+
+      return json({ ok: true, customer_id: custId, property_id: prop?.[0]?.id || null, card_saved: !!vault })
     }
 
     return json({ error: "Unknown action." }, 400)
