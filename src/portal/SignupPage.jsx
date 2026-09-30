@@ -19,10 +19,11 @@ const FREQS = [
 const FREQ_LABEL = { weekly: 'Weekly', biweekly: 'Every 2 weeks', monthly: 'Monthly' }
 
 // ---------------------------------------------------------------------------
-// PRICING — TODO: the team hasn't set rates yet. When they land, fill in
-// price (number) per line and set TOTAL_LABEL; the review step renders them.
-// Until then the form shows "confirmed before your first visit" and takes
-// no payment today (card on file is vaulted only — charged later by staff).
+// FALLBACK pricing — real pricing lives in each web form's config, edited in
+// the CRM's Web Forms tab (public page is /?signup=<slug>). These built-ins
+// only render when the form has no line items of its own. No rates yet =
+// "Confirmed before your first visit" and no money moves today (a saved card
+// is vaulted only, charged later through normal invoicing).
 const LINE_ITEMS = [
   { description: 'Valet trash service', price: null },
 ]
@@ -44,7 +45,10 @@ const inp = { width: '100%', padding: '11px 13px', borderRadius: 10, border: '1.
 const label = { display: 'block', fontSize: 12.5, fontWeight: 700, color: '#4c5a51', margin: '0 0 5px' }
 const card = { background: '#fff', borderRadius: 14, padding: '18px 16px', boxShadow: '0 1px 4px rgba(20,30,24,.08)', marginBottom: 14 }
 
-export default function SignupPage() {
+export default function SignupPage({ slug } = {}) {
+  // ?signup=1 (or bare ?signup) is the default form; ?signup=<slug> renders the
+  // matching web_forms row (edited in the CRM's Web Forms tab).
+  const formSlug = !slug || slug === '1' ? 'default' : String(slug).slice(0, 60)
   const [cfg, setCfg] = useState(null)
   const [cfgErr, setCfgErr] = useState('')
   const [step, setStep] = useState(1)
@@ -87,7 +91,7 @@ export default function SignupPage() {
 
   useEffect(() => {
     let cancelled = false
-    signupApi({ action: 'signup_config' })
+    signupApi({ action: 'signup_config', slug: formSlug })
       .then((c) => { if (!cancelled) setCfg(c) })
       .catch((e) => { if (!cancelled) setCfgErr(e.message || String(e)) })
     return () => { cancelled = true }
@@ -149,6 +153,7 @@ export default function SignupPage() {
       }
       const res = await signupApi({
         action: 'public_signup',
+        slug: formSlug,
         first_name: firstName, last_name: lastName, phone, email,
         street, city, state: stateVal, zip,
         billing_same: billingSame,
@@ -170,6 +175,13 @@ export default function SignupPage() {
   }
 
   const companyName = cfg?.company_name || 'Valet Waste'
+  const form = cfg?.form || null
+  const intro = form?.intro || 'Residential valet trash signup'
+  // Line items / terms come from the web form config when present, else the
+  // built-in placeholders (LINE_ITEMS/TOTAL_LABEL/terms below).
+  const lineItems = form && form.line_items?.length ? form.line_items : LINE_ITEMS
+  const totalLabel = form ? form.total_label : TOTAL_LABEL
+  const termsText = form?.terms || 'By tapping Approve you agree to start valet trash service at the address above on the schedule shown, to monthly billing, and — if you saved a card — that it may be charged for service. We’ll text you to confirm your exact start date before your first visit.'
 
   const shell = (inner) => (
     <div style={{ minHeight: '100vh', background: '#f2f5f2', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', color: '#1c2620' }}>
@@ -182,7 +194,7 @@ export default function SignupPage() {
           )}
           <div>
             <div style={{ fontSize: 16.5, fontWeight: 800 }}>{companyName}</div>
-            <div style={{ fontSize: 12.5, color: '#66766c' }}>Residential valet trash signup</div>
+            <div style={{ fontSize: 12.5, color: '#66766c' }}>{form?.name || intro}</div>
           </div>
         </div>
         {inner}
@@ -195,6 +207,13 @@ export default function SignupPage() {
     <div style={card}>
       <div style={{ fontWeight: 700, marginBottom: 6 }}>Signup is temporarily unavailable</div>
       <div style={{ fontSize: 14, color: '#4c5a51', lineHeight: 1.5 }}>{cfgErr}</div>
+    </div>
+  )
+
+  if (cfg && !form) return shell(
+    <div style={card}>
+      <div style={{ fontWeight: 700, marginBottom: 6 }}>This signup form is no longer available</div>
+      <div style={{ fontSize: 14, color: '#4c5a51', lineHeight: 1.5 }}>Please call or text us and we'll get you signed up right away.</div>
     </div>
   )
 
@@ -346,16 +365,16 @@ export default function SignupPage() {
             {notes && <><br />Notes: {notes}</>}
           </div>
           <div style={{ borderTop: '1px dashed #d5dcd6', paddingTop: 12, marginBottom: 12 }}>
-            {LINE_ITEMS.map((li, i) => (
-              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, marginBottom: 6 }}>
+            {lineItems.map((li, i) => (
+              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, marginBottom: 6, gap: 12 }}>
                 <span>{li.description}</span>
-                <span style={{ fontWeight: 700 }}>{li.price != null ? `$${Number(li.price).toFixed(2)}` : 'Confirmed before your first visit'}</span>
+                <span style={{ fontWeight: 700, textAlign: 'right', whiteSpace: 'nowrap' }}>{li.price != null ? `$${Number(li.price).toFixed(2)}` : 'Confirmed before your first visit'}</span>
               </div>
             ))}
-            {TOTAL_LABEL && <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, fontWeight: 800, borderTop: '1px solid #e4e9e4', paddingTop: 8, marginTop: 4 }}><span>Total</span><span>{TOTAL_LABEL}</span></div>}
+            {totalLabel && <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, fontWeight: 800, borderTop: '1px solid #e4e9e4', paddingTop: 8, marginTop: 4 }}><span>Total</span><span>{totalLabel}</span></div>}
           </div>
           <div style={{ background: '#f7f9f7', borderRadius: 10, padding: '11px 13px', fontSize: 12.5, color: '#4c5a51', lineHeight: 1.55, marginBottom: 14 }}>
-            By tapping <b>Approve</b> you agree to start valet trash service at the address above on the schedule shown, to monthly billing, and — if you saved a card — that it may be charged for service. We’ll text you to confirm your exact start date before your first visit.
+            {termsText}
           </div>
           {/* Honeypot — invisible to humans, bots fill it and get silently dropped */}
           <input type="text" value={company} onChange={(e) => setCompany(e.target.value)} autoComplete="off" tabIndex={-1} aria-hidden="true" style={{ position: 'absolute', left: -9999, opacity: 0, height: 0 }} />
