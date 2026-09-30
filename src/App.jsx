@@ -17,6 +17,7 @@ import EmployeePay from './views/EmployeePay.jsx'
 import MyDay from './views/MyDay.jsx'
 import TimeSheets from './views/TimeSheets.jsx'
 import Portal from './views/Portal.jsx'
+import WebForms from './views/WebForms.jsx'
 import AiDock from './AiDock.jsx'
 
 // Tabs not yet wired to Supabase show a clean placeholder (no sample data).
@@ -42,6 +43,7 @@ const NAV_FIELD = [
   { id: 'drivers', glyph: '⛟', label: 'Drivers & Field' },
   { id: 'team', glyph: '⚇', label: 'Team' },
   { id: 'portal', glyph: '◫', label: 'Client Portal' },
+  { id: 'webforms', glyph: '⇪', label: 'Web Forms' },
   { id: 'settings', glyph: '⚙', label: 'Settings' },
 ]
 const BOTTOM_NAV = [
@@ -221,6 +223,7 @@ export default function App({ user, onSignOut }) {
     timesheets: ['Time Sheets & Payroll', 'Your hours, jobs, and pay — weekly and monthly'],
     team: ['Team', 'Members and their business-line assignments'],
     portal: ['Client Portal', 'Search a client to preview their portal, copy their link, or send a quote'],
+    webforms: ['Web Forms', 'Public signup pages — edit, share by link, or embed on a website'],
     settings: ['Settings', 'Manage tags and configuration'],
     automations: ['Automations', 'Scheduled jobs Trashy Randy runs — plus his suggestions awaiting approval'],
     employees: ['Employees', 'Lawn jobs, per-job pay, overrides, and timesheets (Sun–Sat)'],
@@ -314,6 +317,7 @@ export default function App({ user, onSignOut }) {
     myday: <MyDay app={app} />,
     timesheets: <TimeSheets app={app} />,
     portal: <Portal app={app} />,
+    webforms: <WebForms app={app} />,
     team: <Team app={app} />,
     settings: <Settings app={app} />,
     automations: <Automations app={app} />,

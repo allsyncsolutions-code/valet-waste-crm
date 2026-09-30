@@ -39,10 +39,13 @@
 //   admin_invite {customer_id}   → staff-JWT-authorized: email the client their
 //                                  7-day portal invite (save-a-card / 5th-week-
 //                                  free pitch); also texts when a phone exists
-//   signup_config                → PUBLIC (no auth): Runner.js public key/mid/env
+//   signup_config {slug?}        → PUBLIC (no auth): Runner.js public key/mid/env
 //                                  + company name/logo so the marketing-site
-//                                  signup page can render + brand itself
-//   public_signup {…}            → PUBLIC (no auth): full web signup — creates
+//                                  signup page can render + brand itself. Also
+//                                  returns the web_forms row for the slug
+//                                  (intro / line items / pricing / terms),
+//                                  or form:null when it's missing or inactive
+//   public_signup {…, slug?}     → PUBLIC (no auth): full web signup — creates
 //                                  the customer + property (flagged needs_review
 //                                  so it lands in the Dashboard "awaiting
 //                                  placement" queue), optionally vaults a card
@@ -625,6 +628,42 @@ async function portalData(cust: any) {
   }
 }
 
+// ---- Web forms (staff-managed public signup pages, mig 0061) --------------------
+// Only presentation-safe fields leave these helpers — the public page renders
+// exactly what sanitizeFormConfig returns, never the raw config jsonb.
+type SignupForm = {
+  slug: string
+  name: string
+  active: boolean
+  intro: string | null
+  line_items: { description: string; price: number | null }[]
+  total_label: string | null
+  terms: string | null
+}
+function sanitizeFormConfig(row: any): SignupForm {
+  const c = row?.config && typeof row.config === "object" ? row.config : {}
+  const lineItems = (Array.isArray(c.line_items) ? c.line_items : [])
+    .slice(0, 10)
+    .map((li: any) => ({
+      description: String(li?.description ?? "").trim().slice(0, 140),
+      price: typeof li?.price === "number" && isFinite(li.price) && li.price >= 0 ? Math.round(li.price * 100) / 100 : null,
+    }))
+    .filter((li: { description: string }) => li.description)
+  return {
+    slug: String(row.slug),
+    name: String(row.name || "Sign up").slice(0, 120),
+    active: !!row.active,
+    intro: String(c.intro || "").trim().slice(0, 400) || null,
+    line_items: lineItems,
+    total_label: String(c.total_label || "").trim().slice(0, 40) || null,
+    terms: String(c.terms || "").trim().slice(0, 2000) || null,
+  }
+}
+async function loadSignupForm(slug: string): Promise<SignupForm | null> {
+  const rows = await sbGet(`web_forms?slug=eq.${enc(slug)}&select=slug,name,active,config&limit=1`)
+  return rows[0] ? sanitizeFormConfig(rows[0]) : null
+}
+
 // ---- HTTP entry -----------------------------------------------------------------
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS })
@@ -1133,8 +1172,12 @@ Deno.serve(async (req) => {
       // tokenize cards and the company name/logo to brand itself. Only
       // publishable values leave this action (same payload the portal's own
       // setup_session hands out, minus anything requiring a client session).
+      // Pass slug to get that web form's intro/pricing/terms; unknown or
+      // inactive slugs return form:null and the page shows "unavailable".
+      const slug = String(body.slug || "default").trim().slice(0, 60) || "default"
       const settings = await getSettings()
       if (!settings.run_mid || !settings.run_public_key) return json({ error: "Signup is temporarily unavailable — please call us to start service." }, 400)
+      const form = await loadSignupForm(slug)
       return json({
         ok: true,
         publicKey: settings.run_public_key,
@@ -1142,6 +1185,7 @@ Deno.serve(async (req) => {
         env: settings.run_env || "production",
         company_name: settings.company_name || "Valet Waste",
         logo_url: settings.logo_url || null,
+        form: form && form.active ? form : null,
       })
     }
 
@@ -1156,6 +1200,12 @@ Deno.serve(async (req) => {
       // Honeypot: bots fill the hidden "company" field. Pretend success so the
       // bot doesn't learn anything; create nothing.
       if (String(body.company || "").trim()) return json({ ok: true })
+
+      // The web form this came from must exist and be active (an inactive form
+      // must never accept signups — staff unpublished it for a reason).
+      const slug = String(body.slug || "default").trim().slice(0, 60) || "default"
+      const form = await loadSignupForm(slug)
+      if (!form || !form.active) return json({ error: "This signup form is no longer available — please call us to start service." }, 400)
 
       const str = (v: unknown, max = 200) => String(v ?? "").trim().slice(0, max)
       const firstName = str(body.first_name, 80)
@@ -1235,7 +1285,7 @@ Deno.serve(async (req) => {
       const addr = `${street}, ${city}, ${state} ${zip}`
       const billAddr = bSame ? addr : `${bStreet}, ${bCity}, ${bState} ${bZip}`
       const name = `${firstName} ${lastName}`
-      const consentNote = `Web signup agreement approved ${nowIso}${ip ? ` (IP ${ip})` : ""} — service day ${serviceDay}, ${frequency}.`
+      const consentNote = `Web signup agreement approved ${nowIso}${ip ? ` (IP ${ip})` : ""} — service day ${serviceDay}, ${frequency}. Form: ${form.name} (${slug}).`
       const noteParts = [consentNote]
       if (!bSame) noteParts.push(`Billing address: ${billAddr}`)
       if (ebilling) noteParts.push("Enrolled in e-billing.")
@@ -1276,7 +1326,7 @@ Deno.serve(async (req) => {
       const cardTxt = vault?.run_card_last4 ? ` Card on file ${String(vault.run_card_brand || "card").toUpperCase()} ••${vault.run_card_last4} (5th week free).` : " No card on file — bill after first visit."
       const startTxt = startDate ? ` starting ${startDate}` : ""
       const noteTxt = notes ? ` Notes: "${notes.slice(0, 160)}"` : ""
-      await textAdmins(`🌐 New web signup: ${name} @ ${addr} — ${serviceDay} ${frequency}${startTxt}.${cardTxt}${noteTxt} — Trashy Randy`)
+      await textAdmins(`🌐 New web signup (${form.name}): ${name} @ ${addr} — ${serviceDay} ${frequency}${startTxt}.${cardTxt}${noteTxt} — Trashy Randy`)
 
       return json({ ok: true, customer_id: custId, property_id: prop?.[0]?.id || null, card_saved: !!vault })
     }

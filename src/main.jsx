@@ -30,7 +30,7 @@ createRoot(document.getElementById('root')).render(
     ) : portalSlug || shareToken ? (
       <PortalPage slug={portalSlug} code={params.get('code')} shareToken={shareToken} />
     ) : publicSignup ? (
-      <SignupPage />
+      <SignupPage slug={params.get('signup')} />
     ) : clientLogin ? (
       <PortalPage publicLogin />
     ) : (
