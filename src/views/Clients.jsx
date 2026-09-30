@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { MONO } from '../data.js'
 import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, addProperty, updateProperty, savePin, loadPropertyArchive, loadPropertyAddressIndex, countDuplicateProperties, findDuplicateProperties, mergeDuplicateGroup, loadPropertiesByIds, countPropertiesByCustomer, deleteProperty, sendPortalInvite, loadClientFieldActivity, loadClientPortalRequests, loadClientNotes, addClientNote, deleteClientNote, loadPropertyMatchIndex } from '../lib/customersData.js'
 import { findClientDuplicates } from '../lib/duplicateCheck.js'
+import { LEAD_SOURCES, leadSourceLabel } from '../lib/leadSources.js'
 import PinPicker from '../components/PinPicker.jsx'
 import { geocodeAll } from '../lib/importData.js'
 import { listTags, findOrCreateTag, subscribeTags } from '../lib/tagsData.js'
@@ -45,6 +46,7 @@ const fmtTime = (ts) => { try { return new Date(ts).toLocaleTimeString(undefined
 
 const BLANK = {
   name: '', address: '', contactName: '', email: '', phone: '', contactPhone: '', status: 'active', notes: '', billingType: 'subscription',
+  leadSource: '',
   notifyOnService: null, // null=auto (single-property only), true=always, false=never
   service: '', frequency: 'weekly', dayOfWeek: 'monday',
   cadence: 'monthly', amount: '',
@@ -615,6 +617,7 @@ export default function Clients({ app }) {
       name: cur.name || '', address: cur.address || '', contactName: cur.contactName || '', contactPhone: cur.contactPhone || '',
       email: cur.email || '', phone: cur.phone || '', status: cur.status || 'active', notes: cur.notes || '',
       billingType: cur.billingType || 'subscription',
+      leadSource: cur.leadSource || '',
       notifyOnService: cur.notifyOnService ?? null,
       service: cur.pickup?.service || '', frequency: cur.pickup?.frequency || 'weekly',
       dayOfWeek: cur.pickup?.dayOfWeek || 'monday',
@@ -646,6 +649,7 @@ export default function Clients({ app }) {
       status: form.status,
       notes: form.notes.trim(),
       billingType: form.billingType || 'subscription',
+      leadSource: form.leadSource || null,
       notifyOnService: form.notifyOnService ?? null,
       pickup: { service: form.service.trim(), frequency: form.frequency, dayOfWeek: null },
       invoice: { cadence: form.cadence, amount: form.amount === '' ? null : Number(form.amount) },
@@ -823,6 +827,9 @@ export default function Clients({ app }) {
                     {cur.name}
                     {(cur.billingType || 'subscription') === 'one_time' && (
                       <span title="Single-payment / on-demand client" style={{ fontFamily: MONO, fontSize: 10.5, fontWeight: 700, color: '#155e9c', background: '#e8f0fa', padding: '3px 9px', borderRadius: 7, letterSpacing: '.03em' }}>1× SINGLE PAYMENT</span>
+                    )}
+                    {cur.leadSource && (
+                      <span title="Lead source" style={{ fontFamily: MONO, fontSize: 10.5, fontWeight: 700, color: '#6d5711', background: '#fbf6e7', padding: '3px 9px', borderRadius: 7, letterSpacing: '.03em' }}>➤ {leadSourceLabel(cur.leadSource).toUpperCase()}</span>
                     )}
                     {cur.autopay?.saved && (
                       <span title="This client has a saved payment method — invoices are charged automatically and 5th-week-free applies" style={{ fontFamily: MONO, fontSize: 10.5, fontWeight: 700, color: '#1f7a4d', background: '#e7f1eb', padding: '3px 9px', borderRadius: 7, letterSpacing: '.03em' }}>
@@ -1342,6 +1349,12 @@ export default function Clients({ app }) {
               <select value={form.billingType} onChange={(e) => set({ billingType: e.target.value })} style={inp}>
                 <option value="subscription">Subscription — recurring service</option>
                 <option value="one_time">Single payment — one-time / on-demand</option>
+              </select>
+            </Field>
+            <Field label="Lead source">
+              <select value={form.leadSource} onChange={(e) => set({ leadSource: e.target.value })} style={inp}>
+                <option value="">Not set</option>
+                {LEAD_SOURCES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
               </select>
             </Field>
             <div style={twoCol}>

@@ -24,6 +24,7 @@ function mapCustomer(row) {
     portal_slug: row.portal_slug || null,
     business_line: row.business_line || 'waste',
     billingType: row.billing_type || 'subscription', // subscription | one_time
+    leadSource: row.lead_source || null,
     autopay: {
       saved: !!row.run_vault_id,
       brand: row.run_card_brand || null,
@@ -64,6 +65,7 @@ export async function createClient(payload) {
       notes: payload.notes || null,
       business_line: payload.businessLine || 'waste',
       billing_type: payload.billingType || 'subscription',
+      lead_source: payload.leadSource || null,
       notify_on_service: payload.notifyOnService ?? null,
     })
     .select('*')
@@ -108,6 +110,7 @@ export async function updateCustomer(id, payload) {
       status: payload.status || 'active',
       notes: payload.notes || null,
       billing_type: payload.billingType || 'subscription',
+      lead_source: payload.leadSource || null,
       notify_on_service: payload.notifyOnService ?? null,
     })
     .eq('id', id)

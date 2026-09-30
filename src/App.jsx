@@ -18,6 +18,7 @@ import MyDay from './views/MyDay.jsx'
 import TimeSheets from './views/TimeSheets.jsx'
 import Portal from './views/Portal.jsx'
 import WebForms from './views/WebForms.jsx'
+import Reports from './views/Reports.jsx'
 import AiDock from './AiDock.jsx'
 
 // Tabs not yet wired to Supabase show a clean placeholder (no sample data).
@@ -36,6 +37,7 @@ const NAV_MAIN = [
   { id: 'routes', glyph: '◔', label: 'Routes & Dispatch' },
   { id: 'schedule', glyph: '▤', label: 'Schedules' },
   { id: 'invoices', glyph: '$', label: 'Invoicing' },
+  { id: 'reports', glyph: '∑', label: 'Reports' },
 ]
 const NAV_FIELD = [
   { id: 'clients', glyph: '◎', label: 'Clients' },
@@ -217,6 +219,7 @@ export default function App({ user, onSignOut }) {
     routes: ['Routes & Dispatch', 'Plan routes + live field board — check-ins, photos, skips'],
     schedule: isJunk ? ['Job Calendar', 'One-time junk jobs — click a day to schedule'] : ['Recurring Schedules', 'Set pickup cadence — nth weekday, alternating weeks'],
     invoices: ['Invoicing', 'Per-stop line items · monthly batch billing'],
+    reports: ['Reports', 'Where your customers come from — lead source breakdown'],
     clients: ['Clients', 'Add and manage your customers'],
     drivers: ['Drivers & Field', 'Check-in / check-out, photos and GPS'],
     myday: ['My Day', 'Your jobs — on my way, clock in, complete, photos'],
@@ -312,6 +315,7 @@ export default function App({ user, onSignOut }) {
     routes: <RoutesView app={app} />,
     schedule: isJunk ? <JobCalendar app={app} line="junk" accent={activeLineObj.color} /> : <Schedule app={app} />,
     invoices: <Invoices app={app} />,
+    reports: <Reports app={app} />,
     clients: <Clients app={app} />,
     drivers: <Drivers app={app} />,
     myday: <MyDay app={app} />,

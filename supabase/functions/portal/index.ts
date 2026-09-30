@@ -1317,6 +1317,7 @@ Deno.serve(async (req) => {
         status: "active",
         business_line: "waste",
         billing_type: scheduleType === "on_call" ? "one_time" : "subscription",
+        lead_source: "web_form",
         notes: noteParts.join("\n"),
         ...(vault || {}),
       })
