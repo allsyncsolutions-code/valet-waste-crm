@@ -1,9 +1,11 @@
 // Public web signup — the Trashbolt-style agreement page for the marketing
-// website (…/?signup=1). No login: contact + address → service day/frequency →
-// optional card on file (5th-week-free pitch, Runner.js tokenization) →
-// review + "Approve" (the button IS the e-signature; the edge fn records the
-// timestamp + IP). Creates the customer + property (flagged needs_review so
-// it lands in the Dashboard "awaiting placement" queue) and texts admins.
+// website (…/?signup=<slug>). No login: contact + address → pickup schedule
+// (1 or 2 pickups/week, or On-Demand) → optional card on file (5th-week-free
+// pitch, Runner.js tokenization) → review + "Approve" (the button IS the
+// e-signature; the edge fn records the timestamp + IP). Pricing comes from
+// the web form config (CRM → Web Forms tab). Creates the customer + property
+// (flagged needs_review so it lands in the Dashboard "awaiting placement"
+// queue) and texts admins.
 import { useEffect, useRef, useState } from 'react'
 import { supabase } from '../lib/supabaseClient.js'
 import { loadRunner, tokenizeCard } from '../lib/runnerJs.js'
@@ -11,12 +13,8 @@ import { loadRunner, tokenizeCard } from '../lib/runnerJs.js'
 const GREEN = '#1f7a4d'
 const DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
 const DAY_LABEL = { monday: 'Mon', tuesday: 'Tue', wednesday: 'Wed', thursday: 'Thu', friday: 'Fri', saturday: 'Sat', sunday: 'Sun' }
-const FREQS = [
-  { value: 'weekly', label: 'Weekly' },
-  { value: 'biweekly', label: 'Every 2 weeks' },
-  { value: 'monthly', label: 'Monthly' },
-]
-const FREQ_LABEL = { weekly: 'Weekly', biweekly: 'Every 2 weeks', monthly: 'Monthly' }
+const DEFAULT_ON_DEMAND_NOTE = 'Varies by location and date requested — we’ll reach out after you submit.'
+const money = (v) => `$${Number(v).toFixed(2)}`
 
 // ---------------------------------------------------------------------------
 // FALLBACK pricing — real pricing lives in each web form's config, edited in
@@ -72,8 +70,9 @@ export default function SignupPage({ slug } = {}) {
   const [bZip, setBZip] = useState('')
   const [ebilling, setEbilling] = useState(true)
   // Step 2 — service
-  const [serviceDay, setServiceDay] = useState('monday')
-  const [frequency, setFrequency] = useState('weekly')
+  const [scheduleType, setScheduleType] = useState('weekly') // 'weekly' | 'on_call'
+  const [pickupsPerWeek, setPickupsPerWeek] = useState(1) // 1 | 2
+  const [serviceDays, setServiceDays] = useState([])
   const [startDate, setStartDate] = useState('')
   const [notes, setNotes] = useState('')
   // Step 3 — payment
@@ -159,7 +158,10 @@ export default function SignupPage({ slug } = {}) {
         billing_same: billingSame,
         billing_street: bStreet, billing_city: bCity, billing_state: bState, billing_zip: bZip,
         ebilling,
-        service_day: serviceDay, frequency, start_date: startDate || null, notes,
+        schedule_type: scheduleType,
+        pickups_per_week: scheduleType === 'weekly' ? pickupsPerWeek : 0,
+        service_days: scheduleType === 'weekly' ? serviceDays : [],
+        start_date: startDate || null, notes,
         card,
         agreed: true,
         company,
@@ -182,6 +184,22 @@ export default function SignupPage({ slug } = {}) {
   const lineItems = form && form.line_items?.length ? form.line_items : LINE_ITEMS
   const totalLabel = form ? form.total_label : TOTAL_LABEL
   const termsText = form?.terms || 'By tapping Approve you agree to start valet trash service at the address above on the schedule shown, to monthly billing, and — if you saved a card — that it may be charged for service. We’ll text you to confirm your exact start date before your first visit.'
+  const pricing = form?.pricing || {}
+  const price1 = pricing.one_pickup
+  const price2 = pricing.two_pickup
+  const onDemandNote = pricing.on_demand_note || DEFAULT_ON_DEMAND_NOTE
+  const selectedPrice = scheduleType === 'on_call' ? null : (pickupsPerWeek === 2 ? price2 : price1)
+  const scheduleSummary = scheduleType === 'on_call'
+    ? `On-Demand — ${onDemandNote}`
+    : `${serviceDays.map((d) => DAY_LABEL[d]).join(' + ')} — ${pickupsPerWeek} pickup${pickupsPerWeek > 1 ? 's' : ''}/ week${selectedPrice != null ? `, ${money(selectedPrice)}/wk` : ''}`
+
+  function toggleDay(d) {
+    setServiceDays((cur) => {
+      if (cur.includes(d)) return cur.filter((x) => x !== d)
+      const next = [...cur, d]
+      return next.slice(-pickupsPerWeek) // keep at most the picked count
+    })
+  }
 
   const shell = (inner) => (
     <div style={{ minHeight: '100vh', background: '#f2f5f2', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', color: '#1c2620' }}>
@@ -222,8 +240,8 @@ export default function SignupPage({ slug } = {}) {
       <div style={{ fontSize: 40, marginBottom: 8 }}>🎉</div>
       <div style={{ fontSize: 19, fontWeight: 800, marginBottom: 8 }}>You're approved — welcome aboard!</div>
       <div style={{ fontSize: 14, color: '#4c5a51', lineHeight: 1.6 }}>
-        We got your signup for <b>{street}, {city}</b> — <b>{DAY_LABEL[serviceDay]}days</b>, {FREQ_LABEL[frequency].toLowerCase()}.
-        We'll text you at <b>{phone}</b> to confirm your exact start date before your first visit.
+        We got your signup for <b>{street}, {city}</b> — <b>{scheduleSummary}</b>.
+        We'll text you at <b>{phone}</b> to confirm your {scheduleType === 'on_call' ? 'pickup' : 'start date'} before your first visit.
         {done.cardSaved
           ? <span><br />Your card is on file — your <b>5th week is free</b>.</span>
           : <span><br />No card on file yet — we'll bill you after your first visit.</span>}
@@ -299,25 +317,49 @@ export default function SignupPage({ slug } = {}) {
 
       {step === 2 && (
         <div style={card}>
-          {stepTitle('Pickup schedule', 'Pick your service day and how often — you can change it later.')}
-          <label style={label}>Service day</label>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 5, marginBottom: 14 }}>
-            {DAYS.map((d) => (
-              <button key={d} type="button" onClick={() => setServiceDay(d)} style={{ padding: '10px 0', borderRadius: 9, border: '1.5px solid', fontSize: 12.5, fontWeight: 700, cursor: 'pointer', background: serviceDay === d ? GREEN : '#fff', color: serviceDay === d ? '#fff' : '#4c5a51', borderColor: serviceDay === d ? GREEN : '#d5dcd6' }}>{DAY_LABEL[d]}</button>
-            ))}
+          {stepTitle('Pickup schedule', 'Weekly valet trash service, or On-Demand when you need us.')}
+          <label style={label}>How often?</label>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 14 }}>
+            <button type="button" onClick={() => { setScheduleType('weekly'); setPickupsPerWeek(1) }} style={{ padding: '12px 6px', borderRadius: 10, border: '1.5px solid', fontSize: 13.5, fontWeight: 700, cursor: 'pointer', background: scheduleType === 'weekly' && pickupsPerWeek === 1 ? GREEN : '#fff', color: scheduleType === 'weekly' && pickupsPerWeek === 1 ? '#fff' : '#4c5a51', borderColor: scheduleType === 'weekly' && pickupsPerWeek === 1 ? GREEN : '#d5dcd6', lineHeight: 1.3 }}>
+              1 pickup / week<br /><span style={{ fontSize: 12, fontWeight: 600, opacity: 0.9 }}>{price1 != null ? `${money(price1)}/wk` : 'weekly'}</span>
+            </button>
+            <button type="button" onClick={() => { setScheduleType('weekly'); setPickupsPerWeek(2) }} style={{ padding: '12px 6px', borderRadius: 10, border: '1.5px solid', fontSize: 13.5, fontWeight: 700, cursor: 'pointer', background: scheduleType === 'weekly' && pickupsPerWeek === 2 ? GREEN : '#fff', color: scheduleType === 'weekly' && pickupsPerWeek === 2 ? '#fff' : '#4c5a51', borderColor: scheduleType === 'weekly' && pickupsPerWeek === 2 ? GREEN : '#d5dcd6', lineHeight: 1.3 }}>
+              2 pickups / week<br /><span style={{ fontSize: 12, fontWeight: 600, opacity: 0.9 }}>{price2 != null ? `${money(price2)}/wk` : 'weekly'}</span>
+            </button>
+            <button type="button" onClick={() => { setScheduleType('on_call'); setErr('') }} style={{ padding: '12px 6px', borderRadius: 10, border: '1.5px solid', fontSize: 13.5, fontWeight: 700, cursor: 'pointer', background: scheduleType === 'on_call' ? GREEN : '#fff', color: scheduleType === 'on_call' ? '#fff' : '#4c5a51', borderColor: scheduleType === 'on_call' ? GREEN : '#d5dcd6', lineHeight: 1.3 }}>
+              On-Demand<br /><span style={{ fontSize: 12, fontWeight: 600, opacity: 0.9 }}>price varies</span>
+            </button>
           </div>
-          <label style={label}>Frequency</label>
-          <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
-            {FREQS.map((f) => (
-              <button key={f.value} type="button" onClick={() => setFrequency(f.value)} style={{ flex: 1, padding: '11px 0', borderRadius: 10, border: '1.5px solid', fontSize: 13.5, fontWeight: 700, cursor: 'pointer', background: frequency === f.value ? GREEN : '#fff', color: frequency === f.value ? '#fff' : '#4c5a51', borderColor: frequency === f.value ? GREEN : '#d5dcd6' }}>{f.label}</button>
-            ))}
-          </div>
-          <div style={{ marginBottom: 12 }}><label style={label}>Preferred start date (optional)</label><input style={inp} type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} /></div>
+
+          {scheduleType === 'weekly' && (
+            <>
+              <label style={label}>{pickupsPerWeek === 2 ? 'Pick two service days' : 'Pick your service day'}</label>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 5, marginBottom: 14 }}>
+                {DAYS.map((d) => {
+                  const on = serviceDays.includes(d)
+                  return (
+                    <button key={d} type="button" onClick={() => toggleDay(d)} style={{ padding: '10px 0', borderRadius: 9, border: '1.5px solid', fontSize: 12.5, fontWeight: 700, cursor: 'pointer', background: on ? GREEN : '#fff', color: on ? '#fff' : '#4c5a51', borderColor: on ? GREEN : '#d5dcd6' }}>{DAY_LABEL[d]}</button>
+                  )
+                })}
+              </div>
+              <div style={{ marginBottom: 12 }}><label style={label}>Preferred start date (optional)</label><input style={inp} type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} /></div>
+            </>
+          )}
+          {scheduleType === 'on_call' && (
+            <div style={{ background: '#f7f9f7', borderRadius: 10, padding: '12px 13px', fontSize: 13.5, color: '#4c5a51', lineHeight: 1.5, marginBottom: 14 }}>
+              {onDemandNote}
+            </div>
+          )}
           <div style={{ marginBottom: 4 }}>
             <label style={label}>Notes for our team</label>
             <textarea style={{ ...inp, minHeight: 84, resize: 'vertical' }} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder={'Gate code, where the cart lives, pets to know about, carry-out requests…'} />
           </div>
-          <div style={{ marginTop: 14 }}>{nextBtn(() => { setErr(''); setStep(3) })}</div>
+          <div style={{ marginTop: 14 }}>{nextBtn(() => {
+            if (scheduleType === 'weekly' && serviceDays.length !== pickupsPerWeek) {
+              setErr(pickupsPerWeek === 2 ? 'Please pick two service days.' : 'Please pick your service day.'); return
+            }
+            setErr(''); setStep(3)
+          })}</div>
           {backBtn}
         </div>
       )}
@@ -360,7 +402,7 @@ export default function SignupPage({ slug } = {}) {
             <b>{firstName} {lastName}</b><br />
             {phone} · {email}<br />
             Service: {street}, {city}, {stateVal} {zip}<br />
-            Pickup: <b>{DAY_LABEL[serviceDay]}days</b>, {FREQ_LABEL[frequency].toLowerCase()}{startDate ? `, starting ${new Date(startDate + 'T12:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}` : ''}<br />
+            Pickup: <b>{scheduleSummary}</b>{startDate && scheduleType === 'weekly' ? `, starting ${new Date(startDate + 'T12:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}` : ''}<br />
             Payment: {cardChoice === 'card' ? 'Card on file (5th week free)' : 'Billed after first visit'}
             {notes && <><br />Notes: {notes}</>}
           </div>

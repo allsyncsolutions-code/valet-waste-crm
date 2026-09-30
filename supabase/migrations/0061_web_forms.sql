@@ -23,11 +23,14 @@ create policy staff_all_web_forms on public.web_forms
   for all to authenticated using (is_staff()) with check (is_staff());
 
 -- The form /?signup=1 (and the bare signup page) resolves to — keeps the
--- already-published default link working with the same look it shipped with.
+-- already-published default link working. Pricing: $15/wk for 1 pickup,
+-- $25/wk for 2 (weekly service only; On-Demand = on_call, priced per job).
 insert into public.web_forms (name, slug, active, config, created_by) values
  ('Standard signup', 'default', true,
   '{"intro": null,
-    "line_items": [{"description": "Valet trash service", "price": null}],
+    "line_items": [],
     "total_label": null,
+    "pricing": {"one_pickup": 15, "two_pickup": 25,
+                "on_demand_note": "Varies by location and date requested — we''ll reach out after you submit."},
     "terms": "By tapping Approve you agree to start valet trash service at the address above on the schedule shown, to monthly billing, and — if you saved a card — that it may be charged for service. We’ll text you to confirm your exact start date before your first visit."}'::jsonb,
   'system');
