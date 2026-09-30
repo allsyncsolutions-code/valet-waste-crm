@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { MONO } from '../data.js'
-import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, addProperty, updateProperty, savePin, loadPropertyArchive, loadPropertyAddressIndex, countDuplicateProperties, findDuplicateProperties, mergeDuplicateGroup, loadPropertiesByIds, countPropertiesByCustomer, deleteProperty, sendPortalInvite, loadClientFieldActivity, loadClientPortalRequests, loadClientNotes, addClientNote, deleteClientNote } from '../lib/customersData.js'
+import { loadCustomers, createClient, updateCustomer, subscribeCustomers, attachTag, detachTag, deleteClient, loadProperties, addProperty, updateProperty, savePin, loadPropertyArchive, loadPropertyAddressIndex, countDuplicateProperties, findDuplicateProperties, mergeDuplicateGroup, loadPropertiesByIds, countPropertiesByCustomer, deleteProperty, sendPortalInvite, loadClientFieldActivity, loadClientPortalRequests, loadClientNotes, addClientNote, deleteClientNote, loadPropertyMatchIndex } from '../lib/customersData.js'
+import { findClientDuplicates } from '../lib/duplicateCheck.js'
 import PinPicker from '../components/PinPicker.jsx'
 import { geocodeAll } from '../lib/importData.js'
 import { listTags, findOrCreateTag, subscribeTags } from '../lib/tagsData.js'
@@ -95,6 +96,10 @@ export default function Clients({ app }) {
   const [pickMerge, setPickMerge] = useState(false) // multi-select mode for a manual merge
   const [picked, setPicked] = useState(() => new Set()) // client ids picked for a manual merge
   const [addrIdx, setAddrIdx] = useState({}) // customer_id → its property addresses (for search)
+  const [propMatch, setPropMatch] = useState([]) // every property row for the Add-form duplicate check
+  const [dupMatches, setDupMatches] = useState([]) // live "did you mean?" candidates in the Add form
+  const [dupFlash, setDupFlash] = useState(false) // submit was blocked on duplicates — highlight the panel
+  const dupPanelRef = useRef(null)
   const [inviteBusy, setInviteBusy] = useState(false)
   const [inviteMsg, setInviteMsg] = useState('')
   const [actEvents, setActEvents] = useState([])
@@ -213,6 +218,7 @@ export default function Clients({ app }) {
     setSelId((cur) => cur || (rows[0] && rows[0].id) || null)
     // Rebuild the address search index in the background (search matches property addresses too).
     loadPropertyAddressIndex().then(setAddrIdx).catch(() => {})
+    loadPropertyMatchIndex().then(setPropMatch).catch(() => {})
   }
 
   useEffect(() => {
@@ -305,6 +311,19 @@ export default function Clients({ app }) {
     })
   }, [app.activeLine, customers])
   const set = (patch) => setForm((f) => ({ ...f, ...patch }))
+
+  // Live duplicate check while CREATING a client: score the draft against
+  // every existing client (name/contact, email, phone, service address) and
+  // surface "did you mean?" candidates inside the form. Debounced so it
+  // settles between keystrokes instead of flickering on every letter.
+  useEffect(() => {
+    if (!showForm || editingId) { setDupMatches([]); setDupFlash(false); return }
+    const t = setTimeout(() => {
+      setDupMatches(findClientDuplicates(form, customers, propMatch))
+      setDupFlash(false)
+    }, 350)
+    return () => clearTimeout(t)
+  }, [form, customers, propMatch, showForm, editingId])
 
   async function addTag() {
     const t = tagInput.trim()
@@ -605,9 +624,16 @@ export default function Clients({ app }) {
     setShowForm(true)
   }
 
-  async function submit(e) {
-    e.preventDefault()
+  async function submit(e, force) {
+    if (e) e.preventDefault()
     if (!form.name.trim()) return
+    // Creating while possible duplicates are flagged? Stop once and point at
+    // them — "It's new — create anyway" re-submits with force=true.
+    if (!editingId && !force && dupMatches.length) {
+      setDupFlash(true)
+      dupPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+      return
+    }
     setSaving(true)
     setErr(null)
     const payload = {
@@ -1267,6 +1293,38 @@ export default function Clients({ app }) {
               <input value={form.contactPhone} onChange={(e) => set({ contactPhone: e.target.value })} style={inp} placeholder="Blank = texts go to the phone above" />
               <div style={{ fontSize: 11, color: '#7c8a82', marginTop: 4 }}>When set, ALL texts to this client (visit notices, invoices, reminders) go to this number instead of the main phone.</div>
             </Field>
+
+            {!editingId && dupMatches.length > 0 && (
+              <div ref={dupPanelRef} style={{ background: '#fdf7f2', border: `1.5px solid ${dupFlash ? '#e8965a' : '#f0d9c8'}`, borderRadius: 10, padding: '11px 13px', marginBottom: 13 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 700, color: '#9a3412' }}>
+                  ⚠ Possible existing {dupMatches.length === 1 ? 'client' : 'clients'} — did you mean…
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 7, marginTop: 8 }}>
+                  {dupMatches.map((m) => (
+                    <div key={m.customerId} style={{ border: '1px solid #f0d9c8', borderRadius: 9, padding: '8px 10px', background: '#fff' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                        <div style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {m.name}{m.contactName ? <span style={{ color: '#5d6b63', fontWeight: 500 }}> · {m.contactName}</span> : null}
+                        </div>
+                        {m.reasons.map((r) => (
+                          <span key={r} title={`Same ${r.toLowerCase()} as what you're typing`} style={{ flex: 'none', fontFamily: MONO, fontSize: 9, fontWeight: 700, color: '#9a3412', background: '#fdf0e7', padding: '2px 6px', borderRadius: 5, letterSpacing: '.03em' }}>{r.toUpperCase()}</span>
+                        ))}
+                        <button type="button" onClick={() => { setSelId(m.customerId); setShowForm(false); setEditingId(null); setForm(BLANK) }} title="Open this client instead of creating a new one" style={{ flex: 'none', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 7, padding: '5px 10px', fontSize: 11.5, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' }}>Open</button>
+                      </div>
+                      <div style={{ fontSize: 11.5, color: '#7c8a82', marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {[m.phone, m.email].filter(Boolean).join(' · ') || 'No phone or email on file'}
+                        {m.address ? <span title="Matching service address"> · {m.address}</span> : null}
+                        {m.propCount ? <span> · {m.propCount} {m.propCount === 1 ? 'address' : 'addresses'}</span> : null}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                {dupFlash && <div style={{ fontSize: 12, color: '#9a3412', fontWeight: 600, marginTop: 9 }}>This looks like it may already be in the system. Open one above, or create anyway if you're sure it's new.</div>}
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 9 }}>
+                  <button type="button" onClick={() => submit(null, true)} disabled={saving} style={{ background: '#fff', color: '#9a3412', border: '1px solid #e3b48f', borderRadius: 8, padding: '6px 12px', fontSize: 12, fontWeight: 600, cursor: saving ? 'default' : 'pointer' }}>It's new — create anyway</button>
+                </div>
+              </div>
+            )}
 
             <Divider>Pickup defaults</Divider>
             <Field label="Service"><input value={form.service} onChange={(e) => set({ service: e.target.value })} style={inp} placeholder="4yd dumpster x2" /></Field>

@@ -286,6 +286,16 @@ export async function loadPropertyAddressIndex() {
   return idx
 }
 
+// Per-property address rows (raw + DB-normalized) for the Add-client duplicate
+// check — norm_address comes from the same normalizer the duplicate-address
+// banner uses, so "123 Main Street" and "123 Main St" compare equal.
+export async function loadPropertyMatchIndex() {
+  const { data, error } = await supabase.from('properties').select('customer_id, address, norm_address')
+  if (error) throw error
+  return (data || []).filter((r) => r.customer_id && r.address)
+    .map((r) => ({ customerId: r.customer_id, address: r.address, normAddress: r.norm_address || '' }))
+}
+
 // Duplicate-address detection (normalized match across ALL clients).
 export async function findDuplicateProperties() {
   const { data, error } = await supabase.rpc('find_duplicate_properties')
