@@ -639,14 +639,19 @@ type SignupForm = {
   line_items: { description: string; price: number | null }[]
   total_label: string | null
   terms: string | null
+  pricing: { one_pickup: number | null; two_pickup: number | null; on_demand_note: string | null }
+}
+function numOrNull(v: unknown): number | null {
+  return typeof v === "number" && isFinite(v) && v >= 0 ? Math.round(v * 100) / 100 : null
 }
 function sanitizeFormConfig(row: any): SignupForm {
   const c = row?.config && typeof row.config === "object" ? row.config : {}
+  const p = c.pricing && typeof c.pricing === "object" ? c.pricing : {}
   const lineItems = (Array.isArray(c.line_items) ? c.line_items : [])
     .slice(0, 10)
     .map((li: any) => ({
       description: String(li?.description ?? "").trim().slice(0, 140),
-      price: typeof li?.price === "number" && isFinite(li.price) && li.price >= 0 ? Math.round(li.price * 100) / 100 : null,
+      price: numOrNull(li?.price),
     }))
     .filter((li: { description: string }) => li.description)
   return {
@@ -657,6 +662,11 @@ function sanitizeFormConfig(row: any): SignupForm {
     line_items: lineItems,
     total_label: String(c.total_label || "").trim().slice(0, 40) || null,
     terms: String(c.terms || "").trim().slice(0, 2000) || null,
+    pricing: {
+      one_pickup: numOrNull(p.one_pickup),
+      two_pickup: numOrNull(p.two_pickup),
+      on_demand_note: String(p.on_demand_note || "").trim().slice(0, 300) || null,
+    },
   }
 }
 async function loadSignupForm(slug: string): Promise<SignupForm | null> {
@@ -1195,7 +1205,6 @@ Deno.serve(async (req) => {
       // (a vault failure must not leave a half-created account behind — the
       // user fixes the card and resubmits the same form).
       const ALL_DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-      const FREQS = ["weekly", "biweekly", "monthly", "1st_3rd", "2nd_4th"]
 
       // Honeypot: bots fill the hidden "company" field. Pretend success so the
       // bot doesn't learn anything; create nothing.
@@ -1216,8 +1225,11 @@ Deno.serve(async (req) => {
       const city = str(body.city, 100)
       const state = str(body.state, 20)
       const zip = str(body.zip, 20)
-      const serviceDay = ALL_DAYS.includes(str(body.service_day).toLowerCase()) ? str(body.service_day).toLowerCase() : null
-      const frequency = FREQS.includes(str(body.frequency)) ? str(body.frequency) : null
+      const scheduleType = str(body.schedule_type, 20) === "on_call" ? "on_call" : "weekly"
+      const pickupsPerWeek = scheduleType === "weekly" ? (Number(body.pickups_per_week) === 2 ? 2 : 1) : 0
+      const serviceDays = (Array.isArray(body.service_days) ? body.service_days : [])
+        .map((x: unknown) => String(x).toLowerCase())
+        .filter((x: string) => ALL_DAYS.includes(x))
       const startDate = /^\d{4}-\d{2}-\d{2}$/.test(str(body.start_date, 10)) ? str(body.start_date, 10) : null
       const notes = str(body.notes, 1000)
       const ebilling = !!body.ebilling
@@ -1226,8 +1238,9 @@ Deno.serve(async (req) => {
       if (phone.replace(/\D/g, "").length < 10) return json({ error: "Please enter a valid phone number." }, 400)
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ error: "Please enter a valid email address." }, 400)
       if (!street || !city || !state || !zip) return json({ error: "Please enter your full service address." }, 400)
-      if (!serviceDay) return json({ error: "Please pick a service day." }, 400)
-      if (!frequency) return json({ error: "Please pick a service frequency." }, 400)
+      if (scheduleType === "weekly" && serviceDays.length !== pickupsPerWeek) {
+        return json({ error: pickupsPerWeek === 2 ? "Please pick two service days." : "Please pick a service day." }, 400)
+      }
       if (!body.agreed) return json({ error: "Please review the agreement and tap Approve to start service." }, 400)
 
       // Billing address (defaults to the service address)
@@ -1285,7 +1298,11 @@ Deno.serve(async (req) => {
       const addr = `${street}, ${city}, ${state} ${zip}`
       const billAddr = bSame ? addr : `${bStreet}, ${bCity}, ${bState} ${bZip}`
       const name = `${firstName} ${lastName}`
-      const consentNote = `Web signup agreement approved ${nowIso}${ip ? ` (IP ${ip})` : ""} — service day ${serviceDay}, ${frequency}. Form: ${form.name} (${slug}).`
+      const price = scheduleType === "weekly" ? (pickupsPerWeek === 2 ? form.pricing.two_pickup : form.pricing.one_pickup) : null
+      const scheduleTxt = scheduleType === "on_call"
+        ? "On-Demand (price varies — reach out after signup)"
+        : `${serviceDays.join(" + ")} — ${pickupsPerWeek} pickup${pickupsPerWeek > 1 ? "s" : ""}/week${price != null ? ` ($${price.toFixed(2)}/wk)` : ""}`
+      const consentNote = `Web signup agreement approved ${nowIso}${ip ? ` (IP ${ip})` : ""} — ${scheduleTxt}. Form: ${form.name} (${slug}).`
       const noteParts = [consentNote]
       if (!bSame) noteParts.push(`Billing address: ${billAddr}`)
       if (ebilling) noteParts.push("Enrolled in e-billing.")
@@ -1299,7 +1316,7 @@ Deno.serve(async (req) => {
         address: billAddr,
         status: "active",
         business_line: "waste",
-        billing_type: "subscription",
+        billing_type: scheduleType === "on_call" ? "one_time" : "subscription",
         notes: noteParts.join("\n"),
         ...(vault || {}),
       })
@@ -1311,10 +1328,11 @@ Deno.serve(async (req) => {
         name: `${name} — ${street}`,
         address: addr,
         service: "Trash",
-        notes: notes || null,
-        pickup_days: [serviceDay],
-        pickup_frequency: frequency,
-        pickup_start_date: startDate,
+        notes: scheduleType === "on_call" ? `ON-DEMAND service. ${notes || ""}`.trim() : (notes || null),
+        price,
+        pickup_days: scheduleType === "weekly" ? serviceDays : [],
+        pickup_frequency: scheduleType,
+        pickup_start_date: scheduleType === "weekly" ? startDate : null,
         needs_review: true,
         business_line: "waste",
         paused: false,
@@ -1324,9 +1342,9 @@ Deno.serve(async (req) => {
       // pause). The property itself lands in the Dashboard "awaiting placement"
       // queue + ★ NEW badge until staff slot it onto a route.
       const cardTxt = vault?.run_card_last4 ? ` Card on file ${String(vault.run_card_brand || "card").toUpperCase()} ••${vault.run_card_last4} (5th week free).` : " No card on file — bill after first visit."
-      const startTxt = startDate ? ` starting ${startDate}` : ""
+      const startTxt = startDate && scheduleType === "weekly" ? ` starting ${startDate}` : ""
       const noteTxt = notes ? ` Notes: "${notes.slice(0, 160)}"` : ""
-      await textAdmins(`🌐 New web signup (${form.name}): ${name} @ ${addr} — ${serviceDay} ${frequency}${startTxt}.${cardTxt}${noteTxt} — Trashy Randy`)
+      await textAdmins(`🌐 New web signup (${form.name}): ${name} @ ${addr} — ${scheduleTxt}${startTxt}.${cardTxt}${noteTxt} — Trashy Randy`)
 
       return json({ ok: true, customer_id: custId, property_id: prop?.[0]?.id || null, card_saved: !!vault })
     }

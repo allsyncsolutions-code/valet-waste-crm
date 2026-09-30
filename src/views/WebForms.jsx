@@ -102,6 +102,13 @@ export default function WebForms({ app }) {
 
       {forms && forms.map((f) => {
         const items = Array.isArray(f.config?.line_items) ? f.config.line_items : []
+        const p = f.config?.pricing || {}
+        const pricingTxt = [
+          p.one_pickup != null ? `1x/wk $${Number(p.one_pickup).toFixed(2)}` : null,
+          p.two_pickup != null ? `2x/wk $${Number(p.two_pickup).toFixed(2)}` : null,
+          'On-Demand: varies',
+        ].filter(Boolean).join(' · ')
+        const extraTxt = items.map((li) => `${li.description}${li.price != null ? ` ($${Number(li.price).toFixed(2)})` : ''}`).join(' · ')
         return (
           <div key={f.id} style={{ background: '#fff', borderRadius: 12, padding: '15px 16px', marginBottom: 12, boxShadow: '0 1px 4px rgba(20,30,24,.07)', opacity: f.active ? 1 : 0.65 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -110,9 +117,7 @@ export default function WebForms({ app }) {
                 <span style={{ fontSize: 12, fontWeight: 700, color: f.active ? GREEN : '#9aa69e' }}>{f.active ? '● LIVE' : '○ unpublished'}</span>
                 {f.slug === 'default' && <span style={{ fontSize: 11.5, color: '#9aa69e' }}> — the /?signup=1 default</span>}
                 <div style={{ fontSize: 12.5, color: '#7c8a82', marginTop: 3 }}>
-                  {items.length
-                    ? items.map((li) => `${li.description}${li.price != null ? ` ($${Number(li.price).toFixed(2)})` : ''}`).join(' · ')
-                    : 'No line items — shows "confirmed before your first visit"'}
+                  {pricingTxt}{extraTxt ? ` · ${extraTxt}` : ''}
                 </div>
               </div>
               <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
@@ -141,6 +146,9 @@ export default function WebForms({ app }) {
 function Editor({ form, busy, setBusy, onCancel, onSaved, onError }) {
   const [name, setName] = useState(form?.name || '')
   const [intro, setIntro] = useState(form?.config?.intro || '')
+  const [price1, setPrice1] = useState(form?.config?.pricing?.one_pickup ?? '')
+  const [price2, setPrice2] = useState(form?.config?.pricing?.two_pickup ?? '')
+  const [onDemandNote, setOnDemandNote] = useState(form?.config?.pricing?.on_demand_note || 'Varies by location and date requested — we’ll reach out after you submit.')
   const [items, setItems] = useState(
     Array.isArray(form?.config?.line_items) && form.config.line_items.length
       ? form.config.line_items.map((li) => ({ description: li.description || '', price: li.price ?? '' }))
@@ -162,6 +170,7 @@ function Editor({ form, busy, setBusy, onCancel, onSaved, onError }) {
         active,
         config: {
           intro,
+          pricing: { one_pickup: price1, two_pickup: price2, on_demand_note: onDemandNote },
           line_items: items.map((li) => ({ description: li.description, price: li.price === '' ? null : Number(li.price) })),
           total_label: totalLabel,
           terms,
@@ -185,7 +194,22 @@ function Editor({ form, busy, setBusy, onCancel, onSaved, onError }) {
           <input style={inp} value={intro} onChange={(e) => setIntro(e.target.value)} placeholder="Residential valet trash signup" />
         </div>
         <div style={{ marginBottom: 12 }}>
-          <label style={label}>Line items & pricing (leave price blank to say "confirmed before your first visit")</label>
+          <label style={label}>Schedule pricing (weekly service)</label>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
+            <div style={{ flex: 1 }}>
+              <label style={{ ...label, fontWeight: 400 }}>1 pickup / week ($)</label>
+              <input style={inp} type="number" min="0" step="0.01" value={price1} onChange={(e) => setPrice1(e.target.value)} placeholder="15.00" />
+            </div>
+            <div style={{ flex: 1 }}>
+              <label style={{ ...label, fontWeight: 400 }}>2 pickups / week ($)</label>
+              <input style={inp} type="number" min="0" step="0.01" value={price2} onChange={(e) => setPrice2(e.target.value)} placeholder="25.00" />
+            </div>
+          </div>
+          <label style={{ ...label, fontWeight: 400 }}>On-Demand note (shown instead of a price)</label>
+          <input style={inp} value={onDemandNote} onChange={(e) => setOnDemandNote(e.target.value)} />
+        </div>
+        <div style={{ marginBottom: 12 }}>
+          <label style={label}>Extra line items (optional — fuel surcharge, carry-out, promos…)</label>
           {items.map((li, i) => (
             <div key={i} style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
               <input style={{ ...inp, flex: 2 }} value={li.description} onChange={(e) => setItems(items.map((x, j) => (j === i ? { ...x, description: e.target.value } : x)))} placeholder="e.g. Weekly valet trash service" />

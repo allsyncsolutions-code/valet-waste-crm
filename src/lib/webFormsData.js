@@ -16,13 +16,20 @@ function slugify(name) {
   return `${base}-${rand}`
 }
 
-// config: { intro, line_items: [{description, price|null}], total_label, terms }
+// config: { intro, pricing: {one_pickup, two_pickup, on_demand_note},
+//           line_items: [{description, price|null}], total_label, terms }
 export async function saveWebForm({ id, name, slug, active, config }) {
+  const numOrBlank = (v) => (v === '' || v == null ? null : Math.max(0, Math.round(Number(v) * 100) / 100) || null)
   const payload = {
     name: String(name || '').trim().slice(0, 120) || 'Untitled form',
     active: !!active,
     config: {
       intro: String(config?.intro || '').trim().slice(0, 400) || null,
+      pricing: {
+        one_pickup: numOrBlank(config?.pricing?.one_pickup),
+        two_pickup: numOrBlank(config?.pricing?.two_pickup),
+        on_demand_note: String(config?.pricing?.on_demand_note || '').trim().slice(0, 300) || null,
+      },
       line_items: (Array.isArray(config?.line_items) ? config.line_items : [])
         .slice(0, 10)
         .map((li) => ({
