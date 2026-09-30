@@ -16,6 +16,26 @@ const DAY_LABEL = { monday: 'Mon', tuesday: 'Tue', wednesday: 'Wed', thursday: '
 const DEFAULT_ON_DEMAND_NOTE = 'Varies by location and date requested — we’ll reach out after you submit.'
 const money = (v) => `$${Number(v).toFixed(2)}`
 
+// Service areas gate which pickup days the signup page offers (owner rule,
+// 2026-09-30). The edge fn carries the same mapping and validates against it.
+const AREA_OPTIONS = [
+  { value: 'duval', label: 'Duval County', days: ['tuesday', 'friday'] },
+  { value: 'st_johns', label: 'St. Johns County', days: ['monday', 'thursday'] },
+  { value: 'palm_coast', label: 'Palm Coast', days: ['monday', 'thursday'] },
+  { value: 'flagler', label: 'Flagler County', days: ['monday', 'thursday'] },
+]
+const areaByValue = (v) => AREA_OPTIONS.find((a) => a.value === v) || null
+// Best-effort prefill from the city the customer typed — they can override.
+function guessArea(city) {
+  const c = String(city || '').toLowerCase()
+  if (!c.trim()) return ''
+  if (c.includes('jacksonville') || c.includes('atlantic beach') || c.includes('neptune beach') || c.includes('orange park')) return 'duval'
+  if (c.includes('palm coast')) return 'palm_coast'
+  if (c.includes('st. augustine') || c.includes('st augustine') || c.includes('saint augustine') || c.includes('ponte vedra') || c.includes('st. johns') || c.includes('st johns') || c.includes('elkton') || c.includes('hastings') || c.includes('fruit cove') || c.includes('world golf')) return 'st_johns'
+  if (c.includes('flagler') || c.includes('bunnell') || c.includes('beverly beach') || c.includes('marineland')) return 'flagler'
+  return ''
+}
+
 // ---------------------------------------------------------------------------
 // FALLBACK pricing — real pricing lives in each web form's config, edited in
 // the CRM's Web Forms tab (public page is /?signup=<slug>). These built-ins
@@ -72,6 +92,7 @@ export default function SignupPage({ slug } = {}) {
   // Step 2 — service
   const [scheduleType, setScheduleType] = useState('weekly') // 'weekly' | 'on_call'
   const [pickupsPerWeek, setPickupsPerWeek] = useState(1) // 1 | 2
+  const [area, setArea] = useState('')
   const [serviceDays, setServiceDays] = useState([])
   const [startDate, setStartDate] = useState('')
   const [notes, setNotes] = useState('')
@@ -161,6 +182,7 @@ export default function SignupPage({ slug } = {}) {
         schedule_type: scheduleType,
         pickups_per_week: scheduleType === 'weekly' ? pickupsPerWeek : 0,
         service_days: scheduleType === 'weekly' ? serviceDays : [],
+        area: areaObj ? areaObj.value : null,
         start_date: startDate || null, notes,
         card,
         agreed: true,
@@ -189,9 +211,10 @@ export default function SignupPage({ slug } = {}) {
   const price2 = pricing.two_pickup
   const onDemandNote = pricing.on_demand_note || DEFAULT_ON_DEMAND_NOTE
   const selectedPrice = scheduleType === 'on_call' ? null : (pickupsPerWeek === 2 ? price2 : price1)
+  const areaObj = areaByValue(area)
   const scheduleSummary = scheduleType === 'on_call'
     ? `On-Demand — ${onDemandNote}`
-    : `${serviceDays.map((d) => DAY_LABEL[d]).join(' + ')} — ${pickupsPerWeek} pickup${pickupsPerWeek > 1 ? 's' : ''}/ week${selectedPrice != null ? `, ${money(selectedPrice)}/wk` : ''}`
+    : `${areaObj ? `${areaObj.label}: ` : ''}${serviceDays.map((d) => DAY_LABEL[d]).join(' + ')} — ${pickupsPerWeek} pickup${pickupsPerWeek > 1 ? 's' : ''}/ week${selectedPrice != null ? `, ${money(selectedPrice)}/wk` : ''}`
 
   function toggleDay(d) {
     setServiceDays((cur) => {
@@ -199,6 +222,20 @@ export default function SignupPage({ slug } = {}) {
       const next = [...cur, d]
       return next.slice(-pickupsPerWeek) // keep at most the picked count
     })
+  }
+
+  function pickArea(v) {
+    const a = areaByValue(v)
+    setArea(v)
+    // Two pickups/week in an area with exactly two service days = both days.
+    setServiceDays(a && pickupsPerWeek === 2 ? a.days : [])
+  }
+
+  function pickSchedule(type, count) {
+    setScheduleType(type)
+    setPickupsPerWeek(count)
+    setServiceDays([])
+    setErr('')
   }
 
   const shell = (inner) => (
@@ -311,7 +348,7 @@ export default function SignupPage({ slug } = {}) {
             <input type="checkbox" checked={ebilling} onChange={(e) => setEbilling(e.target.checked)} style={{ width: 17, height: 17 }} />
             Email my invoices (e-billing)
           </label>
-          <div style={{ marginTop: 14 }}>{nextBtn(() => { const e = validContact(); if (e) { setErr(e); return } setErr(''); setStep(2) })}</div>
+          <div style={{ marginTop: 14 }}>{nextBtn(() => { const e = validContact(); if (e) { setErr(e); return } setErr(''); setArea((a) => a || guessArea(city)); setStep(2) })}</div>
         </div>
       )}
 
@@ -320,22 +357,32 @@ export default function SignupPage({ slug } = {}) {
           {stepTitle('Pickup schedule', 'Weekly valet trash service, or On-Demand when you need us.')}
           <label style={label}>How often?</label>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 14 }}>
-            <button type="button" onClick={() => { setScheduleType('weekly'); setPickupsPerWeek(1) }} style={{ padding: '12px 6px', borderRadius: 10, border: '1.5px solid', fontSize: 13.5, fontWeight: 700, cursor: 'pointer', background: scheduleType === 'weekly' && pickupsPerWeek === 1 ? GREEN : '#fff', color: scheduleType === 'weekly' && pickupsPerWeek === 1 ? '#fff' : '#4c5a51', borderColor: scheduleType === 'weekly' && pickupsPerWeek === 1 ? GREEN : '#d5dcd6', lineHeight: 1.3 }}>
+            <button type="button" onClick={() => pickSchedule('weekly', 1)} style={{ padding: '12px 6px', borderRadius: 10, border: '1.5px solid', fontSize: 13.5, fontWeight: 700, cursor: 'pointer', background: scheduleType === 'weekly' && pickupsPerWeek === 1 ? GREEN : '#fff', color: scheduleType === 'weekly' && pickupsPerWeek === 1 ? '#fff' : '#4c5a51', borderColor: scheduleType === 'weekly' && pickupsPerWeek === 1 ? GREEN : '#d5dcd6', lineHeight: 1.3 }}>
               1 pickup / week<br /><span style={{ fontSize: 12, fontWeight: 600, opacity: 0.9 }}>{price1 != null ? `${money(price1)}/wk` : 'weekly'}</span>
             </button>
-            <button type="button" onClick={() => { setScheduleType('weekly'); setPickupsPerWeek(2) }} style={{ padding: '12px 6px', borderRadius: 10, border: '1.5px solid', fontSize: 13.5, fontWeight: 700, cursor: 'pointer', background: scheduleType === 'weekly' && pickupsPerWeek === 2 ? GREEN : '#fff', color: scheduleType === 'weekly' && pickupsPerWeek === 2 ? '#fff' : '#4c5a51', borderColor: scheduleType === 'weekly' && pickupsPerWeek === 2 ? GREEN : '#d5dcd6', lineHeight: 1.3 }}>
+            <button type="button" onClick={() => pickSchedule('weekly', 2)} style={{ padding: '12px 6px', borderRadius: 10, border: '1.5px solid', fontSize: 13.5, fontWeight: 700, cursor: 'pointer', background: scheduleType === 'weekly' && pickupsPerWeek === 2 ? GREEN : '#fff', color: scheduleType === 'weekly' && pickupsPerWeek === 2 ? '#fff' : '#4c5a51', borderColor: scheduleType === 'weekly' && pickupsPerWeek === 2 ? GREEN : '#d5dcd6', lineHeight: 1.3 }}>
               2 pickups / week<br /><span style={{ fontSize: 12, fontWeight: 600, opacity: 0.9 }}>{price2 != null ? `${money(price2)}/wk` : 'weekly'}</span>
             </button>
-            <button type="button" onClick={() => { setScheduleType('on_call'); setErr('') }} style={{ padding: '12px 6px', borderRadius: 10, border: '1.5px solid', fontSize: 13.5, fontWeight: 700, cursor: 'pointer', background: scheduleType === 'on_call' ? GREEN : '#fff', color: scheduleType === 'on_call' ? '#fff' : '#4c5a51', borderColor: scheduleType === 'on_call' ? GREEN : '#d5dcd6', lineHeight: 1.3 }}>
+            <button type="button" onClick={() => pickSchedule('on_call', 0)} style={{ padding: '12px 6px', borderRadius: 10, border: '1.5px solid', fontSize: 13.5, fontWeight: 700, cursor: 'pointer', background: scheduleType === 'on_call' ? GREEN : '#fff', color: scheduleType === 'on_call' ? '#fff' : '#4c5a51', borderColor: scheduleType === 'on_call' ? GREEN : '#d5dcd6', lineHeight: 1.3 }}>
               On-Demand<br /><span style={{ fontSize: 12, fontWeight: 600, opacity: 0.9 }}>price varies</span>
             </button>
           </div>
 
-          {scheduleType === 'weekly' && (
+          <label style={label}>Service area</label>
+          <select
+            value={area}
+            onChange={(e) => pickArea(e.target.value)}
+            style={{ ...inp, marginBottom: 14, padding: '11px 13px' }}
+          >
+            <option value="">Pick your county / area…</option>
+            {AREA_OPTIONS.map((a) => <option key={a.value} value={a.value}>{a.label}</option>)}
+          </select>
+
+          {scheduleType === 'weekly' && areaObj && (
             <>
-              <label style={label}>{pickupsPerWeek === 2 ? 'Pick two service days' : 'Pick your service day'}</label>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 5, marginBottom: 14 }}>
-                {DAYS.map((d) => {
+              <label style={label}>{pickupsPerWeek === 2 ? `Pick both service days — ${areaObj.label} runs ${areaObj.days.map((d) => DAY_LABEL[d]).join(' and ')}` : `Pick your service day — ${areaObj.label} runs ${areaObj.days.map((d) => DAY_LABEL[d]).join(' or ')}`}</label>
+              <div style={{ display: 'grid', gridTemplateColumns: `repeat(${areaObj.days.length}, 1fr)`, gap: 5, marginBottom: 14, maxWidth: 220 }}>
+                {areaObj.days.map((d) => {
                   const on = serviceDays.includes(d)
                   return (
                     <button key={d} type="button" onClick={() => toggleDay(d)} style={{ padding: '10px 0', borderRadius: 9, border: '1.5px solid', fontSize: 12.5, fontWeight: 700, cursor: 'pointer', background: on ? GREEN : '#fff', color: on ? '#fff' : '#4c5a51', borderColor: on ? GREEN : '#d5dcd6' }}>{DAY_LABEL[d]}</button>
@@ -355,8 +402,11 @@ export default function SignupPage({ slug } = {}) {
             <textarea style={{ ...inp, minHeight: 84, resize: 'vertical' }} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder={'Gate code, where the cart lives, pets to know about, carry-out requests…'} />
           </div>
           <div style={{ marginTop: 14 }}>{nextBtn(() => {
-            if (scheduleType === 'weekly' && serviceDays.length !== pickupsPerWeek) {
-              setErr(pickupsPerWeek === 2 ? 'Please pick two service days.' : 'Please pick your service day.'); return
+            if (scheduleType === 'weekly') {
+              if (!areaObj) { setErr('Please pick your service area.'); return }
+              if (serviceDays.length !== pickupsPerWeek) {
+                setErr(pickupsPerWeek === 2 ? 'Please pick both service days.' : 'Please pick your service day.'); return
+              }
             }
             setErr(''); setStep(3)
           })}</div>

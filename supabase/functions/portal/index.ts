@@ -1225,8 +1225,26 @@ Deno.serve(async (req) => {
       const city = str(body.city, 100)
       const state = str(body.state, 20)
       const zip = str(body.zip, 20)
+      // Service areas gate which days are legal (owner rule, 2026-09-30):
+      // Duval County runs Tuesday/Friday; St. Johns, Palm Coast and Flagler
+      // run Monday/Thursday. The signup page only RENDERS the allowed days;
+      // this check is the actual gate — never trust the client.
+      const AREA_DAYS: Record<string, string[]> = {
+        duval: ["tuesday", "friday"],
+        st_johns: ["monday", "thursday"],
+        palm_coast: ["monday", "thursday"],
+        flagler: ["monday", "thursday"],
+      }
+      const AREA_LABELS: Record<string, string> = {
+        duval: "Duval County",
+        st_johns: "St. Johns County",
+        palm_coast: "Palm Coast",
+        flagler: "Flagler County",
+      }
       const scheduleType = str(body.schedule_type, 20) === "on_call" ? "on_call" : "weekly"
       const pickupsPerWeek = scheduleType === "weekly" ? (Number(body.pickups_per_week) === 2 ? 2 : 1) : 0
+      const areaKey = str(body.area, 20)
+      const area = areaKey && AREA_DAYS[areaKey] ? areaKey : null
       const serviceDays = (Array.isArray(body.service_days) ? body.service_days : [])
         .map((x: unknown) => String(x).toLowerCase())
         .filter((x: string) => ALL_DAYS.includes(x))
@@ -1238,8 +1256,11 @@ Deno.serve(async (req) => {
       if (phone.replace(/\D/g, "").length < 10) return json({ error: "Please enter a valid phone number." }, 400)
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ error: "Please enter a valid email address." }, 400)
       if (!street || !city || !state || !zip) return json({ error: "Please enter your full service address." }, 400)
-      if (scheduleType === "weekly" && serviceDays.length !== pickupsPerWeek) {
-        return json({ error: pickupsPerWeek === 2 ? "Please pick two service days." : "Please pick a service day." }, 400)
+      if (scheduleType === "weekly") {
+        if (!area) return json({ error: "Please pick your service area." }, 400)
+        if (serviceDays.length !== pickupsPerWeek || serviceDays.some((d: string) => !AREA_DAYS[area].includes(d))) {
+          return json({ error: pickupsPerWeek === 2 ? "Please pick both service days for your area." : "Please pick a service day." }, 400)
+        }
       }
       if (!body.agreed) return json({ error: "Please review the agreement and tap Approve to start service." }, 400)
 
@@ -1299,9 +1320,10 @@ Deno.serve(async (req) => {
       const billAddr = bSame ? addr : `${bStreet}, ${bCity}, ${bState} ${bZip}`
       const name = `${firstName} ${lastName}`
       const price = scheduleType === "weekly" ? (pickupsPerWeek === 2 ? form.pricing.two_pickup : form.pricing.one_pickup) : null
+      const areaLabel = area ? AREA_LABELS[area] : null
       const scheduleTxt = scheduleType === "on_call"
         ? "On-Demand (price varies — reach out after signup)"
-        : `${serviceDays.join(" + ")} — ${pickupsPerWeek} pickup${pickupsPerWeek > 1 ? "s" : ""}/week${price != null ? ` ($${price.toFixed(2)}/wk)` : ""}`
+        : `${areaLabel}: ${serviceDays.join(" + ")} — ${pickupsPerWeek} pickup${pickupsPerWeek > 1 ? "s" : ""}/week${price != null ? ` ($${price.toFixed(2)}/wk)` : ""}`
       const consentNote = `Web signup agreement approved ${nowIso}${ip ? ` (IP ${ip})` : ""} — ${scheduleTxt}. Form: ${form.name} (${slug}).`
       const noteParts = [consentNote]
       if (!bSame) noteParts.push(`Billing address: ${billAddr}`)
@@ -1329,7 +1351,7 @@ Deno.serve(async (req) => {
         name: `${name} — ${street}`,
         address: addr,
         service: "Trash",
-        notes: scheduleType === "on_call" ? `ON-DEMAND service. ${notes || ""}`.trim() : (notes || null),
+        notes: [areaLabel ? `Service area: ${areaLabel}.` : null, scheduleType === "on_call" ? "ON-DEMAND service." : null, notes || null].filter(Boolean).join(" ") || null,
         price,
         pickup_days: scheduleType === "weekly" ? serviceDays : [],
         pickup_frequency: scheduleType,
