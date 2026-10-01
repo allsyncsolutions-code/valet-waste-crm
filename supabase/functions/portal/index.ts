@@ -21,7 +21,7 @@
 //   setup_session {token, origin, consent} → returns Runner.js config
 //                                  (publicKey, mid, env) so the portal can
 //                                  render the inline card form; consent required
-//   save_card {token, account_token, expiration, cvn?, consent}
+//   save_card {token, account_token, expiration, cvn?, zip, consent}
 //                                  → $0 auth + vault the tokenized card; store
 //                                  vault_id + display metadata; Randy texts admins
 //   remove_card {token}          → delete vault payment account + clear autopay
@@ -455,7 +455,7 @@ async function createMagicLink(customerId: string, slug: string): Promise<string
 
 // ---- session helper ----------------------------------------------------------
 const CUST_COLS =
-  "id,name,email,phone,portal_slug,autopay_consent,autopay_consented_at,run_vault_id,run_vault_holder_id,run_card_brand,run_card_last4,notify_on_service,notify_sms,notify_push,notify_email"
+  "id,name,email,phone,portal_slug,autopay_consent,autopay_consented_at,run_vault_id,run_vault_holder_id,run_card_brand,run_card_last4,run_card_zip,notify_on_service,notify_sms,notify_push,notify_email"
 
 async function customerFromToken(token: string): Promise<any | null> {
   if (!token) return null
@@ -623,6 +623,7 @@ async function portalData(cust: any) {
       saved: !!cust.run_vault_id,
       brand: cust.run_card_brand || null,
       last4: cust.run_card_last4 || null,
+      zip: cust.run_card_zip || null,
       consent: !!cust.autopay_consent,
     },
   }
@@ -1019,6 +1020,10 @@ Deno.serve(async (req) => {
       const cust = await customerFromToken(String(token || ""))
       if (!cust) return json({ error: "Session expired — sign in again." }, 401)
       if (!body.account_token || !body.expiration) return json({ error: "Missing tokenized card details." }, 400)
+      // Surcharge is on the MID: the $0 verification auth needs the cardholder
+      // zip or the gateway declines it.
+      const cardZip = String(body.zip || "").trim()
+      if (!/^\d{5}(-\d{4})?$/.test(cardZip)) return json({ error: "Enter the card's 5-digit billing ZIP." }, 400)
       const settings = await getSettings()
       if (!settings.run_mid) return json({ error: "Payments aren't set up yet — please contact us." }, 400)
       // NB: name this runToken — a bare `token` here shadows the session token
@@ -1041,6 +1046,7 @@ Deno.serve(async (req) => {
           name: cust.name || undefined,
           email: cust.email || undefined,
           cvn: body.cvn ? String(body.cvn) : undefined,
+          account_zip: cardZip,
           currency: "USD",
         },
       })
@@ -1061,6 +1067,7 @@ Deno.serve(async (req) => {
         run_card_brand: res.card_brand || res.card_type || null,
         run_card_last4: String(res.card_number || "").slice(-4) || null,
         run_card_exp: String(body.expiration) || null,
+        run_card_zip: cardZip,
         autopay_consent: !!body.consent,
         autopay_consented_at: body.consent ? new Date().toISOString() : null,
       }
@@ -1095,7 +1102,7 @@ Deno.serve(async (req) => {
       }
       await sbPatch(`customers?id=eq.${cust.id}`, {
         run_vault_id: null, run_vault_holder_id: null,
-        run_card_brand: null, run_card_last4: null, run_card_exp: null,
+        run_card_brand: null, run_card_last4: null, run_card_exp: null, run_card_zip: null,
         autopay_consent: false,
       })
       await textAdmins(`💳 ${cust.name} removed their saved payment method — autopay is off for them now. — Trashy Randy`)
@@ -1295,6 +1302,7 @@ Deno.serve(async (req) => {
             name: `${firstName} ${lastName}`,
             email,
             cvn: card.cvn ? String(card.cvn) : undefined,
+            account_zip: bZip,
             currency: "USD",
           },
         })
@@ -1307,6 +1315,7 @@ Deno.serve(async (req) => {
           run_card_brand: res.card_brand || res.card_type || null,
           run_card_last4: String(res.card_number || "").slice(-4) || null,
           run_card_exp: String(card.expiration) || null,
+          run_card_zip: bZip,
           autopay_consent: !!card.consent,
           autopay_consented_at: card.consent ? new Date().toISOString() : null,
         }

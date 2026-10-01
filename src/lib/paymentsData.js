@@ -43,9 +43,11 @@ export const listScheduledSends = (invoiceId) =>
 export const cancelScheduledSend = (id) =>
   call({ action: 'cancel_scheduled_send', id })
 
-// Run a one-time charge against a tokenized card (from Runner.js). Optionally
+// Run a one-time charge against a tokenized card (from Runner.js). Pass
+// zip — the card's billing ZIP, required now that surcharge is enabled on
+// the MID (missing zip = "Surcharge Not Supported" decline). Optionally
 // vault the card for autopay (save_card). Pass useSaved:true to charge the
 // customer's card on file (vault) instead of a freshly tokenized card — used
-// by the staff "Take payment" modal.
+// by the staff "Take payment" modal (the stored zip is sent server-side).
 export const chargeInvoice = (p) =>
-  call({ action: 'charge_invoice', invoice_id: p.invoiceId, account_token: p.accountToken, expiration: p.expiration, cvn: p.cvn, name: p.name, address: p.address, save_card: !!p.saveCard, use_saved: !!p.useSaved })
+  call({ action: 'charge_invoice', invoice_id: p.invoiceId, account_token: p.accountToken, expiration: p.expiration, cvn: p.cvn, name: p.name, account_zip: p.zip, address: p.address, save_card: !!p.saveCard, use_saved: !!p.useSaved })

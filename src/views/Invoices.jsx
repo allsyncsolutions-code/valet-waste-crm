@@ -1064,6 +1064,7 @@ function TakePaymentModal({ inv, cfg, onClose, onPaid }) {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [done, setDone] = useState(false)
+  const [zip, setZip] = useState('') // keyed card's billing zip — required (surcharge-enabled MID)
   const [runnerReady, setRunnerReady] = useState(false)
   const [formKey, setFormKey] = useState(0) // bump = remount the Runner form
   const runnerRef = useRef(null)
@@ -1121,6 +1122,7 @@ function TakePaymentModal({ inv, cfg, onClose, onPaid }) {
 
   async function chargeKeyed() {
     if (!runnerRef.current) return
+    if (!/^\d{5}(-\d{4})?$/.test(zip.trim())) { setErr('Enter the card\'s 5-digit billing ZIP.'); return }
     setBusy(true)
     setErr('')
     try {
@@ -1138,6 +1140,7 @@ function TakePaymentModal({ inv, cfg, onClose, onPaid }) {
         expiration: t.expiry,
         cvn: t.cvn || t.cvv,
         name: inv.customerName,
+        zip: zip.trim(),
       }))
     } catch (e) {
       setErr(e.message || String(e))
@@ -1181,6 +1184,9 @@ function TakePaymentModal({ inv, cfg, onClose, onPaid }) {
                 (rendering inside breaks reconciliation → removeChild crash). */}
             <div key={formKey} id="run-take-form" style={{ minHeight: 64, marginBottom: 6 }} />
             {!runnerReady && <div style={{ color: '#9aa69e', fontSize: 12.5, padding: '0 2px 8px' }}>Loading secure card form…</div>}
+            <Field label="Billing ZIP (required — the card's own zip)">
+              <input value={zip} onChange={(e) => setZip(e.target.value)} inputMode="numeric" maxLength={10} placeholder="e.g. 32082" style={inp} />
+            </Field>
             <div style={{ display: 'flex', gap: 9, marginTop: 10 }}>
               <button onClick={onClose} disabled={busy} style={cancelBtn}>Cancel</button>
               <button onClick={chargeKeyed} disabled={busy || !runnerReady} style={{ ...primaryBtn, opacity: (busy || !runnerReady) ? 0.6 : 1 }}>
@@ -1189,6 +1195,7 @@ function TakePaymentModal({ inv, cfg, onClose, onPaid }) {
             </div>
             <div style={{ fontSize: 11, color: '#9aa69e', marginTop: 10 }}>
               Card details are entered in a secure Run Payments field — they never touch this app's code or database.
+              Credit card payments carry a processing surcharge (debit cards are never surcharged).
             </div>
           </>
         )}

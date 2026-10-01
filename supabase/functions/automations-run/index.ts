@@ -681,7 +681,7 @@ async function runAutopayCharge(force = false): Promise<string> {
   if (!settings.run_mid) return "Skipped — Run Merchant isn't configured."
 
   const customers = await sbGet(
-    `customers?autopay_consent=is.true&run_vault_id=not.is.null&select=id,name,run_vault_id,run_vault_holder_id`,
+    `customers?autopay_consent=is.true&run_vault_id=not.is.null&select=id,name,run_vault_id,run_vault_holder_id,run_card_zip`,
   )
   if (!customers.length) return "No clients have autopay enabled."
 
@@ -742,11 +742,14 @@ async function runAutopayCharge(force = false): Promise<string> {
         const cents = Math.round(newTotal * 100)
         if (cents < 50) continue
         const { token, mid, env } = await runAccessToken()
+        // Surcharge is on the MID: vault charges need the cardholder zip too,
+        // or the gateway declines with "Surcharge Not Supported".
         const res = await runCharge(env, token, {
           mid,
           amount: cents,
           vault_id: cust.run_vault_id,
           vault_holder_id: cust.run_vault_holder_id || undefined,
+          account_zip: cust.run_card_zip || undefined,
           capture: "Y",
           currency: "USD",
           cof: "M", // merchant-initiated
@@ -758,12 +761,13 @@ async function runAutopayCharge(force = false): Promise<string> {
           await sbPatch(`invoices?id=eq.${inv.id}`, {
             status: "paid", paid_at: new Date().toISOString(),
             run_paid_at: new Date().toISOString(), run_trans_id: String(res.trans_id),
+            surcharge_amount: Number(res.fee_amount) || 0,
           })
           charged++
           totalCharged += newTotal
         } else {
           failed++
-          failLines.push(`${cust.name} ${inv.number}: ${res.resp_text || res.result || "declined"}`)
+          failLines.push(`${cust.name} ${inv.number}: ${res.resp_text || res.result || "declined"}${cust.run_card_zip ? "" : " (no billing zip on file — re-save the card)"}`)
         }
       } catch (e) {
         failed++

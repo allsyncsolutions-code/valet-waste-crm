@@ -13,7 +13,7 @@
 //   payment_url {invoice_id, origin}→ mints/stores the portal pay link for an
 //                                     invoice, returns { url }; marks the
 //                                     invoice 'sent' the first time.
-//   charge_invoice {invoice_id, account_token, expiration, cvn, name?, address?, save_card?, tip_amount?}
+//   charge_invoice {invoice_id, account_token, expiration, cvn, name?, address?, account_zip?, save_card?, tip_amount?}
 //                                   → runs a one-time charge via /charge; on
 //                                     approval stores run_trans_id and marks the
 //                                     invoice paid. Optionally vaults the card.
@@ -638,7 +638,7 @@ Deno.serve(async (req) => {
 
       const settings = await getSettings()
       const { token, mid, env } = await getAccessToken(settings)
-      const cust = (await sbGet(`customers?id=eq.${inv.customer_id}&select=id,name,email,phone,run_vault_id,run_vault_holder_id`))[0] || {}
+      const cust = (await sbGet(`customers?id=eq.${inv.customer_id}&select=id,name,email,phone,run_vault_id,run_vault_holder_id,run_card_zip`))[0] || {}
 
       const chargeBody: ChargeBody = {
         mid,
@@ -652,17 +652,27 @@ Deno.serve(async (req) => {
         name: body.name || cust.name || undefined,
         email: cust.email || undefined,
       }
+      // Surcharge is enabled on the MID (2026-10-01): the gateway REQUIRES the
+      // cardholder's billing zip on every authorization — a charge without it
+      // declines with "Surcharge Not Supported".
+      const zip = String(body.account_zip || (body.address && body.address.account_zip) || "").trim()
+      if (!/^\d{5}(-\d{4})?$/.test(zip) && !body.use_saved) {
+        return json({ error: "Enter the card's 5-digit billing ZIP to complete the payment." }, 400)
+      }
       if (body.use_saved) {
         // Staff "Take payment" with the customer's card on file (vaulted).
         if (!cust.run_vault_id) return json({ error: "No saved card on file for this customer." }, 400)
+        if (!cust.run_card_zip) return json({ error: "This saved card has no billing ZIP on file — ask the client to re-save it from their portal, or charge a card entered manually." }, 400)
         chargeBody.vault_id = cust.run_vault_id
         chargeBody.vault_holder_id = cust.run_vault_holder_id || undefined
+        chargeBody.account_zip = cust.run_card_zip
         chargeBody.cof = "M" // merchant-initiated, card on file
       } else if (body.account_token && body.expiration) {
         chargeBody.account_token = String(body.account_token)
         chargeBody.expiration = String(body.expiration)
         if (body.cvn) chargeBody.cvn = String(body.cvn)
-        if (body.address) Object.assign(chargeBody, body.address) // address1, city, region, country, account_zip
+        if (body.address) Object.assign(chargeBody, body.address) // address1, city, region, country
+        chargeBody.account_zip = zip
       } else {
         return json({ error: "Missing card details." }, 400)
       }
@@ -690,12 +700,17 @@ Deno.serve(async (req) => {
         return json({ ok: false, declined: true, result: res.result, resp_text: res.resp_text || "Declined", trans_id: res.trans_id || null })
       }
 
+      // The processor applies the surcharge on top of `amount` and reports it
+      // back (dollars, string or number) — record it on the invoice. The
+      // customer's card is charged amount + fee.
+      const fee = Number(res.fee_amount) || 0
       const patch: Record<string, unknown> = {
         status: "paid",
         paid_at: new Date().toISOString(),
         run_paid_at: new Date().toISOString(),
         run_trans_id: String(res.trans_id),
         tip_amount: tip,
+        surcharge_amount: fee,
       }
       await sbPatch(`invoices?id=eq.${inv.id}`, patch)
 
@@ -708,13 +723,14 @@ Deno.serve(async (req) => {
           run_card_brand: res.card_type || null,
           run_card_last4: String(res.card_number || "").slice(-4) || null,
           run_card_exp: String(body.expiration || "") || null,
+          run_card_zip: zip || cust.run_card_zip || null,
           autopay_consent: true,
           autopay_consented_at: new Date().toISOString(),
         })
         saved = true
       }
 
-      return json({ ok: true, trans_id: res.trans_id, resp_text: res.resp_text, saved, charged: cents / 100, tip })
+      return json({ ok: true, trans_id: res.trans_id, resp_text: res.resp_text, saved, charged: cents / 100, tip, fee_amount: res.fee_amount ?? null })
     }
 
     return json({ error: "Unknown action." }, 400)

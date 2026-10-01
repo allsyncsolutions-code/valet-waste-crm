@@ -433,6 +433,9 @@ export default function SignupPage({ slug } = {}) {
                 <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} style={{ width: 17, height: 17, marginTop: 1, flex: 'none' }} />
                 <span>I agree to keep this card on file for automatic monthly charges. My card is vaulted securely and is never charged today — and with a card on file, my 5th week of service is free.</span>
               </label>
+              <div style={{ fontSize: 11.5, color: '#9aa69e', lineHeight: 1.5 }}>
+                Card details are entered in a secure Run Payments form — we never see or store your card number. A card-processing surcharge applies to credit card charges (debit cards are never surcharged).
+              </div>
             </div>
           )}
           {cardChoice === 'skip' && (

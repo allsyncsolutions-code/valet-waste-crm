@@ -795,6 +795,7 @@ function PaymentsTab({ data, token, preview, onChanged, setNotice }) {
   const [consent, setConsent] = useState(false)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
+  const [zip, setZip] = useState('') // card's billing zip — required (surcharge-enabled MID)
   const [runnerReady, setRunnerReady] = useState(false)
   const [formKey, setFormKey] = useState(0) // bump = remount the Runner form
   const runnerRef = useRef(null)
@@ -832,6 +833,7 @@ function PaymentsTab({ data, token, preview, onChanged, setNotice }) {
   async function saveCard() {
     if (preview || !runnerRef.current) return
     if (!consent) { setErr('Please check the box agreeing to automatic monthly charges first.'); return }
+    if (!/^\d{5}(-\d{4})?$/.test(zip.trim())) { setErr('Please enter the 5-digit billing ZIP for your card.'); return }
     setBusy(true)
     setErr('')
     try {
@@ -845,6 +847,7 @@ function PaymentsTab({ data, token, preview, onChanged, setNotice }) {
         account_token: res.account_token || res.token,
         expiration: res.expiry,
         cvn: res.cvv,
+        zip: zip.trim(),
         consent,
       })
       setNotice(`✓ Your card is saved — autopay is on and your 5th pickup week is free.`)
@@ -896,6 +899,18 @@ function PaymentsTab({ data, token, preview, onChanged, setNotice }) {
                   <div key={formKey} id="run-form" style={{ minHeight: 64, marginBottom: 4 }} />
                 </div>
                 {!runnerReady && <div style={{ color: '#9aa69e', fontSize: 12.5, padding: '0 2px 8px' }}>Loading secure card form…</div>}
+                <label style={{ display: 'block', fontSize: 12, color: '#5d6b63', fontWeight: 600, marginTop: 8, marginBottom: 5 }}>
+                  Billing ZIP
+                  <input
+                    value={zip}
+                    onChange={(e) => setZip(e.target.value)}
+                    inputMode="numeric"
+                    autoComplete="postal-code"
+                    maxLength={10}
+                    placeholder="e.g. 32082"
+                    style={{ width: '100%', border: '1px solid #e6eae6', borderRadius: 9, padding: '11px 12px', fontSize: 16, outline: 'none', boxSizing: 'border-box', marginTop: 5, fontWeight: 400 }}
+                  />
+                </label>
                 <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13.5, color: '#3c4a42', lineHeight: 1.5, cursor: 'pointer', marginTop: 8 }}>
                   <input
                     type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)}
@@ -914,6 +929,7 @@ function PaymentsTab({ data, token, preview, onChanged, setNotice }) {
                 >{busy ? 'Saving…' : '🔒 Save payment method'}</button>
                 <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 10 }}>
                   Card details are entered in a secure Run Payments form — we never see or store your card number.
+                  A card-processing surcharge applies to credit card charges (debit cards are never surcharged).
                 </div>
               </>
             )}
@@ -960,6 +976,9 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
   const [runnerReady, setRunnerReady] = useState(false)
   const [saveCard, setSaveCard] = useState(false)
   const [tip, setTip] = useState(0) // dollars, customer-chosen; charged on top of inv.total
+  // Card's billing zip — required on this surcharge-enabled MID. Prefilled
+  // from the saved card's zip when the client already has one on file.
+  const [zip, setZip] = useState(payment.zip || '')
   const [formKey, setFormKey] = useState(0) // bump = remount the Runner form
   const runnerRef = useRef(null)
   const formRef = useRef(null)
@@ -994,6 +1013,7 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
 
   async function pay() {
     if (preview || !runnerRef.current || !inv) return
+    if (!/^\d{5}(-\d{4})?$/.test(zip.trim())) { setErr('Please enter the 5-digit billing ZIP for your card.'); return }
     setBusy(true)
     setErr('')
     try {
@@ -1010,6 +1030,7 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
           account_token: t.account_token || t.token,
           expiration: t.expiry,
           cvn: t.cvv,
+          account_zip: zip.trim(),
           save_card: saveCard,
           tip_amount: tip,
         },
@@ -1022,7 +1043,8 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
       const res = data
       if (res && res.ok) {
         const charged = Number(res.charged ?? (Number(inv.total || 0) + Number(tip || 0)))
-        setNotice(`✓ Payment of ${money(charged)} received — thank you!${Number(tip) > 0 ? ` (including a ${money(tip)} tip)` : ''}${res.saved ? ' Your card is saved for autopay.' : ''}`)
+        const fee = Number(res.fee_amount) || 0
+        setNotice(`✓ Payment of ${money(charged)} received — thank you!${Number(tip) > 0 ? ` (including a ${money(tip)} tip)` : ''}${fee > 0 ? ` Includes a ${money(fee)} credit card surcharge.` : ''}${res.saved ? ' Your card is saved for autopay.' : ''}`)
         await onChanged()
         onDone && onDone()
       } else if (res && res.declined) {
@@ -1072,6 +1094,18 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
           <div key={formKey} id="run-pay-form" style={{ minHeight: 64, marginBottom: 4 }} />
         </div>
         {!runnerReady && <div style={{ color: '#9aa69e', fontSize: 12.5, padding: '0 2px 8px' }}>Loading secure card form…</div>}
+        <label style={{ display: 'block', fontSize: 12, color: '#5d6b63', fontWeight: 600, marginTop: 8, marginBottom: 5 }}>
+          Billing ZIP
+          <input
+            value={zip}
+            onChange={(e) => setZip(e.target.value)}
+            inputMode="numeric"
+            autoComplete="postal-code"
+            maxLength={10}
+            placeholder="e.g. 32082"
+            style={{ width: '100%', border: '1px solid #e6eae6', borderRadius: 9, padding: '11px 12px', fontSize: 16, outline: 'none', boxSizing: 'border-box', marginTop: 5, fontWeight: 400 }}
+          />
+        </label>
         {!payment.saved && (
           <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, color: '#3c4a42', lineHeight: 1.5, cursor: 'pointer', marginTop: 8 }}>
             <input type="checkbox" checked={saveCard} onChange={(e) => setSaveCard(e.target.checked)} style={{ marginTop: 3, width: 16, height: 16, accentColor: GREEN }} />
@@ -1086,6 +1120,7 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
         >{busy ? 'Processing…' : `Pay ${money(Number(inv.total || 0) + Number(tip || 0))}`}</button>
         <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 10 }}>
           Card details are entered in a secure Run Payments form — we never see or store your card number.
+          A card-processing surcharge applies to credit card payments (debit cards are never surcharged).
         </div>
       </div>
     </div>

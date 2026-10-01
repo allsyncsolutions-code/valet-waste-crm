@@ -38,6 +38,7 @@ export default function PayPage({ slug, invoiceId }) {
   const [runnerReady, setRunnerReady] = useState(false)
   const [saveCard, setSaveCard] = useState(false)
   const [tip, setTip] = useState(0) // dollars, customer-chosen; charged on top of inv.total
+  const [zip, setZip] = useState('') // card's billing zip — required (surcharge-enabled MID)
   const [formKey, setFormKey] = useState(0) // bump = remount the Runner form
   const runnerRef = useRef(null)
   const formRef = useRef(null)
@@ -85,6 +86,7 @@ export default function PayPage({ slug, invoiceId }) {
 
   async function pay() {
     if (!runnerRef.current || !inv) return
+    if (!/^\d{5}(-\d{4})?$/.test(zip.trim())) { setErr('Please enter the 5-digit billing ZIP for your card.'); return }
     setBusy(true)
     setErr('')
     try {
@@ -100,6 +102,7 @@ export default function PayPage({ slug, invoiceId }) {
           account_token: t.account_token || t.token,
           expiration: t.expiry,
           cvn: t.cvv,
+          account_zip: zip.trim(),
           save_card: saveCard,
           tip_amount: tip,
         },
@@ -111,7 +114,7 @@ export default function PayPage({ slug, invoiceId }) {
       }
       const res = data
       if (res && res.ok) {
-        setPaid({ saved: !!res.saved, charged: Number(res.charged ?? (Number(inv.total || 0) + Number(tip || 0))) })
+        setPaid({ saved: !!res.saved, charged: Number(res.charged ?? (Number(inv.total || 0) + Number(tip || 0))), fee: Number(res.fee_amount) || 0 })
       } else if (res && res.declined) {
         resetCardForm()
         setErr(`${res.resp_text ? `${res.resp_text} — ` : ''}please re-enter your card details and try again.`)
@@ -292,7 +295,7 @@ export default function PayPage({ slug, invoiceId }) {
           <div style={{ fontSize: 34 }}>✓</div>
           <div style={{ fontSize: 17, fontWeight: 800, color: GREEN, marginTop: 6 }}>Invoice {inv.number} is paid</div>
           <div style={{ fontSize: 13.5, color: '#5d6b63', marginTop: 8 }}>
-            {paid ? <>Thank you! We've received your payment of <b>{money(charged)}</b>{Number(tip) > 0 ? ` (including a ${money(tip)} tip — thank you!)` : ''}.{paid.saved ? ' Your card is saved for autopay.' : ''}</> : 'This invoice has already been paid — nothing else to do.'}
+            {paid ? <>Thank you! We've received your payment of <b>{money(charged)}</b>{Number(tip) > 0 ? ` (including a ${money(tip)} tip — thank you!)` : ''}.{paid.saved ? ' Your card is saved for autopay.' : ''}{paid.fee > 0 ? <div style={{ fontSize: 12, color: '#7c8a82', marginTop: 6 }}>Includes a {money(paid.fee)} credit card surcharge.</div> : ''}</> : 'This invoice has already been paid — nothing else to do.'}
           </div>
         </div>
         {pdfBtn}
@@ -324,6 +327,18 @@ export default function PayPage({ slug, invoiceId }) {
             <div key={formKey} id="run-standalone-form" style={{ minHeight: 64, marginBottom: 4 }} />
           </div>
           {!runnerReady && <div style={{ color: '#9aa69e', fontSize: 12.5, padding: '0 2px 8px' }}>Loading secure card form…</div>}
+          <label style={{ display: 'block', fontSize: 12, color: '#5d6b63', fontWeight: 600, marginTop: 8, marginBottom: 5 }}>
+            Billing ZIP
+            <input
+              value={zip}
+              onChange={(e) => setZip(e.target.value)}
+              inputMode="numeric"
+              autoComplete="postal-code"
+              maxLength={10}
+              placeholder="e.g. 32082"
+              style={{ width: '100%', border: '1px solid #e6eae6', borderRadius: 9, padding: '11px 12px', fontSize: 16, outline: 'none', boxSizing: 'border-box', marginTop: 5, fontWeight: 400 }}
+            />
+          </label>
           <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, color: '#3c4a42', lineHeight: 1.5, cursor: 'pointer', marginTop: 8 }}>
             <input type="checkbox" checked={saveCard} onChange={(e) => setSaveCard(e.target.checked)} style={{ marginTop: 3, width: 16, height: 16, accentColor: GREEN }} />
             <span>Save this card for autopay (charged automatically at the start of each month for open invoices).</span>
@@ -336,6 +351,7 @@ export default function PayPage({ slug, invoiceId }) {
           >{busy ? 'Processing…' : `Pay ${money(Number(inv.total || 0) + Number(tip || 0))}`}</button>
           <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 10, textAlign: 'center' }}>
             Card details are entered in a secure Run Payments form — we never see or store your card number.
+            <br />A card-processing surcharge applies to credit card payments (debit cards are never surcharged).
           </div>
         </div>
       )}
