@@ -351,7 +351,7 @@ export default function PayPage({ slug, invoiceId }) {
           >{busy ? 'Processing…' : `Pay ${money(Number(inv.total || 0) + Number(tip || 0))}`}</button>
           <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 10, textAlign: 'center' }}>
             Card details are entered in a secure Run Payments form — we never see or store your card number.
-            <br />A card-processing surcharge applies to credit card payments (debit cards are never surcharged).
+            <br />A 3% card-processing surcharge applies to credit card payments (debit cards are never surcharged).
           </div>
         </div>
       )}

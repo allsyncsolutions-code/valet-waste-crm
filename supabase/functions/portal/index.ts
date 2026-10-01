@@ -24,6 +24,9 @@
 //   save_card {token, account_token, expiration, cvn?, zip, consent}
 //                                  → $0 auth + vault the tokenized card; store
 //                                  vault_id + display metadata; Randy texts admins
+//   update_card_zip {token, zip} → store the billing ZIP for an already-saved
+//                                  card (surcharge-era requirement; no Run call —
+//                                  the zip is sent at charge time)
 //   remove_card {token}          → delete vault payment account + clear autopay
 //   quote_respond {token, quote_id, response, note} → approve/decline a quote,
 //                                  Randy texts admins
@@ -1088,6 +1091,16 @@ Deno.serve(async (req) => {
         )
       }
       return json({ ok: true, brand: res.card_type || null, last4: String(res.card_number || "").slice(-4) || null })
+    }
+
+    if (action === "update_card_zip") {
+      const cust = await customerFromToken(String(token || ""))
+      if (!cust) return json({ error: "Session expired — sign in again." }, 401)
+      const zip = String(body.zip || "").trim()
+      if (!/^\d{5}(-\d{4})?$/.test(zip)) return json({ error: "Enter the card's 5-digit billing ZIP." }, 400)
+      if (!cust.run_vault_id) return json({ error: "No saved card on file — save a card first." }, 400)
+      await sbPatch(`customers?id=eq.${cust.id}`, { run_card_zip: zip })
+      return json({ ok: true })
     }
 
     if (action === "remove_card") {

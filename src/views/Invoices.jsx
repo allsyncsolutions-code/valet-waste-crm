@@ -1195,7 +1195,7 @@ function TakePaymentModal({ inv, cfg, onClose, onPaid }) {
             </div>
             <div style={{ fontSize: 11, color: '#9aa69e', marginTop: 10 }}>
               Card details are entered in a secure Run Payments field — they never touch this app's code or database.
-              Credit card payments carry a processing surcharge (debit cards are never surcharged).
+              Credit card payments carry a 3% processing surcharge (debit cards are never surcharged).
             </div>
           </>
         )}

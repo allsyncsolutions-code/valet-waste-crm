@@ -388,6 +388,19 @@ function HomeTab({ data, nextPickup, pendingQuotes, excessCount, go, shared, onS
   const payment = data.payment || {}
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {/* saved card missing its billing zip — surcharge-era gateway requirement;
+          the fix lives on the Payments tab (no card re-entry needed) */}
+      {!shared && payment.saved && !payment.zip && (
+        <div style={{ background: '#faf3e2', border: '1px solid #ecd9a8', borderRadius: 12, padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div style={{ flex: 1, fontSize: 13, color: '#8a6414', lineHeight: 1.5 }}>
+            <b>One quick thing:</b> add your saved card's billing ZIP so your automatic monthly charges keep going through.
+          </div>
+          <button
+            onClick={() => go('payments')}
+            style={{ flex: 'none', background: '#8a6414', color: '#fff', border: 'none', borderRadius: 9, padding: '9px 14px', fontSize: 12.5, fontWeight: 700, cursor: 'pointer' }}
+          >Add ZIP</button>
+        </div>
+      )}
       {/* hero: next pickup */}
       <div style={{ background: 'linear-gradient(150deg,#1f7a4d,#155e3a)', borderRadius: 15, padding: '18px 20px', color: '#fff' }}>
         <div style={{ fontSize: 11, color: '#bfe6d0', letterSpacing: '.08em' }}>NEXT PICKUP</div>
@@ -796,6 +809,8 @@ function PaymentsTab({ data, token, preview, onChanged, setNotice }) {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [zip, setZip] = useState('') // card's billing zip — required (surcharge-enabled MID)
+  const [fixZip, setFixZip] = useState('') // saved-card-missing-zip banner field
+  const [fixBusy, setFixBusy] = useState(false)
   const [runnerReady, setRunnerReady] = useState(false)
   const [formKey, setFormKey] = useState(0) // bump = remount the Runner form
   const runnerRef = useRef(null)
@@ -869,6 +884,21 @@ function PaymentsTab({ data, token, preview, onChanged, setNotice }) {
     setBusy(false)
   }
 
+  // Saved card predates the surcharge-era zip requirement — collect just the
+  // zip (no card re-entry; it's sent along on future charges).
+  async function saveCardZip() {
+    if (preview) return
+    if (!/^\d{5}(-\d{4})?$/.test(fixZip.trim())) { setErr('Please enter the 5-digit billing ZIP for your card.'); return }
+    setFixBusy(true)
+    setErr('')
+    try {
+      await portalApi({ action: 'update_card_zip', token, zip: fixZip.trim() })
+      setNotice('✓ Billing ZIP saved — your automatic charges are all set.')
+      await onChanged()
+    } catch (e) { setErr(e.message || String(e)) }
+    setFixBusy(false)
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       {err && <div style={{ background: '#fbeae6', color: '#c0492f', borderRadius: 9, padding: '9px 12px', fontSize: 13 }}>{err}</div>}
@@ -929,7 +959,7 @@ function PaymentsTab({ data, token, preview, onChanged, setNotice }) {
                 >{busy ? 'Saving…' : '🔒 Save payment method'}</button>
                 <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 10 }}>
                   Card details are entered in a secure Run Payments form — we never see or store your card number.
-                  A card-processing surcharge applies to credit card charges (debit cards are never surcharged).
+                  A 3% card-processing surcharge applies to credit card charges (debit cards are never surcharged).
                 </div>
               </>
             )}
@@ -937,6 +967,30 @@ function PaymentsTab({ data, token, preview, onChanged, setNotice }) {
         </>
       ) : (
         <>
+          {payment.saved && !payment.zip && (
+            <div style={{ background: '#faf3e2', border: '1px solid #ecd9a8', borderRadius: 12, padding: '14px 16px' }}>
+              <div style={{ fontWeight: 700, fontSize: 14, color: '#8a6414' }}>One quick thing — your card's billing ZIP</div>
+              <div style={{ fontSize: 13, color: '#8a6414', marginTop: 5, lineHeight: 1.5 }}>
+                Card processing rules changed and we now need the billing ZIP on file for your saved card. It takes 5 seconds — no card re-entry needed.
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                <input
+                  value={fixZip}
+                  onChange={(e) => setFixZip(e.target.value)}
+                  inputMode="numeric"
+                  autoComplete="postal-code"
+                  maxLength={10}
+                  placeholder="Billing ZIP"
+                  style={{ flex: 1, border: '1px solid #ecd9a8', borderRadius: 9, padding: '10px 12px', fontSize: 16, outline: 'none', background: '#fff' }}
+                />
+                <button
+                  onClick={saveCardZip}
+                  disabled={fixBusy || preview}
+                  style={{ flex: 'none', background: '#8a6414', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 16px', fontSize: 13, fontWeight: 700, cursor: 'pointer', opacity: fixBusy ? 0.6 : 1 }}
+                >{fixBusy ? 'Saving…' : 'Save ZIP'}</button>
+              </div>
+            </div>
+          )}
           <div style={card}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
               <div style={{ width: 46, height: 32, borderRadius: 6, background: '#15201b', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10.5, fontWeight: 800, letterSpacing: '.04em' }}>
@@ -1120,7 +1174,7 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
         >{busy ? 'Processing…' : `Pay ${money(Number(inv.total || 0) + Number(tip || 0))}`}</button>
         <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 10 }}>
           Card details are entered in a secure Run Payments form — we never see or store your card number.
-          A card-processing surcharge applies to credit card payments (debit cards are never surcharged).
+          A 3% card-processing surcharge applies to credit card payments (debit cards are never surcharged).
         </div>
       </div>
     </div>
