@@ -14,6 +14,25 @@ const money = (v) => '$' + Number(v || 0).toFixed(2)
 
 export const INVOICE_STATUS = ['draft', 'sent', 'paid', 'void']
 
+// How a manually marked-paid invoice was paid. 'card' is never in this list —
+// it's stamped server-side when a gateway charge (pay page, take-payment,
+// autopay, webhook) flips the invoice.
+export const PAYMENT_METHODS = [
+  { value: 'cash', label: 'Cash' },
+  { value: 'check', label: 'Check' },
+  { value: 'zelle', label: 'Zelle' },
+  { value: 'cash_app', label: 'Cash App' },
+  { value: 'venmo', label: 'Venmo' },
+  { value: 'credit', label: 'Valet-Waste Credit' },
+  { value: 'service_swap', label: 'Service for Service' },
+  { value: 'other', label: 'Other' },
+]
+
+export function paymentMethodLabel(value) {
+  if (value === 'card') return 'Card (online)'
+  return PAYMENT_METHODS.find((m) => m.value === value)?.label || ''
+}
+
 const num = (v) => (v == null || v === '' ? 0 : Number(v))
 export const round2 = (v) => Math.round(num(v) * 100) / 100
 
@@ -72,6 +91,9 @@ function mapInvoice(row) {
     runTransId: row.run_trans_id || null,
     sentAt: row.sent_at,
     paidAt: row.paid_at,
+    paymentMethod: row.payment_method || null,
+    checkNumber: row.check_number || '',
+    paymentNote: row.payment_note || '',
     createdAt: row.created_at,
     items,
   }
@@ -348,9 +370,15 @@ export async function setInvoiceStatus(id, status, extra = {}) {
   if (error) throw error
 }
 
-export async function markPaid(id, number) {
-  await setInvoiceStatus(id, 'paid', { paid_at: new Date().toISOString() })
-  logActivity({ type: 'invoice_paid', summary: `Marked invoice ${number || ''} paid`.replace('  ', ' ').trim(), entityType: 'invoice', entityId: id })
+// opts: { method, checkNumber, note } — how the payment came in.
+export async function markPaid(id, number, opts = {}) {
+  const method = PAYMENT_METHODS.find((m) => m.value === opts.method)?.value || null
+  const extra = { paid_at: new Date().toISOString(), payment_method: method }
+  if (method === 'check') extra.check_number = (opts.checkNumber || '').trim() || null
+  extra.payment_note = (opts.note || '').trim() || null
+  await setInvoiceStatus(id, 'paid', extra)
+  const how = [paymentMethodLabel(method), method === 'check' && extra.check_number ? `#${extra.check_number}` : ''].filter(Boolean).join(' ')
+  logActivity({ type: 'invoice_paid', summary: `Marked invoice ${number || ''} paid${how ? ` — ${how}` : ''}`.replace('  ', ' ').trim(), entityType: 'invoice', entityId: id })
 }
 
 export async function deleteInvoice(id, number) {

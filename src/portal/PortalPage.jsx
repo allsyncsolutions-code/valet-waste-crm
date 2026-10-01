@@ -1167,14 +1167,24 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
           </label>
         )}
         <TipPicker total={inv.total} tip={tip} setTip={setTip} green={GREEN} />
-        <button
-          disabled={busy || preview || !runnerReady}
-          onClick={pay}
-          style={{ ...btnPrimary, marginTop: 14, padding: '12px 22px', opacity: (busy || preview || !runnerReady) ? 0.55 : 1 }}
-        >{busy ? 'Processing…' : `Pay ${money(Number(inv.total || 0) + Number(tip || 0))}`}</button>
+        {(() => {
+          const payBase = Number(inv.total || 0) + Number(tip || 0)
+          const payTotal = Math.round(payBase * 103) / 100 // + the 3% credit-card surcharge the gateway adds on top
+          return (
+            <>
+              <button
+                disabled={busy || preview || !runnerReady}
+                onClick={pay}
+                style={{ ...btnPrimary, marginTop: 14, padding: '12px 22px', opacity: (busy || preview || !runnerReady) ? 0.55 : 1 }}
+              >{busy ? 'Processing…' : `Pay ${money(payTotal)}`}</button>
+              <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 8 }}>
+                Includes a {money(payTotal - payBase)} credit card surcharge (3%) — debit cards aren't surcharged and pay {money(payBase)}.
+              </div>
+            </>
+          )
+        })()}
         <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 10 }}>
           Card details are entered in a secure Run Payments form — we never see or store your card number.
-          A 3% card-processing surcharge applies to credit card payments (debit cards are never surcharged).
         </div>
       </div>
     </div>

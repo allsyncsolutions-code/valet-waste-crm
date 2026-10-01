@@ -1167,10 +1167,16 @@ function TakePaymentModal({ inv, cfg, onClose, onPaid }) {
             </div>
             {err && <div style={{ ...errorBox, marginBottom: 12 }}>{err}</div>}
 
+            {/* the gateway adds the 3% credit-card surcharge on top of the
+                invoice total — show what the client's card will actually see */}
+            {(() => {
+              const chargeTotal = Math.round(Number(inv.total || 0) * 103) / 100
+              return (
+                <>
             {inv.savedCard && (
               <>
                 <button onClick={chargeSaved} disabled={busy} style={{ ...primaryBtn, width: '100%', padding: '12px 16px', opacity: busy ? 0.6 : 1 }}>
-                  {busy ? 'Working…' : `Charge saved ${String(inv.savedCard.brand).toUpperCase()} ••${inv.savedCard.last4} — ${money(inv.total)}`}
+                  {busy ? 'Working…' : `Charge saved ${String(inv.savedCard.brand).toUpperCase()} ••${inv.savedCard.last4} — ${money(chargeTotal)}`}
                 </button>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '14px 0' }}>
                   <div style={{ flex: 1, height: 1, background: '#e6eae6' }} />
@@ -1190,13 +1196,16 @@ function TakePaymentModal({ inv, cfg, onClose, onPaid }) {
             <div style={{ display: 'flex', gap: 9, marginTop: 10 }}>
               <button onClick={onClose} disabled={busy} style={cancelBtn}>Cancel</button>
               <button onClick={chargeKeyed} disabled={busy || !runnerReady} style={{ ...primaryBtn, opacity: (busy || !runnerReady) ? 0.6 : 1 }}>
-                {busy ? 'Processing…' : `Charge ${money(inv.total)}`}
+                {busy ? 'Processing…' : `Charge ${money(chargeTotal)}`}
               </button>
             </div>
             <div style={{ fontSize: 11, color: '#9aa69e', marginTop: 10 }}>
               Card details are entered in a secure Run Payments field — they never touch this app's code or database.
-              Credit card payments carry a 3% processing surcharge (debit cards are never surcharged).
+              Amounts include the 3% credit card surcharge the client pays (debit cards pay {money(inv.total)} — never surcharged).
             </div>
+                </>
+              )
+            })()}
           </>
         )}
       </div>
