@@ -234,10 +234,15 @@ const tools = [
   },
   {
     name: "mark_invoice_paid",
-    description: "Mark an invoice as paid. Accepts an invoice number (e.g. INV-1001) or invoice id.",
+    description: "Mark an invoice as paid. Accepts an invoice number (e.g. INV-1001) or invoice id. If the user says HOW it was paid (cash, check, Zelle, etc.), pass it as method — and always ask for the check number when they say check.",
     input_schema: {
       type: "object",
-      properties: { invoice: { type: "string", description: "Invoice number or id" } },
+      properties: {
+        invoice: { type: "string", description: "Invoice number or id" },
+        method: { type: "string", enum: ["cash", "check", "zelle", "cash_app", "venmo", "credit", "service_swap", "other"], description: "How it was paid. If omitted, ask the user." },
+        check_number: { type: "string", description: "Check number, when method is check" },
+        note: { type: "string", description: "Optional note about the payment" },
+      },
       required: ["invoice"],
     },
   },
@@ -1498,7 +1503,13 @@ async function markInvoicePaid(a: any) {
   const ref = String(a.invoice ?? "").trim()
   const isUuid = /^[0-9a-f-]{36}$/i.test(ref)
   const filter = isUuid ? `id=eq.${enc(ref)}` : `number=eq.${enc(ref)}`
-  const [row] = await sbPatch(`invoices?${filter}`, { status: "paid", paid_at: new Date().toISOString() })
+  const patch: Record<string, unknown> = { status: "paid", paid_at: new Date().toISOString() }
+  if (a.method) {
+    patch.payment_method = String(a.method)
+    if (a.method === "check" && a.check_number) patch.check_number = String(a.check_number)
+  }
+  if (a.note) patch.payment_note = String(a.note)
+  const [row] = await sbPatch(`invoices?${filter}`, patch)
   if (!row) throw new Error(`Invoice "${ref}" not found.`)
   return { number: row.number, status: row.status }
 }

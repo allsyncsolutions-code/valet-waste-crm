@@ -734,7 +734,7 @@ async function runAutopayCharge(force = false): Promise<string> {
         }
 
         if (newTotal <= 0) {
-          await sbPatch(`invoices?id=eq.${inv.id}`, { status: "paid", paid_at: new Date().toISOString() })
+          await sbPatch(`invoices?id=eq.${inv.id}`, { status: "paid", paid_at: new Date().toISOString(), payment_method: "credit", payment_note: "Total covered by credits" })
           continue
         }
 
@@ -762,6 +762,7 @@ async function runAutopayCharge(force = false): Promise<string> {
             status: "paid", paid_at: new Date().toISOString(),
             run_paid_at: new Date().toISOString(), run_trans_id: String(res.trans_id),
             surcharge_amount: Number(res.fee_amount) || 0,
+            payment_method: "card",
           })
           charged++
           totalCharged += newTotal

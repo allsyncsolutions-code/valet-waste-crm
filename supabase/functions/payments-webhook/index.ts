@@ -132,6 +132,7 @@ Deno.serve(async (req) => {
           paid_at: new Date().toISOString(),
           run_paid_at: new Date().toISOString(),
           run_trans_id: String(transId || ""),
+          payment_method: "card",
         })
         // Only text on the transition — dedupe/replays stay quiet.
         const label = await invoiceLabel(String(invoiceId))

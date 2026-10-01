@@ -711,6 +711,7 @@ Deno.serve(async (req) => {
         run_trans_id: String(res.trans_id),
         tip_amount: tip,
         surcharge_amount: fee,
+        payment_method: "card",
       }
       await sbPatch(`invoices?id=eq.${inv.id}`, patch)
 

@@ -13,6 +13,8 @@ import {
   updateInvoice,
   updateBillTo,
   markPaid,
+  PAYMENT_METHODS,
+  paymentMethodLabel,
   deleteInvoice,
   textInvoice,
   emailInvoice,
@@ -91,6 +93,13 @@ export default function Invoices({ app }) {
   const [schedChannel, setSchedChannel] = useState('sms')
   const [schedDate, setSchedDate] = useState('')
   const [schedTime, setSchedTime] = useState('09:00')
+
+  // Mark-paid flow: pick how it was paid (check # when Check) + optional note
+  const [paidOpen, setPaidOpen] = useState(false)
+  const [paidMethod, setPaidMethod] = useState(null)
+  const [paidCheck, setPaidCheck] = useState('')
+  const [paidNote, setPaidNote] = useState('')
+  const [paidErr, setPaidErr] = useState(null)
 
   async function refresh() {
     const rows = await loadInvoices(app.activeLine)
@@ -277,7 +286,28 @@ export default function Invoices({ app }) {
       setBusy(false)
     }
   }
-  const onMarkPaid = () => action(() => markPaid(cur.id, cur.number))
+  const onMarkPaid = () => {
+    setPaidMethod(null)
+    setPaidCheck('')
+    setPaidNote('')
+    setPaidErr(null)
+    setPaidOpen(true)
+  }
+  async function submitMarkPaid() {
+    if (!paidMethod) { setPaidErr('Pick how this invoice was paid.'); return }
+    if (paidMethod === 'check' && !paidCheck.trim()) { setPaidErr('Enter the check number (or pick a different method).'); return }
+    setBusy(true)
+    setPaidErr(null)
+    try {
+      await markPaid(cur.id, cur.number, { method: paidMethod, checkNumber: paidCheck, note: paidNote })
+      setPaidOpen(false)
+      await refresh()
+    } catch (e) {
+      setPaidErr(e.message || String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
   const onEditBillTo = () => setBillToOpen(true)
   const onSendSms = () => action(async () => { await textInvoice(cur) })
   const onSendEmail = () => action(async () => { await emailInvoice(cur) })
@@ -431,6 +461,9 @@ export default function Invoices({ app }) {
           {list.map((inv) => {
             const on = inv.id === selId
             const meta = STATUS_META[inv.status] || STATUS_META.draft
+            // Paid chip carries the method: "Paid · Check", "Paid · Card", …
+            const shortMethod = { cash_app: 'Cash App', credit: 'Credit', service_swap: 'Service', card: 'Card' }[inv.paymentMethod] || paymentMethodLabel(inv.paymentMethod)
+            const chip = inv.status === 'paid' && shortMethod ? `Paid · ${shortMethod}` : meta.label
             return (
               <div key={inv.id} onClick={() => setSelId(inv.id)} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '11px 10px', borderRadius: 10, cursor: 'pointer', marginBottom: 2, background: on ? '#f3faf5' : '#fff', border: `1px solid ${on ? '#cfe0d5' : 'transparent'}` }}>
                 <div style={{ width: 36, height: 36, borderRadius: 9, background: '#e7f1eb', color: '#1f7a4d', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontWeight: 600, fontSize: 11, flex: 'none' }}>{initialsOf(inv.customerName)}</div>
@@ -443,7 +476,7 @@ export default function Invoices({ app }) {
                     {money(inv.total)}
                     {inv.tipAmount > 0 && <span style={{ color: '#1f7a4d', fontSize: 11 }}> +{money(inv.tipAmount)}🎁</span>}
                   </div>
-                  <span style={{ fontFamily: MONO, fontSize: 9.5, color: meta.color, background: meta.bg, padding: '1px 6px', borderRadius: 5 }}>{meta.label}</span>
+                  <span title={inv.paymentMethod ? `Paid via ${paymentMethodLabel(inv.paymentMethod)}${inv.paymentMethod === 'check' && inv.checkNumber ? ` #${inv.checkNumber}` : ''}` : undefined} style={{ fontFamily: MONO, fontSize: 9.5, color: meta.color, background: meta.bg, padding: '1px 6px', borderRadius: 5 }}>{chip}</span>
                 </div>
               </div>
             )
@@ -508,6 +541,42 @@ export default function Invoices({ app }) {
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
               <button type="button" onClick={() => setSchedOpen(false)} style={ghostBtn}>Cancel</button>
               <button type="button" onClick={submitSchedule} disabled={busy || !schedDate || !schedTime} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: busy || !schedDate || !schedTime ? 0.6 : 1 }}>{busy ? 'Scheduling…' : 'Schedule send'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {paidOpen && cur && (
+        <div onClick={() => !busy && setPaidOpen(false)} style={overlay}>
+          <div onClick={(e) => e.stopPropagation()} style={{ ...modal, width: 440 }}>
+            <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 4 }}>✓ Mark paid</div>
+            <div style={{ fontSize: 12, color: '#7c8a82', marginBottom: 14 }}>Invoice {cur.number} · {cur.customerName || 'Unknown'} · {money(cur.total)} — how was it paid?</div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 12 }}>
+              {PAYMENT_METHODS.map((m) => (
+                <button key={m.value} type="button" onClick={() => { setPaidMethod(m.value); setPaidErr(null) }} style={{ cursor: 'pointer', fontSize: 12.5, fontWeight: 600, padding: '9px 8px', borderRadius: 8, border: `1px solid ${paidMethod === m.value ? '#1f7a4d' : '#dde2dd'}`, background: paidMethod === m.value ? '#e7f1eb' : '#fff', color: paidMethod === m.value ? '#1f7a4d' : '#5d6b63', textAlign: 'left' }}>
+                  {paidMethod === m.value ? '● ' : '○ '}{m.label}
+                </button>
+              ))}
+            </div>
+
+            {paidMethod === 'check' && (
+              <label style={{ display: 'block', fontSize: 11.5, color: '#5d6b63', fontWeight: 600, marginBottom: 12 }}>
+                Check number *
+                <input value={paidCheck} onChange={(e) => setPaidCheck(e.target.value)} placeholder="e.g. 1042" style={{ ...inp, marginTop: 4 }} />
+              </label>
+            )}
+
+            <label style={{ display: 'block', fontSize: 11.5, color: '#5d6b63', fontWeight: 600, marginBottom: 12 }}>
+              Note (optional)
+              <textarea value={paidNote} onChange={(e) => setPaidNote(e.target.value)} rows={2} placeholder="Anything worth remembering about this payment" style={{ ...inp, marginTop: 4, resize: 'vertical' }} />
+            </label>
+
+            {paidErr && <div style={{ color: '#c0492f', fontSize: 12, marginBottom: 10 }}>{paidErr}</div>}
+
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button type="button" onClick={() => setPaidOpen(false)} style={ghostBtn}>Cancel</button>
+              <button type="button" onClick={submitMarkPaid} disabled={busy || !paidMethod} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: busy || !paidMethod ? 0.6 : 1 }}>{busy ? 'Saving…' : 'Mark paid'}</button>
             </div>
           </div>
         </div>
@@ -753,7 +822,7 @@ function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, on
           <div style={{ fontSize: 22, fontWeight: 800, letterSpacing: '.04em', color: '#15281d' }}>INVOICE</div>
           <div style={{ fontFamily: MONO, fontSize: 13, color: '#5d6b63', marginTop: 2 }}>{inv.number}</div>
           <div style={{ fontSize: 12, color: '#9aa69e', marginTop: 6 }}>
-            Issued {fmtDate(inv.issueDate)}{inv.dueDate ? ` · Due ${fmtDate(inv.dueDate)}` : ''}{inv.paidAt ? ` · Paid ${new Date(inv.paidAt).toLocaleDateString()}` : ''}
+            Issued {fmtDate(inv.issueDate)}{inv.dueDate ? ` · Due ${fmtDate(inv.dueDate)}` : ''}{inv.paidAt ? ` · Paid ${new Date(inv.paidAt).toLocaleDateString()}` : ''}{inv.paidAt && inv.paymentMethod ? ` via ${paymentMethodLabel(inv.paymentMethod)}${inv.paymentMethod === 'check' && inv.checkNumber ? ` #${inv.checkNumber}` : ''}` : ''}
           </div>
         </div>
         <div style={{ minWidth: 200 }}>
@@ -823,6 +892,14 @@ function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, on
           <TotalRow label={inv.tipAmount > 0 ? 'Invoice total' : 'Total'} value={money(inv.total)} bold />
           {inv.tipAmount > 0 && <TotalRow label="Charged (with tip)" value={money(inv.total + inv.tipAmount)} bold />}
         </div>
+
+        {/* how it was paid (manual mark-paid or Card for gateway charges) */}
+        {inv.status === 'paid' && (inv.paymentMethod || inv.paymentNote) && (
+          <div style={{ marginTop: 10, background: '#e7f1eb', border: '1px solid #cfe7da', borderRadius: 9, padding: '8px 12px', fontSize: 12, color: '#1f7a4d' }}>
+            <b>Paid{inv.paymentMethod ? ` via ${paymentMethodLabel(inv.paymentMethod)}${inv.paymentMethod === 'check' && inv.checkNumber ? ` #${inv.checkNumber}` : ''}` : ''}</b>
+            {inv.paymentNote && <div className="print-hide" style={{ marginTop: 2, color: '#3d6852' }}>{inv.paymentNote}</div>}
+          </div>
+        )}
 
         {/* manually attached photos not tied to a line's stop */}
         {loosePhotos.length > 0 && (
