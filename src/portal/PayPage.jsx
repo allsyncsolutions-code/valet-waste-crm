@@ -6,7 +6,7 @@
 // client portal for people who want the whole hub.
 import { useEffect, useRef, useState } from 'react'
 import { supabase } from '../lib/supabaseClient.js'
-import { loadRunner, tokenizeCard } from '../lib/runnerJs.js'
+import { loadRunner, tokenizeCard, initRunnerForm } from '../lib/runnerJs.js'
 import { RichText } from '../components/RichText.jsx'
 import { TipPicker } from '../components/TipPicker.jsx'
 import { printInvoiceDoc } from '../lib/printInvoice.js'
@@ -35,6 +35,7 @@ export default function PayPage({ slug, invoiceId }) {
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
   const [paid, setPaid] = useState(null) // { saved } after a successful charge
+  const [method, setMethod] = useState('card') // 'card' | 'ach' (bank account)
   const [runnerReady, setRunnerReady] = useState(false)
   const [saveCard, setSaveCard] = useState(false)
   const [tip, setTip] = useState(0) // dollars, customer-chosen; charged on top of inv.total
@@ -58,20 +59,17 @@ export default function PayPage({ slug, invoiceId }) {
     let cancelled = false
     loadRunner().then((Runner) => {
       if (cancelled || !formRef.current) return
-      const r = new Runner()
-      r.init({
+      runnerRef.current = initRunnerForm(Runner, {
         element: '#run-standalone-form',
         publicKey: payment.publicKey,
         mid: payment.mid,
         env: payment.env === 'uat' ? 'staging' : 'production',
-        useExpiry: true,
-        useCvv: true,
+        method,
       })
-      runnerRef.current = r
       setRunnerReady(true)
     }).catch((e) => setErr(e.message || String(e)))
     return () => { cancelled = true; runnerRef.current = null }
-  }, [payable, payment.publicKey, payment.mid, payment.env, formKey])
+  }, [payable, payment.publicKey, payment.mid, payment.env, formKey, method])
 
   // Runner's card fields are SINGLE-USE: after any tokenize() the iframe masks
   // and consumes what was typed, so a second attempt reads back all-empty
@@ -86,25 +84,26 @@ export default function PayPage({ slug, invoiceId }) {
 
   async function pay() {
     if (!runnerRef.current || !inv) return
-    if (!/^\d{5}(-\d{4})?$/.test(zip.trim())) { setErr('Please enter the 5-digit billing ZIP for your card.'); return }
+    const isAch = method === 'ach'
+    if (!isAch && !/^\d{5}(-\d{4})?$/.test(zip.trim())) { setErr('Please enter the 5-digit billing ZIP for your card.'); return }
     setBusy(true)
     setErr('')
     try {
       const t = await tokenizeCard(runnerRef.current)
       if (!t || (!t.account_token && !t.token)) {
         console.warn('[pay] empty tokenize response:', t)
-        throw new Error("We couldn't read the card details. Please re-enter your card information and try again.")
+        throw new Error(isAch
+          ? "We couldn't read the bank account details. Please re-enter them and try again."
+          : "We couldn't read the card details. Please re-enter your card information and try again.")
       }
       const { data, error } = await supabase.functions.invoke('payments', {
         body: {
           action: 'charge_invoice',
           invoice_id: String(inv.id),
+          payment_kind: isAch ? 'ach' : undefined,
           account_token: t.account_token || t.token,
-          expiration: t.expiry,
-          cvn: t.cvv,
-          account_zip: zip.trim(),
-          save_card: saveCard,
-          tip_amount: tip,
+          ...(isAch ? {} : { expiration: t.expiry, cvn: t.cvv, account_zip: zip.trim(), save_card: saveCard }),
+          tip_amount: isAch ? 0 : tip,
         },
       })
       if (error) {
@@ -318,50 +317,81 @@ export default function PayPage({ slug, invoiceId }) {
         </div>
       ) : (
         <div style={card}>
-          <div style={{ fontWeight: 700, fontSize: 14.5, marginBottom: 10 }}>Pay with card</div>
+          <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+            {[['card', '💳 Card'], ['ach', '🏦 Bank account (ACH)']].map(([v, label]) => (
+              <button
+                key={v}
+                type="button"
+                onClick={() => { if (!busy) { setMethod(v); setErr('') } }}
+                style={{ flex: 1, cursor: 'pointer', fontSize: 13, fontWeight: 700, padding: '9px 8px', borderRadius: 9, border: `1px solid ${method === v ? GREEN : '#dde2dd'}`, background: method === v ? '#e7f1eb' : '#fff', color: method === v ? GREEN : '#5d6b63' }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <div style={{ fontWeight: 700, fontSize: 14.5, marginBottom: 10 }}>{method === 'ach' ? 'Pay from your bank account' : 'Pay with card'}</div>
           {/* Runner.js owns everything inside #run-standalone-form — React must
               never render children there, or Runner's iframe injection breaks
               React's reconciler (removeChild NotFoundError → blank page). The
               loading hint lives OUTSIDE the container as a sibling. */}
           <div ref={formRef}>
-            <div key={formKey} id="run-standalone-form" style={{ minHeight: 64, marginBottom: 4 }} />
+            <div key={`${formKey}-${method}`} id="run-standalone-form" style={{ minHeight: 64, marginBottom: 4 }} />
           </div>
-          {!runnerReady && <div style={{ color: '#9aa69e', fontSize: 12.5, padding: '0 2px 8px' }}>Loading secure card form…</div>}
-          <label style={{ display: 'block', fontSize: 12, color: '#5d6b63', fontWeight: 600, marginTop: 8, marginBottom: 5 }}>
-            Billing ZIP
-            <input
-              value={zip}
-              onChange={(e) => setZip(e.target.value)}
-              inputMode="numeric"
-              autoComplete="postal-code"
-              maxLength={10}
-              placeholder="e.g. 32082"
-              style={{ width: '100%', border: '1px solid #e6eae6', borderRadius: 9, padding: '11px 12px', fontSize: 16, outline: 'none', boxSizing: 'border-box', marginTop: 5, fontWeight: 400 }}
-            />
-          </label>
-          <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, color: '#3c4a42', lineHeight: 1.5, cursor: 'pointer', marginTop: 8 }}>
-            <input type="checkbox" checked={saveCard} onChange={(e) => setSaveCard(e.target.checked)} style={{ marginTop: 3, width: 16, height: 16, accentColor: GREEN }} />
-            <span>Save this card for autopay (charged automatically at the start of each month for open invoices).</span>
-          </label>
-          <TipPicker total={inv.total} tip={tip} setTip={setTip} green={GREEN} />
-          {(() => {
-            const payBase = Number(inv.total || 0) + Number(tip || 0)
-            const payTotal = Math.round(payBase * 103) / 100 // + the 3% credit-card surcharge the gateway adds on top
-            return (
-              <>
-                <button
-                  disabled={busy || !runnerReady}
-                  onClick={pay}
-                  style={{ ...btnPrimary, marginTop: 14, width: '100%', opacity: (busy || !runnerReady) ? 0.55 : 1 }}
-                >{busy ? 'Processing…' : `Pay ${money(payTotal)}`}</button>
-                <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 8, textAlign: 'center' }}>
-                  Includes a {money(payTotal - payBase)} credit card surcharge (3%) — debit cards aren't surcharged and pay {money(payBase)}.
-                </div>
-              </>
-            )
-          })()}
+          {!runnerReady && <div style={{ color: '#9aa69e', fontSize: 12.5, padding: '0 2px 8px' }}>Loading secure {method === 'ach' ? 'bank' : 'card'} form…</div>}
+          {method === 'ach' && (
+            <div style={{ fontSize: 11.5, color: '#7c8a82', marginTop: 8, lineHeight: 1.5 }}>
+              Money moves directly from your bank account — no card surcharge. Bank payments take 2–3 business days to settle, and the invoice is marked paid right away.
+            </div>
+          )}
+          {method === 'card' && (
+            <>
+              <label style={{ display: 'block', fontSize: 12, color: '#5d6b63', fontWeight: 600, marginTop: 8, marginBottom: 5 }}>
+                Billing ZIP
+                <input
+                  value={zip}
+                  onChange={(e) => setZip(e.target.value)}
+                  inputMode="numeric"
+                  autoComplete="postal-code"
+                  maxLength={10}
+                  placeholder="e.g. 32082"
+                  style={{ width: '100%', border: '1px solid #e6eae6', borderRadius: 9, padding: '11px 12px', fontSize: 16, outline: 'none', boxSizing: 'border-box', marginTop: 5, fontWeight: 400 }}
+                />
+              </label>
+              <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, color: '#3c4a42', lineHeight: 1.5, cursor: 'pointer', marginTop: 8 }}>
+                <input type="checkbox" checked={saveCard} onChange={(e) => setSaveCard(e.target.checked)} style={{ marginTop: 3, width: 16, height: 16, accentColor: GREEN }} />
+                <span>Save this card for autopay (charged automatically at the start of each month for open invoices).</span>
+              </label>
+              <TipPicker total={inv.total} tip={tip} setTip={setTip} green={GREEN} />
+            </>
+          )}
+          {method === 'ach' ? (
+            <button
+              disabled={busy || !runnerReady}
+              onClick={pay}
+              style={{ ...btnPrimary, marginTop: 14, width: '100%', opacity: (busy || !runnerReady) ? 0.55 : 1 }}
+            >{busy ? 'Processing…' : `Pay ${money(inv.total)}`}</button>
+          ) : (
+            (() => {
+              const payBase = Number(inv.total || 0) + Number(tip || 0)
+              const payTotal = Math.round(payBase * 103) / 100 // + the 3% credit-card surcharge the gateway adds on top
+              return (
+                <>
+                  <button
+                    disabled={busy || !runnerReady}
+                    onClick={pay}
+                    style={{ ...btnPrimary, marginTop: 14, width: '100%', opacity: (busy || !runnerReady) ? 0.55 : 1 }}
+                  >{busy ? 'Processing…' : `Pay ${money(payTotal)}`}</button>
+                  <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 8, textAlign: 'center' }}>
+                    Includes a {money(payTotal - payBase)} credit card surcharge (3%) — debit cards aren't surcharged and pay {money(payBase)}.
+                  </div>
+                </>
+              )
+            })()
+          )}
           <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 10, textAlign: 'center' }}>
-            Card details are entered in a secure Run Payments form — we never see or store your card number.
+            {method === 'ach'
+              ? 'Bank details are entered in a secure Run Payments form — we never see or store your account number.'
+              : 'Card details are entered in a secure Run Payments form — we never see or store your card number.'}
           </div>
         </div>
       )}

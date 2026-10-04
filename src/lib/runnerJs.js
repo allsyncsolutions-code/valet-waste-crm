@@ -42,3 +42,29 @@ export async function tokenizeCard(runner, { settleMs = 800, retryMs = 1200 } = 
   }
   return res
 }
+
+// Init a Runner.js form for the requested method. 'card' renders the usual
+// card number/expiry/CVV iframe fields; 'ach' renders bank-account fields
+// (account/routing/confirm + account type + holder name) per Run's docs:
+// https://docs.runpayments.io/docs/guides/tokenization/runner-js (ACH section).
+export function initRunnerForm(Runner, { element, publicKey, mid, env, method }) {
+  const r = new Runner()
+  if (method === 'ach') {
+    r.init({
+      element,
+      publicKey,
+      mid,
+      env,
+      accountNumberLabel: 'Account number',
+      routingNumberLabel: 'Routing number',
+      repeatedAccountNumberLabel: 'Confirm account number',
+      accountTypeLabel: 'Account type',
+      customerNameLabel: 'Account holder name',
+      entryClassCodeLabel: 'Entry class',
+      errorType: 'field',
+    })
+  } else {
+    r.init({ element, publicKey, mid, env, useExpiry: true, useCvv: true })
+  }
+  return r
+}

@@ -13,7 +13,7 @@
 //   payment_url {invoice_id, origin}→ mints/stores the portal pay link for an
 //                                     invoice, returns { url }; marks the
 //                                     invoice 'sent' the first time.
-//   charge_invoice {invoice_id, account_token, expiration, cvn, name?, address?, account_zip?, save_card?, tip_amount?}
+//   charge_invoice {invoice_id, account_token, expiration, cvn, name?, address?, account_zip?, save_card?, tip_amount?, payment_kind?}
 //                                   → runs a one-time charge via /charge; on
 //                                     approval stores run_trans_id and marks the
 //                                     invoice paid. Optionally vaults the card.
@@ -21,6 +21,10 @@
 //                                     the portal pay screens) is added on top of
 //                                     invoices.total and persisted as
 //                                     invoices.tip_amount when the charge lands.
+//                                     payment_kind:'ach' charges a Runner.js-
+//                                     tokenized BANK account instead of a card:
+//                                     no expiry/CVN/ZIP, no surcharge, and the
+//                                     invoice is stamped payment_method 'ach'.
 //   email_invoice {invoice_id, origin}
 //                                   → emails the customer an HTML invoice (line
 //                                     items, totals, terms) with a Pay Now button
@@ -640,6 +644,12 @@ Deno.serve(async (req) => {
       const { token, mid, env } = await getAccessToken(settings)
       const cust = (await sbGet(`customers?id=eq.${inv.customer_id}&select=id,name,email,phone,run_vault_id,run_vault_holder_id,run_card_zip`))[0] || {}
 
+      // ACH (bank account): the browser tokenized routing/account numbers with
+      // Runner.js's bank form; we charge the account_token with ACH entry-class
+      // fields (https://docs.runpayments.io/docs/guides/payments/ach-payments).
+      // No surcharge, no expiry/CVN/ZIP, no card vaulting.
+      const isAch = body.payment_kind === "ach"
+
       const chargeBody: ChargeBody = {
         mid,
         amount: cents,
@@ -647,39 +657,51 @@ Deno.serve(async (req) => {
         currency: "USD",
         invoice_id: String(inv.id),
         order_id: String(inv.id),
-        cof: "C",
-        cof_sched: "N",
         name: body.name || cust.name || undefined,
         email: cust.email || undefined,
       }
-      // Surcharge is enabled on the MID (2026-10-01): the gateway REQUIRES the
-      // cardholder's billing zip on every authorization — a charge without it
-      // declines with "Surcharge Not Supported".
-      const zip = String(body.account_zip || (body.address && body.address.account_zip) || "").trim()
-      if (!/^\d{5}(-\d{4})?$/.test(zip) && !body.use_saved) {
-        return json({ error: "Enter the card's 5-digit billing ZIP to complete the payment." }, 400)
-      }
-      if (body.use_saved) {
-        // Staff "Take payment" with the customer's card on file (vaulted).
-        if (!cust.run_vault_id) return json({ error: "No saved card on file for this customer." }, 400)
-        if (!cust.run_card_zip) return json({ error: "This saved card has no billing ZIP on file — ask the client to re-save it from their portal, or charge a card entered manually." }, 400)
-        chargeBody.vault_id = cust.run_vault_id
-        chargeBody.vault_holder_id = cust.run_vault_holder_id || undefined
-        chargeBody.account_zip = cust.run_card_zip
-        chargeBody.cof = "M" // merchant-initiated, card on file
-      } else if (body.account_token && body.expiration) {
-        chargeBody.account_token = String(body.account_token)
-        chargeBody.expiration = String(body.expiration)
-        if (body.cvn) chargeBody.cvn = String(body.cvn)
-        if (body.address) Object.assign(chargeBody, body.address) // address1, city, region, country
-        chargeBody.account_zip = zip
+      if (isAch) {
+        if (!body.account_token) return json({ error: "Missing tokenized bank account." }, 400)
+        Object.assign(chargeBody, {
+          account_token: String(body.account_token),
+          com_ind: "ecomm",
+          payment_description: `Invoice ${inv.number}`,
+          entry_class: "WEB",
+          ach_discretionary_data: "S", // single transaction (required for WEB)
+          credit_or_debit: "debit",
+        })
       } else {
-        return json({ error: "Missing card details." }, 400)
-      }
-      // Save-for-autopay during payment: vault the card too.
-      if (body.save_card) {
-        chargeBody.vault = "Y"
-        chargeBody.cof_perm = "Y"
+        chargeBody.cof = "C"
+        chargeBody.cof_sched = "N"
+        // Surcharge is enabled on the MID (2026-10-01): the gateway REQUIRES the
+        // cardholder's billing zip on every authorization — a charge without it
+        // declines with "Surcharge Not Supported".
+        const zip = String(body.account_zip || (body.address && body.address.account_zip) || "").trim()
+        if (!/^\d{5}(-\d{4})?$/.test(zip) && !body.use_saved) {
+          return json({ error: "Enter the card's 5-digit billing ZIP to complete the payment." }, 400)
+        }
+        if (body.use_saved) {
+          // Staff "Take payment" with the customer's card on file (vaulted).
+          if (!cust.run_vault_id) return json({ error: "No saved card on file for this customer." }, 400)
+          if (!cust.run_card_zip) return json({ error: "This saved card has no billing ZIP on file — ask the client to re-save it from their portal, or charge a card entered manually." }, 400)
+          chargeBody.vault_id = cust.run_vault_id
+          chargeBody.vault_holder_id = cust.run_vault_holder_id || undefined
+          chargeBody.account_zip = cust.run_card_zip
+          chargeBody.cof = "M" // merchant-initiated, card on file
+        } else if (body.account_token && body.expiration) {
+          chargeBody.account_token = String(body.account_token)
+          chargeBody.expiration = String(body.expiration)
+          if (body.cvn) chargeBody.cvn = String(body.cvn)
+          if (body.address) Object.assign(chargeBody, body.address) // address1, city, region, country
+          chargeBody.account_zip = zip
+        } else {
+          return json({ error: "Missing card details." }, 400)
+        }
+        // Save-for-autopay during payment: vault the card too.
+        if (body.save_card) {
+          chargeBody.vault = "Y"
+          chargeBody.cof_perm = "Y"
+        }
       }
 
       let res
@@ -711,13 +733,13 @@ Deno.serve(async (req) => {
         run_trans_id: String(res.trans_id),
         tip_amount: tip,
         surcharge_amount: fee,
-        payment_method: "card",
+        payment_method: isAch ? "ach" : "card",
       }
       await sbPatch(`invoices?id=eq.${inv.id}`, patch)
 
-      // Optional: store the card on file for autopay.
+      // Optional: store the card on file for autopay (cards only).
       let saved = false
-      if (body.save_card && (res.vault_id || res.vault_holder_id)) {
+      if (!isAch && body.save_card && (res.vault_id || res.vault_holder_id)) {
         await sbPatch(`customers?id=eq.${cust.id}`, {
           run_vault_id: res.vault_id ?? null,
           run_vault_holder_id: res.vault_holder_id ?? cust.run_vault_holder_id ?? null,

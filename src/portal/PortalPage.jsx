@@ -8,7 +8,7 @@
 // portal fn's admin_data action, and all client actions are disabled.
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '../lib/supabaseClient.js'
-import { loadRunner, tokenizeCard } from '../lib/runnerJs.js'
+import { loadRunner, tokenizeCard, initRunnerForm } from '../lib/runnerJs.js'
 import { TipPicker } from '../components/TipPicker.jsx'
 
 const GREEN = '#1f7a4d'
@@ -1027,6 +1027,7 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
   const payment = data.payment || {}
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
+  const [method, setMethod] = useState('card') // 'card' | 'ach' (bank account)
   const [runnerReady, setRunnerReady] = useState(false)
   const [saveCard, setSaveCard] = useState(false)
   const [tip, setTip] = useState(0) // dollars, customer-chosen; charged on top of inv.total
@@ -1042,20 +1043,17 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
     let cancelled = false
     loadRunner().then((Runner) => {
       if (cancelled || !formRef.current) return
-      const r = new Runner()
-      r.init({
+      runnerRef.current = initRunnerForm(Runner, {
         element: '#run-pay-form',
         publicKey: payment.publicKey,
         mid: payment.mid,
         env: payment.env === 'uat' ? 'staging' : 'production',
-        useExpiry: true,
-        useCvv: true,
+        method,
       })
-      runnerRef.current = r
       setRunnerReady(true)
     }).catch((e) => setErr(e.message || String(e)))
     return () => { cancelled = true; runnerRef.current = null }
-  }, [preview, payment.available, payment.publicKey, payment.mid, payment.env, formKey])
+  }, [preview, payment.available, payment.publicKey, payment.mid, payment.env, formKey, method])
 
   // Runner's fields are single-use (a tokenize consumes them) — remount the
   // container to recover; there's no reset() API.
@@ -1067,26 +1065,27 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
 
   async function pay() {
     if (preview || !runnerRef.current || !inv) return
-    if (!/^\d{5}(-\d{4})?$/.test(zip.trim())) { setErr('Please enter the 5-digit billing ZIP for your card.'); return }
+    const isAch = method === 'ach'
+    if (!isAch && !/^\d{5}(-\d{4})?$/.test(zip.trim())) { setErr('Please enter the 5-digit billing ZIP for your card.'); return }
     setBusy(true)
     setErr('')
     try {
       const t = await tokenizeCard(runnerRef.current)
       if (!t || (!t.account_token && !t.token)) {
         console.warn('[portal-pay] empty tokenize response:', t)
-        throw new Error("We couldn't read the card details. Please re-enter your card information and try again.")
+        throw new Error(isAch
+          ? "We couldn't read the bank account details. Please re-enter them and try again."
+          : "We couldn't read the card details. Please re-enter your card information and try again.")
       }
       // charge_invoice lives in the `payments` edge function (not portal).
       const { data, error } = await supabase.functions.invoke('payments', {
         body: {
           action: 'charge_invoice',
           invoice_id: String(inv.id),
+          payment_kind: isAch ? 'ach' : undefined,
           account_token: t.account_token || t.token,
-          expiration: t.expiry,
-          cvn: t.cvv,
-          account_zip: zip.trim(),
-          save_card: saveCard,
-          tip_amount: tip,
+          ...(isAch ? {} : { expiration: t.expiry, cvn: t.cvv, account_zip: zip.trim(), save_card: saveCard }),
+          tip_amount: isAch ? 0 : tip,
         },
       })
       if (error) {
@@ -1098,7 +1097,7 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
       if (res && res.ok) {
         const charged = Number(res.charged ?? (Number(inv.total || 0) + Number(tip || 0)))
         const fee = Number(res.fee_amount) || 0
-        setNotice(`✓ Payment of ${money(charged)} received — thank you!${Number(tip) > 0 ? ` (including a ${money(tip)} tip)` : ''}${fee > 0 ? ` Includes a ${money(fee)} credit card surcharge.` : ''}${res.saved ? ' Your card is saved for autopay.' : ''}`)
+        setNotice(`✓ Payment of ${money(charged)} received — thank you!${isAch ? ' Your bank payment settles in 2–3 business days.' : ''}${Number(tip) > 0 ? ` (including a ${money(tip)} tip)` : ''}${fee > 0 ? ` Includes a ${money(fee)} credit card surcharge.` : ''}${res.saved ? ' Your card is saved for autopay.' : ''}`)
         await onChanged()
         onDone && onDone()
       } else if (res && res.declined) {
@@ -1141,50 +1140,81 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
         </div>
       </div>
       <div style={card}>
-        <div style={{ fontWeight: 700, fontSize: 14.5, marginBottom: 10 }}>Pay with card</div>
+        <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+          {[['card', '💳 Card'], ['ach', '🏦 Bank account (ACH)']].map(([v, label]) => (
+            <button
+              key={v}
+              type="button"
+              onClick={() => { if (!busy) { setMethod(v); setErr('') } }}
+              style={{ flex: 1, cursor: 'pointer', fontSize: 13, fontWeight: 700, padding: '9px 8px', borderRadius: 9, border: `1px solid ${method === v ? GREEN : '#dde2dd'}`, background: method === v ? '#e7f1eb' : '#fff', color: method === v ? GREEN : '#5d6b63' }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <div style={{ fontWeight: 700, fontSize: 14.5, marginBottom: 10 }}>{method === 'ach' ? 'Pay from your bank account' : 'Pay with card'}</div>
         {/* Runner.js owns #run-pay-form's children — React must not render
             inside it (breaks reconciliation → removeChild crash). */}
         <div ref={formRef}>
-          <div key={formKey} id="run-pay-form" style={{ minHeight: 64, marginBottom: 4 }} />
+          <div key={`${formKey}-${method}`} id="run-pay-form" style={{ minHeight: 64, marginBottom: 4 }} />
         </div>
-        {!runnerReady && <div style={{ color: '#9aa69e', fontSize: 12.5, padding: '0 2px 8px' }}>Loading secure card form…</div>}
-        <label style={{ display: 'block', fontSize: 12, color: '#5d6b63', fontWeight: 600, marginTop: 8, marginBottom: 5 }}>
-          Billing ZIP
-          <input
-            value={zip}
-            onChange={(e) => setZip(e.target.value)}
-            inputMode="numeric"
-            autoComplete="postal-code"
-            maxLength={10}
-            placeholder="e.g. 32082"
-            style={{ width: '100%', border: '1px solid #e6eae6', borderRadius: 9, padding: '11px 12px', fontSize: 16, outline: 'none', boxSizing: 'border-box', marginTop: 5, fontWeight: 400 }}
-          />
-        </label>
-        {!payment.saved && (
-          <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, color: '#3c4a42', lineHeight: 1.5, cursor: 'pointer', marginTop: 8 }}>
-            <input type="checkbox" checked={saveCard} onChange={(e) => setSaveCard(e.target.checked)} style={{ marginTop: 3, width: 16, height: 16, accentColor: GREEN }} />
-            <span>Save this card for autopay (charged automatically at the start of each month for open invoices).</span>
-          </label>
+        {!runnerReady && <div style={{ color: '#9aa69e', fontSize: 12.5, padding: '0 2px 8px' }}>Loading secure {method === 'ach' ? 'bank' : 'card'} form…</div>}
+        {method === 'ach' && (
+          <div style={{ fontSize: 11.5, color: '#7c8a82', marginTop: 8, lineHeight: 1.5 }}>
+            Money moves directly from your bank account — no card surcharge. Bank payments take 2–3 business days to settle, and the invoice is marked paid right away.
+          </div>
         )}
-        <TipPicker total={inv.total} tip={tip} setTip={setTip} green={GREEN} />
-        {(() => {
-          const payBase = Number(inv.total || 0) + Number(tip || 0)
-          const payTotal = Math.round(payBase * 103) / 100 // + the 3% credit-card surcharge the gateway adds on top
-          return (
-            <>
-              <button
-                disabled={busy || preview || !runnerReady}
-                onClick={pay}
-                style={{ ...btnPrimary, marginTop: 14, padding: '12px 22px', opacity: (busy || preview || !runnerReady) ? 0.55 : 1 }}
-              >{busy ? 'Processing…' : `Pay ${money(payTotal)}`}</button>
-              <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 8 }}>
-                Includes a {money(payTotal - payBase)} credit card surcharge (3%) — debit cards aren't surcharged and pay {money(payBase)}.
-              </div>
-            </>
-          )
-        })()}
+        {method === 'card' && (
+          <>
+            <label style={{ display: 'block', fontSize: 12, color: '#5d6b63', fontWeight: 600, marginTop: 8, marginBottom: 5 }}>
+              Billing ZIP
+              <input
+                value={zip}
+                onChange={(e) => setZip(e.target.value)}
+                inputMode="numeric"
+                autoComplete="postal-code"
+                maxLength={10}
+                placeholder="e.g. 32082"
+                style={{ width: '100%', border: '1px solid #e6eae6', borderRadius: 9, padding: '11px 12px', fontSize: 16, outline: 'none', boxSizing: 'border-box', marginTop: 5, fontWeight: 400 }}
+              />
+            </label>
+            {!payment.saved && (
+              <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, color: '#3c4a42', lineHeight: 1.5, cursor: 'pointer', marginTop: 8 }}>
+                <input type="checkbox" checked={saveCard} onChange={(e) => setSaveCard(e.target.checked)} style={{ marginTop: 3, width: 16, height: 16, accentColor: GREEN }} />
+                <span>Save this card for autopay (charged automatically at the start of each month for open invoices).</span>
+              </label>
+            )}
+            <TipPicker total={inv.total} tip={tip} setTip={setTip} green={GREEN} />
+          </>
+        )}
+        {method === 'ach' ? (
+          <button
+            disabled={busy || preview || !runnerReady}
+            onClick={pay}
+            style={{ ...btnPrimary, marginTop: 14, padding: '12px 22px', opacity: (busy || preview || !runnerReady) ? 0.55 : 1 }}
+          >{busy ? 'Processing…' : `Pay ${money(inv.total)}`}</button>
+        ) : (
+          (() => {
+            const payBase = Number(inv.total || 0) + Number(tip || 0)
+            const payTotal = Math.round(payBase * 103) / 100 // + the 3% credit-card surcharge the gateway adds on top
+            return (
+              <>
+                <button
+                  disabled={busy || preview || !runnerReady}
+                  onClick={pay}
+                  style={{ ...btnPrimary, marginTop: 14, padding: '12px 22px', opacity: (busy || preview || !runnerReady) ? 0.55 : 1 }}
+                >{busy ? 'Processing…' : `Pay ${money(payTotal)}`}</button>
+                <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 8 }}>
+                  Includes a {money(payTotal - payBase)} credit card surcharge (3%) — debit cards aren't surcharged and pay {money(payBase)}.
+                </div>
+              </>
+            )
+          })()
+        )}
         <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 10 }}>
-          Card details are entered in a secure Run Payments form — we never see or store your card number.
+          {method === 'ach'
+            ? 'Bank details are entered in a secure Run Payments form — we never see or store your account number.'
+            : 'Card details are entered in a secure Run Payments form — we never see or store your card number.'}
         </div>
       </div>
     </div>

@@ -20,6 +20,7 @@ export const INVOICE_STATUS = ['draft', 'sent', 'paid', 'void']
 export const PAYMENT_METHODS = [
   { value: 'cash', label: 'Cash' },
   { value: 'check', label: 'Check' },
+  { value: 'ach', label: 'ACH / Bank transfer' },
   { value: 'zelle', label: 'Zelle' },
   { value: 'cash_app', label: 'Cash App' },
   { value: 'venmo', label: 'Venmo' },

@@ -462,7 +462,7 @@ export default function Invoices({ app }) {
             const on = inv.id === selId
             const meta = STATUS_META[inv.status] || STATUS_META.draft
             // Paid chip carries the method: "Paid · Check", "Paid · Card", …
-            const shortMethod = { cash_app: 'Cash App', credit: 'Credit', service_swap: 'Service', card: 'Card' }[inv.paymentMethod] || paymentMethodLabel(inv.paymentMethod)
+            const shortMethod = { cash_app: 'Cash App', credit: 'Credit', service_swap: 'Service', ach: 'ACH', card: 'Card' }[inv.paymentMethod] || paymentMethodLabel(inv.paymentMethod)
             const chip = inv.status === 'paid' && shortMethod ? `Paid · ${shortMethod}` : meta.label
             return (
               <div key={inv.id} onClick={() => setSelId(inv.id)} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '11px 10px', borderRadius: 10, cursor: 'pointer', marginBottom: 2, background: on ? '#f3faf5' : '#fff', border: `1px solid ${on ? '#cfe0d5' : 'transparent'}` }}>
