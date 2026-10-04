@@ -130,3 +130,18 @@ export async function savePropertyPickup(id, { days, frequency }) {
   if (error) throw error
   logActivity({ type: 'schedule_updated', summary: `Updated pickup days`, entityType: 'property', entityId: id })
 }
+
+// Pause/resume an address on the Schedules page. Paused is the SAME flag the
+// routes/dispatch boards respect (properties.paused), so pausing here removes
+// the stop from every route, unrouted list, and the Schedules list — one
+// source of truth, exactly like the Pause button on the Routes board.
+export async function setPropertyPaused(id, paused) {
+  const { error } = await supabase.from('properties').update({ paused }).eq('id', id)
+  if (error) throw error
+  logActivity({
+    type: paused ? 'property_paused' : 'property_resumed',
+    summary: paused ? 'Paused address (off all routes)' : 'Resumed address (back on routes)',
+    entityType: 'property',
+    entityId: id,
+  })
+}

@@ -4,11 +4,14 @@ import { hasSupabase } from '../lib/supabaseClient.js'
 import {
   loadPropertyPickups,
   savePropertyPickup,
+  setPropertyPaused,
   subscribeSchedules,
   FREQUENCIES,
   DAYS,
   freqLabel,
 } from '../lib/schedulesData.js'
+import { deleteProperty } from '../lib/customersData.js'
+import { logActivity } from '../lib/activityData.js'
 
 const DAY_ORDER = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
 const DAY_ABBR = { monday: 'Mon', tuesday: 'Tue', wednesday: 'Wed', thursday: 'Thu', friday: 'Fri', saturday: 'Sat', sunday: 'Sun' }
@@ -29,6 +32,8 @@ export default function Schedule({ app }) {
   const [editId, setEditId] = useState(null)
   const [form, setForm] = useState({ days: [], frequency: 'weekly' })
   const [saving, setSaving] = useState(false)
+  const [busyId, setBusyId] = useState(null) // pause/resume/remove in flight
+  const [showPaused, setShowPaused] = useState(false) // paused stops hidden by default (same rule as dispatch)
 
   async function refresh() {
     setPickups(await loadPropertyPickups(app.activeLine))
@@ -46,18 +51,26 @@ export default function Schedule({ app }) {
   }, [app.activeLine])
 
   const q = search.toLowerCase().trim()
+  // Paused addresses (properties.paused = the same flag dispatch/routes use) are
+  // hidden by default so dead stops like the old Ancient City Hideaways addresses
+  // don't clutter the list; the toggle brings them back for review/reactivation.
+  const visible = useMemo(
+    () => (showPaused ? pickups : pickups.filter((p) => !p.paused)),
+    [pickups, showPaused]
+  )
+  const pausedCount = pickups.filter((p) => p.paused).length
   const rows = useMemo(() => {
     const list = q
-      ? pickups.filter((p) => (p.customerName + ' ' + p.address + ' ' + p.service).toLowerCase().includes(q))
-      : pickups
+      ? visible.filter((p) => (p.customerName + ' ' + p.address + ' ' + p.service).toLowerCase().includes(q))
+      : visible
     return list.slice().sort((a, b) => {
       const dr = dayRank(a.days) - dayRank(b.days)
       if (dr) return dr
       return (a.address || a.name).localeCompare(b.address || b.name)
     })
-  }, [pickups, q])
+  }, [visible, q])
 
-  const scheduledCount = pickups.filter((p) => orderDays(p.days).length).length
+  const scheduledCount = visible.filter((p) => orderDays(p.days).length).length
 
   function openEdit(p) {
     setEditId(p.id)
@@ -81,9 +94,49 @@ export default function Schedule({ app }) {
     }
   }
 
+  // Pause/resume flips properties.paused — the exact flag Routes & Dispatch
+  // filter on, so a paused stop drops off every board, not just this page.
+  async function togglePause(p) {
+    const label = p.address || p.name
+    if (!p.paused) {
+      if (!window.confirm(`Pause ${label}?\n\nIt stays a client address but drops off every route, the unrouted list, and this schedule until resumed.`)) return
+    }
+    setBusyId(p.id)
+    setErr(null)
+    try {
+      await setPropertyPaused(p.id, !p.paused)
+      await refresh()
+    } catch (e2) {
+      setErr(e2.message || String(e2))
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  // Full removal: deletes the address from the client record (server-side RPC
+  // keeps the audit trail). For "no longer serviced" addresses, Pause is the
+  // safer choice — Remove is for addresses that shouldn't exist at all.
+  async function removeAddress(p) {
+    const label = p.address || p.name
+    if (!window.confirm(`Remove ${label} entirely?\n\nThis deletes the address from the client's record — it disappears from schedules, routes, and the client profile. Past service history stays in the audit log. If you just want to stop servicing it, use Pause instead.`)) return
+    setBusyId(p.id)
+    setErr(null)
+    try {
+      await deleteProperty(p.id)
+      logActivity({ type: 'property_deleted', summary: `Removed address ${label} from schedules`, entityType: 'property', entityId: p.id })
+      if (editId === p.id) setEditId(null)
+      if (selId === p.id) setSelId(null)
+      await refresh()
+    } catch (e2) {
+      setErr(e2.message || String(e2))
+    } finally {
+      setBusyId(null)
+    }
+  }
+
   const editing = pickups.find((p) => p.id === editId)
   // Columns: Address | Client | Service | Days | Freq | Action. Trim on mobile.
-  const cols = isMobile ? '1fr 116px 96px' : 'minmax(0,2.1fr) minmax(0,1.3fr) minmax(0,1fr) 122px 84px 92px'
+  const cols = isMobile ? '1fr 116px 96px' : 'minmax(0,2.1fr) minmax(0,1.3fr) minmax(0,1fr) 122px 84px 168px'
 
   return (
     <div style={{ maxWidth: 1180, margin: '0 auto' }}>
@@ -92,10 +145,18 @@ export default function Schedule({ app }) {
           <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search by client, address or service…" style={searchInput} />
           <div style={searchIcon}>⌕</div>
         </div>
-        <div style={{ fontFamily: MONO, fontSize: 11.5, color: '#7c8a82', flex: 'none' }}>{scheduledCount} scheduled · {pickups.length} addresses</div>
+        <div style={{ fontFamily: MONO, fontSize: 11.5, color: '#7c8a82', flex: 'none' }}>{scheduledCount} scheduled · {visible.length} addresses{pausedCount ? ` · ${pausedCount} paused` : ''}</div>
+        {pausedCount > 0 && (
+          <button
+            onClick={() => setShowPaused((v) => !v)}
+            style={{ flex: 'none', cursor: 'pointer', fontFamily: MONO, fontSize: 11, fontWeight: 700, letterSpacing: '.03em', padding: '5px 10px', borderRadius: 7, border: `1px solid ${showPaused ? '#8a6d1e' : '#dde2dd'}`, background: showPaused ? '#f6efdd' : '#fff', color: showPaused ? '#8a6d1e' : '#7c8a82' }}
+          >
+            {showPaused ? 'Hide paused' : `Show paused (${pausedCount})`}
+          </button>
+        )}
       </div>
       <div style={{ fontSize: 12, color: '#7c8a82', margin: '0 2px 12px' }}>
-        Pickup days live on each address — click a row to set them (an address can run more than one day a week).
+        One row per address — the same list Routes &amp; Dispatch build from. Click a row to edit days, pause an old stop (off every route until resumed), or remove it entirely.
       </div>
 
       {err && <div style={errorBox}>{err}</div>}
@@ -131,11 +192,12 @@ export default function Schedule({ app }) {
                 <div
                   key={p.id}
                   onClick={() => setSelId(sel ? null : p.id)}
-                  style={{ display: 'grid', gridTemplateColumns: cols, gap: 10, padding: '8px 14px', borderBottom: '1px solid #f1f3f0', alignItems: 'center', cursor: 'pointer', background: sel ? '#eef5f0' : '#fff', fontSize: 13 }}
+                  style={{ display: 'grid', gridTemplateColumns: cols, gap: 10, padding: '8px 14px', borderBottom: '1px solid #f1f3f0', alignItems: 'center', cursor: 'pointer', background: sel ? '#eef5f0' : '#fff', fontSize: 13, opacity: p.paused ? 0.55 : 1 }}
                 >
                   <div style={{ minWidth: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
                     <span style={{ minWidth: 0, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.address || p.name}</span>
                     {p.needsReview && <span title="Flagged for review" style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#c0492f', background: '#fbeae6', padding: '1px 5px', borderRadius: 4, letterSpacing: '.03em' }}>⚠ REVIEW</span>}
+                    {p.paused && <span title="Paused — off every route until resumed" style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#8a6d1e', background: '#f6efdd', padding: '1px 5px', borderRadius: 4, letterSpacing: '.03em' }}>⏸ PAUSED</span>}
                   </div>
                   {!isMobile && <div style={{ minWidth: 0, color: '#5d6b63', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.customerName}</div>}
                   {!isMobile && <div style={{ minWidth: 0, color: '#7c8a82', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.service || '—'}</div>}
@@ -145,9 +207,19 @@ export default function Schedule({ app }) {
                     )) : <span style={{ fontSize: 11.5, color: '#c08a2e' }}>None</span>}
                   </div>
                   {!isMobile && <div style={{ color: '#7c8a82', fontSize: 12 }}>{freqLabel(p.frequency)}</div>}
-                  <div style={{ textAlign: 'right' }}>
+                  <div style={{ textAlign: 'right', display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
                     {sel ? (
-                      <button onClick={(e) => { e.stopPropagation(); openEdit(p) }} style={editBtn}>Edit days</button>
+                      <>
+                        <button onClick={(e) => { e.stopPropagation(); openEdit(p) }} style={editBtn}>Edit days</button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); togglePause(p) }}
+                          disabled={busyId === p.id}
+                          title={p.paused ? 'Resume — put this address back on routes' : 'Pause — keep the address but take it off every route'}
+                          style={{ ...editBtn, background: p.paused ? '#1f7a4d' : '#fff', color: p.paused ? '#fff' : '#8a6d1e', border: p.paused ? 'none' : '1px solid #e2d3ac', opacity: busyId === p.id ? 0.6 : 1 }}
+                        >
+                          {p.paused ? '▶ Resume' : '⏸ Pause'}
+                        </button>
+                      </>
                     ) : (
                       <span style={{ color: '#c2cabf', fontSize: 14 }}>›</span>
                     )}
@@ -183,6 +255,26 @@ export default function Schedule({ app }) {
             <div style={{ display: 'flex', gap: 9, marginTop: 18 }}>
               <button type="button" onClick={() => setEditId(null)} disabled={saving} style={cancelBtn}>Cancel</button>
               <button type="submit" disabled={saving} style={{ ...primaryBtn, opacity: saving ? 0.6 : 1 }}>{saving ? 'Saving…' : 'Save days'}</button>
+            </div>
+
+            <div style={{ display: 'flex', gap: 9, marginTop: 12, paddingTop: 12, borderTop: '1px solid #f1f3f0', alignItems: 'center' }}>
+              <button
+                type="button"
+                onClick={() => { togglePause(editing) }}
+                disabled={busyId === editing.id}
+                style={{ flex: 'none', cursor: 'pointer', background: 'none', border: '1px solid #e2d3ac', color: '#8a6d1e', borderRadius: 8, padding: '7px 12px', fontSize: 12, fontWeight: 600 }}
+              >
+                {editing.paused ? '▶ Resume this address' : '⏸ Pause this address'}
+              </button>
+              <button
+                type="button"
+                onClick={() => { removeAddress(editing) }}
+                disabled={busyId === editing.id}
+                style={{ flex: 'none', cursor: 'pointer', background: 'none', border: 'none', color: '#c0492f', fontSize: 12, fontWeight: 600, padding: '7px 4px' }}
+              >
+                Remove address…
+              </button>
+              <span style={{ flex: 1, fontSize: 11, color: '#9aa69e', textAlign: 'right' }}>Pause keeps history; remove deletes it.</span>
             </div>
           </form>
         </div>
