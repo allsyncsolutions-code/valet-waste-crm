@@ -6,7 +6,7 @@
 // client portal for people who want the whole hub.
 import { useEffect, useRef, useState } from 'react'
 import { supabase } from '../lib/supabaseClient.js'
-import { loadRunner, tokenizeCard, initRunnerForm } from '../lib/runnerJs.js'
+import { loadRunner, tokenizeCard, initRunnerForm, ACH_ENABLED } from '../lib/runnerJs.js'
 import { RichText } from '../components/RichText.jsx'
 import { TipPicker } from '../components/TipPicker.jsx'
 import { printInvoiceDoc } from '../lib/printInvoice.js'
@@ -318,7 +318,7 @@ export default function PayPage({ slug, invoiceId }) {
       ) : (
         <div style={card}>
           <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
-            {[['card', '💳 Card'], ['ach', '🏦 Bank account (ACH)']].map(([v, label]) => (
+            {[['card', '💳 Card'], ...(ACH_ENABLED ? [['ach', '🏦 Bank account (ACH)']] : [])].map(([v, label]) => (
               <button
                 key={v}
                 type="button"

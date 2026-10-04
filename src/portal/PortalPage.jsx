@@ -8,7 +8,7 @@
 // portal fn's admin_data action, and all client actions are disabled.
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '../lib/supabaseClient.js'
-import { loadRunner, tokenizeCard, initRunnerForm } from '../lib/runnerJs.js'
+import { loadRunner, tokenizeCard, initRunnerForm, ACH_ENABLED } from '../lib/runnerJs.js'
 import { TipPicker } from '../components/TipPicker.jsx'
 
 const GREEN = '#1f7a4d'
@@ -1141,7 +1141,7 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
       </div>
       <div style={card}>
         <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
-          {[['card', '💳 Card'], ['ach', '🏦 Bank account (ACH)']].map(([v, label]) => (
+          {[['card', '💳 Card'], ...(ACH_ENABLED ? [['ach', '🏦 Bank account (ACH)']] : [])].map(([v, label]) => (
             <button
               key={v}
               type="button"

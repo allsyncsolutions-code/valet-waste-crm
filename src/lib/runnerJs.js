@@ -43,6 +43,20 @@ export async function tokenizeCard(runner, { settleMs = 800, retryMs = 1200 } = 
   return res
 }
 
+// ACH (bank account) payment method availability.
+//
+// BLOCKED 2026-10-04: the ValetWaste MID (496647545888) is configured card-only
+// on Run's side — Runner.js resolves merchant_type_id=1 for our public key and
+// renders the CARD tokenizer even for method 'ach' (verified against a local
+// harness: the injected iframe is cardconnect's itoke/ajax-tokenizer.html, and
+// an ACH /charge returns a bare 400 while a card /charge processes normally).
+// Run (integrations@runpayments.io / Francesca) must enable ACH on the MID (or
+// issue an ACH-enabled MID + public key). Once they confirm, flip this to true:
+// the ACH branch in initRunnerForm + the charge_invoice 'ach' path are already
+// built and deployed. When enabled, also add native Account type + Account
+// holder fields per the iStream docs (accountTypeField/customerNameField).
+export const ACH_ENABLED = false
+
 // Init a Runner.js form for the requested method. 'card' renders the usual
 // card number/expiry/CVV iframe fields; 'ach' renders bank-account fields
 // (account/routing/confirm + account type + holder name) per Run's docs:

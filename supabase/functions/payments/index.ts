@@ -446,6 +446,53 @@ Deno.serve(async (req) => {
       })
     }
 
+    if (action === "fee_report") {
+      // Read-only: report recent settled transactions (fees, rates) plus what
+      // the gateway actually surcharged on our paid invoices. Used to answer
+      // "what are our Run Merchant fees — % or flat?" Same exposure level as
+      // `status` (no secrets, read-only).
+      const s = await getSettings()
+      const { token, mid, env } = await getAccessToken(s)
+      let gateway: Record<string, unknown> = {}
+      try {
+        const r = await fetch(
+          `https://apps.runpayments.io/ords/sprint/api/3p/v1/transactions?mid=${enc(mid)}&limit=50`,
+          { headers: { Authorization: `Bearer ${token}` } },
+        )
+        if (r.ok) {
+          const d = await r.json()
+          const items = (d.items || []).map((t: Record<string, unknown>) => ({
+            trans_date: t.trans_date,
+            amount: t.amount,
+            interchange_rate: t.interchange_rate,
+            interchange_per_item: t.interchange_per_item,
+            card_number: t.card_number,
+            result: t.result,
+            trans_id: t.trans_id,
+          }))
+          gateway = { ok: true, items }
+        } else {
+          gateway = { ok: false, status: r.status, body: (await r.text()).slice(0, 500) }
+        }
+      } catch (e) {
+        gateway = { ok: false, error: e instanceof Error ? e.message : String(e) }
+      }
+      // Our own records: what the gateway added as surcharge on paid invoices.
+      const paid = await sbGet(
+        `invoices?status=eq.paid&total=gt.0&select=number,total,surcharge_amount,payment_method,paid_at&order=paid_at.desc&limit=50`,
+      ).catch(() => [])
+      const surcharges = paid
+        .filter((i: Record<string, unknown>) => Number(i.surcharge_amount) > 0)
+        .map((i: Record<string, unknown>) => ({
+          number: i.number,
+          total: i.total,
+          surcharge_amount: i.surcharge_amount,
+          surcharge_pct: Math.round((Number(i.surcharge_amount) / Number(i.total)) * 10000) / 100,
+          method: i.payment_method,
+        }))
+      return json({ mid, env, gateway, surcharges })
+    }
+
     if (action === "save_credentials") {
       if (!(await isStaff(req))) return json({ error: "Staff only." }, 403)
       const patch: Record<string, unknown> = {}
@@ -512,8 +559,13 @@ Deno.serve(async (req) => {
     }
 
     if (action === "payment_url") {
-      if (!body.invoice_id) return json({ error: "Missing invoice_id." }, 400)
-      const inv = (await sbGet(`invoices?id=eq.${enc(String(body.invoice_id))}&select=id,number,customer_id,status,payment_url`))[0]
+      // Accept either invoice_id (UUID) or number (e.g. "INV-1202").
+      if (!body.invoice_id && !body.number) return json({ error: "Missing invoice_id or number." }, 400)
+      const inv = (await sbGet(
+        body.invoice_id
+          ? `invoices?id=eq.${enc(String(body.invoice_id))}&select=id,number,customer_id,status,payment_url`
+          : `invoices?number=eq.${enc(String(body.number).trim())}&select=id,number,customer_id,status,payment_url&order=issue_date.desc&limit=1`,
+      ))[0]
       if (!inv) return json({ error: "Invoice not found." }, 404)
       const cust = (await sbGet(`customers?id=eq.${inv.customer_id}&select=portal_slug`))[0]
       if (!cust?.portal_slug) return json({ error: "This customer has no portal — add a portal slug first." }, 400)
