@@ -135,6 +135,15 @@ export async function savePropertyPickup(id, { days, frequency }) {
 // routes/dispatch boards respect (properties.paused), so pausing here removes
 // the stop from every route, unrouted list, and the Schedules list — one
 // source of truth, exactly like the Pause button on the Routes board.
+// Tie an orphaned address (properties.customer_id = null, shows as "Unknown")
+// to a client — used by the paused-address review popup when an old stop like
+// the Ancient City Hideaways inventory isn't attached to anyone.
+export async function assignPropertyCustomer(id, customerId) {
+  const { error } = await supabase.from('properties').update({ customer_id: customerId }).eq('id', id)
+  if (error) throw error
+  logActivity({ type: 'property_assigned', summary: 'Tied address to a client', entityType: 'property', entityId: id })
+}
+
 export async function setPropertyPaused(id, paused) {
   const { error } = await supabase.from('properties').update({ paused }).eq('id', id)
   if (error) throw error

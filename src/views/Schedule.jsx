@@ -5,13 +5,15 @@ import {
   loadPropertyPickups,
   savePropertyPickup,
   setPropertyPaused,
+  assignPropertyCustomer,
   subscribeSchedules,
   FREQUENCIES,
   DAYS,
   freqLabel,
 } from '../lib/schedulesData.js'
-import { deleteProperty } from '../lib/customersData.js'
+import { deleteProperty, loadCustomers, createClient } from '../lib/customersData.js'
 import { logActivity } from '../lib/activityData.js'
+import PausedReview from '../components/PausedReview.jsx'
 
 const DAY_ORDER = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
 const DAY_ABBR = { monday: 'Mon', tuesday: 'Tue', wednesday: 'Wed', thursday: 'Thu', friday: 'Fri', saturday: 'Sat', sunday: 'Sun' }
@@ -34,6 +36,9 @@ export default function Schedule({ app }) {
   const [saving, setSaving] = useState(false)
   const [busyId, setBusyId] = useState(null) // pause/resume/remove in flight
   const [showPaused, setShowPaused] = useState(false) // paused stops hidden by default (same rule as dispatch)
+  const [reviewOpen, setReviewOpen] = useState(false) // bulk paused-address cleanup popup
+  const [customers, setCustomers] = useState([]) // client list for the tie-to flow
+  const [reviewBusy, setReviewBusy] = useState(false)
 
   async function refresh() {
     setPickups(await loadPropertyPickups(app.activeLine))
@@ -134,7 +139,75 @@ export default function Schedule({ app }) {
     }
   }
 
+  // --- Bulk paused-address review (the popup) -------------------------------
+  async function openReview() {
+    setReviewOpen(true)
+    if (!customers.length) {
+      loadCustomers()
+        .then((list) => setCustomers(list.filter((c) => (c.business_line || 'waste') === (app.activeLine || 'waste'))))
+        .catch(() => {})
+    }
+  }
+
+  // Run an async op over ids one at a time; collect failures instead of
+  // aborting the batch. Returns how many succeeded.
+  async function runBatch(ids, op) {
+    setReviewBusy(true)
+    setErr(null)
+    let ok = 0
+    const failures = []
+    for (const id of ids) {
+      try {
+        await op(id)
+        ok++
+      } catch (e2) {
+        failures.push(e2.message || String(e2))
+      }
+    }
+    await refresh()
+    setReviewBusy(false)
+    if (failures.length) setErr(`${ok}/${ids.length} done. ${failures.length} failed: ${failures[0]}`)
+    return ok
+  }
+
+  const bulkResume = (ids) => runBatch(ids, (id) => setPropertyPaused(id, false))
+
+  function bulkRemove(ids) {
+    if (!window.confirm(`Remove ${ids.length} ${ids.length === 1 ? 'address' : 'addresses'} entirely?\n\nThey disappear from schedules, routes, and client profiles. Past service history stays in the audit log. If you just want to stop servicing them, use Resume/Pause instead.`)) return
+    runBatch(ids, async (id) => {
+      await deleteProperty(id)
+      logActivity({ type: 'property_deleted', summary: 'Removed address from schedules (bulk paused review)', entityType: 'property', entityId: id })
+    })
+  }
+
+  const bulkAssign = (ids, customerId) =>
+    runBatch(ids, async (id) => {
+      await assignPropertyCustomer(id, customerId)
+      const c = customers.find((x) => x.id === customerId)
+      logActivity({ type: 'property_assigned', summary: `Tied address to ${c?.name || 'a client'}`, entityType: 'property', entityId: id })
+    })
+
+  // Create a brand-new contact and tie the selected untied addresses to it.
+  async function bulkCreateAndAssign(ids, form) {
+    setReviewBusy(true)
+    setErr(null)
+    try {
+      const customerId = await createClient({
+        name: form.name.trim(),
+        contactName: form.contactName.trim() || null,
+        phone: form.phone.trim() || null,
+        email: form.email.trim() || null,
+        businessLine: app.activeLine,
+      })
+      await runBatch(ids, (id) => assignPropertyCustomer(id, customerId))
+    } catch (e2) {
+      setErr(e2.message || String(e2))
+      setReviewBusy(false)
+    }
+  }
+
   const editing = pickups.find((p) => p.id === editId)
+  const pausedRows = pickups.filter((p) => p.paused)
   // Columns: Address | Client | Service | Days | Freq | Action. Trim on mobile.
   const cols = isMobile ? '1fr 116px 96px' : 'minmax(0,2.1fr) minmax(0,1.3fr) minmax(0,1fr) 122px 84px 168px'
 
@@ -152,6 +225,14 @@ export default function Schedule({ app }) {
             style={{ flex: 'none', cursor: 'pointer', fontFamily: MONO, fontSize: 11, fontWeight: 700, letterSpacing: '.03em', padding: '5px 10px', borderRadius: 7, border: `1px solid ${showPaused ? '#8a6d1e' : '#dde2dd'}`, background: showPaused ? '#f6efdd' : '#fff', color: showPaused ? '#8a6d1e' : '#7c8a82' }}
           >
             {showPaused ? 'Hide paused' : `Show paused (${pausedCount})`}
+          </button>
+        )}
+        {pausedCount > 0 && (
+          <button
+            onClick={openReview}
+            style={{ flex: 'none', cursor: 'pointer', fontFamily: MONO, fontSize: 11, fontWeight: 700, letterSpacing: '.03em', padding: '5px 10px', borderRadius: 7, border: '1px solid #f3b7b0', background: '#fdecea', color: '#9a2c1e' }}
+          >
+            Review paused…
           </button>
         )}
       </div>
@@ -278,6 +359,20 @@ export default function Schedule({ app }) {
             </div>
           </form>
         </div>
+      )}
+
+      {reviewOpen && pausedRows.length > 0 && (
+        <PausedReview
+          key={pausedRows.map((p) => p.id).join(',')}
+          paused={pausedRows}
+          customers={customers}
+          busy={reviewBusy}
+          onClose={() => !reviewBusy && setReviewOpen(false)}
+          onResume={bulkResume}
+          onRemove={bulkRemove}
+          onAssign={bulkAssign}
+          onCreateAndAssign={bulkCreateAndAssign}
+        />
       )}
     </div>
   )

@@ -107,6 +107,10 @@ export default function Dashboard({ app }) {
 
   const recentInvoices = invoices.slice(0, 6)
   const hasAnything = customers.length || invoices.length || schedules.length
+  // Stops/addresses with no client attached — orphan inventory (e.g. the old
+  // Ancient City Hideaways addresses) that should be tied, resumed, or removed.
+  const untied = schedules.filter((p) => !p.customerId)
+  const untiedPaused = untied.filter((p) => p.paused)
 
   return (
     <div style={{ maxWidth: 1200, margin: '0 auto' }}>
@@ -160,6 +164,22 @@ export default function Dashboard({ app }) {
         </div>
       )}
       {loading && <div style={empty}>Loading dashboard…</div>}
+
+      {/* Addresses not tied to any client — orphan stops that should be tied
+          to a contact, resumed, or removed (bulk review lives on Schedules). */}
+      {!loading && untied.length > 0 && (
+        <div style={{ marginBottom: 16, background: '#fdecea', border: '1px solid #f3b7b0', borderRadius: 12, padding: '13px 16px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{ width: 30, height: 30, borderRadius: 8, background: '#f6c1ba', color: '#9a2c1e', display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 'none', fontWeight: 700 }}>⚠</div>
+            <div style={{ flex: 1, fontSize: 13, color: '#9a2c1e', lineHeight: 1.4 }}>
+              <b>{untied.length} {untied.length === 1 ? 'address isn’t' : 'addresses aren’t'} tied to a client</b>
+              {untiedPaused.length ? ` — ${untiedPaused.length} paused` : ''}
+              <span style={{ color: '#b3261e' }}> · e.g. {untied.slice(0, 3).map((p) => p.address || p.name).join(', ')}{untied.length > 3 ? '…' : ''}</span>
+            </div>
+            <button onClick={() => go('schedule')} style={{ flex: 'none', background: '#fff', color: '#9a2c1e', border: '1px solid #f3b7b0', borderRadius: 8, padding: '7px 13px', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Review → Schedules</button>
+          </div>
+        </div>
+      )}
 
       {!loading && !hasAnything && (
         <div style={{ background: '#fff', border: '1px dashed #d8ddd6', borderRadius: 14, padding: '48px 26px', textAlign: 'center' }}>
