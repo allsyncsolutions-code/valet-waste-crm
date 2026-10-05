@@ -12,6 +12,7 @@ import Dashboard from './views/Dashboard.jsx'
 import Drivers from './views/Drivers.jsx'
 import Team from './views/Team.jsx'
 import Automations from './views/Automations.jsx'
+import Notifications from './views/Notifications.jsx'
 import JobCalendar from './views/JobCalendar.jsx'
 import EmployeePay from './views/EmployeePay.jsx'
 import MyDay from './views/MyDay.jsx'
@@ -42,6 +43,7 @@ const NAV_MAIN = [
 const NAV_FIELD = [
   { id: 'clients', glyph: '◎', label: 'Clients' },
   { id: 'automations', glyph: '⟳', label: 'Automations' },
+  { id: 'notifications', glyph: '🔔', label: 'Notifications' },
   { id: 'drivers', glyph: '⛟', label: 'Drivers & Field' },
   { id: 'team', glyph: '⚇', label: 'Team' },
   { id: 'portal', glyph: '◫', label: 'Client Portal' },
@@ -229,6 +231,7 @@ export default function App({ user, onSignOut }) {
     webforms: ['Web Forms', 'Public signup pages — edit, share by link, or embed on a website'],
     settings: ['Settings', 'Manage tags and configuration'],
     automations: ['Automations', 'Scheduled jobs Trashy Randy runs — plus his suggestions awaiting approval'],
+    notifications: ['Notifications', 'Every message the system sends — flip each type on or off, and see which clients opted out'],
     employees: ['Employees', 'Lawn jobs, per-job pay, overrides, and timesheets (Sun–Sat)'],
   }
   const [viewTitle, viewSubtitle] = VIEW_META[activeView] || VIEW_META.dashboard
@@ -325,6 +328,7 @@ export default function App({ user, onSignOut }) {
     team: <Team app={app} />,
     settings: <Settings app={app} />,
     automations: <Automations app={app} />,
+    notifications: <Notifications app={app} />,
     employees: <EmployeePay app={app} />,
   }
 

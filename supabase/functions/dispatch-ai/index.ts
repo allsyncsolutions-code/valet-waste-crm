@@ -1057,6 +1057,15 @@ async function sbGet(path: string) {
   if (!r.ok) throw new Error(`GET ${path}: ${r.status} ${await r.text()}`)
   return await r.json()
 }
+// Global kill switch for a notification type (Notifications tab, mig 0065).
+// Reads the app_settings.notification_toggles JSONB map; a missing key = ON.
+async function notifEnabled(key: string): Promise<boolean> {
+  try {
+    const rows = await sbGet(`app_settings?id=eq.1&select=notification_toggles`)
+    const t = (Array.isArray(rows) && rows[0]?.notification_toggles) || {}
+    return t[key] !== false
+  } catch (_e) { return true }
+}
 async function sbPost(path: string, body: unknown) {
   const r = await fetch(`${REST}/${path}`, {
     method: "POST",
@@ -2492,6 +2501,7 @@ async function getPortalStatus(a: any) {
 async function invitePortal(a: any) {
   const client = await resolveClient(a)
   if (client.error || client.needs_clarification) return client
+  if (!await notifEnabled("client_portal_invite")) return { error: "Portal invites are turned off in the Notifications tab — turn the switch back on there and retry." }
   const [cust] = await sbGet(`customers?id=eq.${enc(client.id)}&select=id,name,phone,contact_phone,email,portal_slug`)
   if (!cust) return { error: "Client not found." }
   if (!cust.portal_slug) return { error: `${cust.name} has no portal slug — that shouldn't happen; check the client record.` }

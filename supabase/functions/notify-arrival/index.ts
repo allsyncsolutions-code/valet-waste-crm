@@ -98,6 +98,18 @@ async function releaseArrival(stopId: string) {
   } catch (_e) { /* best effort */ }
 }
 
+// Global kill switch for a notification type (Notifications tab, mig 0065).
+// Reads the app_settings.notification_toggles JSONB map; a missing key = ON,
+// so behavior is unchanged for rows written before the column existed.
+async function notifEnabled(key: string): Promise<boolean> {
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/app_settings?id=eq.1&select=notification_toggles`, { headers: rest })
+    const rows = await r.json()
+    const t = (Array.isArray(rows) && rows[0]?.notification_toggles) || {}
+    return t[key] !== false
+  } catch (_e) { return true }
+}
+
 // Send via the existing `sms` function's `send` action (reuses provider + logging).
 async function sendVia(to: string, body: string, customerId: string, sentBy?: string | null) {
   const r = await fetch(`${SUPABASE_URL}/functions/v1/sms`, {
@@ -159,6 +171,7 @@ async function sendEmail(to: string, subject: string, textBody: string, cust: an
 }
 
 async function notifyArrival(stopId: string, sentBy?: string | null) {
+  if (!await notifEnabled("client_arrival")) return { ok: true, skipped: "toggle_off" }
   const r = await fetch(
     `${SUPABASE_URL}/rest/v1/route_stops?id=eq.${stopId}&select=id,arrival_notified_at,` +
       `properties(name,address,customer_id,customers(id,name,contact_name,phone,contact_phone,email,portal_slug,notify_on_service,notify_sms,notify_push,notify_email,notify_optout_token))`,

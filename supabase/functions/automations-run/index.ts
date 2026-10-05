@@ -36,6 +36,15 @@ async function sbGet(path: string) {
   if (!r.ok) throw new Error(`GET ${path}: ${r.status} ${await r.text()}`)
   return await r.json()
 }
+// Global kill switch for a notification type (Notifications tab, mig 0065).
+// Reads the app_settings.notification_toggles JSONB map; a missing key = ON.
+async function notifEnabled(key: string): Promise<boolean> {
+  try {
+    const rows = await sbGet(`app_settings?id=eq.1&select=notification_toggles`)
+    const t = (Array.isArray(rows) && rows[0]?.notification_toggles) || {}
+    return t[key] !== false
+  } catch (_e) { return true }
+}
 async function sbPatch(path: string, body: unknown) {
   await fetch(`${SUPABASE_URL}/rest/v1/${path}`, { method: "PATCH", headers: restHeaders, body: JSON.stringify(body) })
 }
@@ -205,6 +214,8 @@ async function sendCustomerPush(customerId: string, title: string, body: string,
 }
 
 async function runInvoiceReminders(auto: any): Promise<string> {
+  const [smsGate, emailGate] = await Promise.all([notifEnabled("client_invoice_sms"), notifEnabled("client_invoice_email")])
+  if (!smsGate && !emailGate) return "Invoice reminders are turned off in the Notifications tab."
   const rules: any[] = (auto?.config?.reminders || []).filter((r: any) =>
     ["after_sent", "before_due", "after_due"].includes(r?.type) && Number.isFinite(Number(r?.days)) && String(r?.template || "").trim())
   if (!rules.length) return "No reminders configured — nothing to run."
@@ -267,7 +278,7 @@ async function runInvoiceReminders(auto: any): Promise<string> {
     let e = 0, t = 0, p = 0
     // Client-managed channels (portal 🔔 card, mig 0058) gate each rule's
     // channels on top of the rule selection itself.
-    const emailOn = !!r.email && !!cust.email && cust.notify_email !== false
+    const emailOn = !!r.email && !!cust.email && cust.notify_email !== false && emailGate
     if (emailOn) {
       try { await sendCustomerEmail(cust.email, `Reminder: invoice ${inv.number} — ${amount}`, text, payUrl, amount, company); e++ } catch (_err) { /* try other channels */ }
     }
@@ -275,7 +286,7 @@ async function runInvoiceReminders(auto: any): Promise<string> {
     // TEXTS — the email channel (if the rule has one) still applies.
     // Point-of-contact number wins over the main phone (0055).
     const textTo = (cust.contact_phone || cust.phone || "").trim()
-    if (r.sms && textTo && cust.notify_on_service !== false && cust.notify_sms !== false) {
+    if (r.sms && smsGate && textTo && cust.notify_on_service !== false && cust.notify_sms !== false) {
       try {
         const res = await fetch(`${SUPABASE_URL}/functions/v1/sms`, {
           method: "POST",
@@ -359,6 +370,7 @@ async function sendPlainCustomerEmail(to: string, subject: string, text: string,
 }
 
 async function runServiceReminders(auto: any): Promise<string> {
+  if (!await notifEnabled("client_service_reminder")) return "Day-before pickup reminders are turned off in the Notifications tab."
   const today = etToday()
   const tomorrow = addDays(today, 1)
   const cfg = auto?.config || {}
@@ -644,6 +656,7 @@ async function sendStaffEmail(to: string, subject: string, body: string) {
 }
 
 async function notifyStaff(body: string, purpose: string, subject: string): Promise<{ texted: number; emailed: number; total: number }> {
+  if (!await notifEnabled("team_automation_alerts")) return { texted: 0, emailed: 0, total: 0 }
   const staff = await sbGet(`profiles?select=full_name,phone,email,role&or=(phone.not.is.null,email.not.is.null)`)
   const recipients = staff.filter((s: any) => ["admin", "staff"].includes(s.role || ""))
   let texted = 0
@@ -791,6 +804,7 @@ async function runAutopayCharge(force = false): Promise<string> {
 // Deliver queued invoice sends (sms/email/both) whose Eastern-time moment has
 // arrived. Called every 5 minutes by the scheduled-invoice-sends cron.
 async function runScheduledInvoiceSends(): Promise<string> {
+  const [smsGate, emailGate] = await Promise.all([notifEnabled("client_invoice_sms"), notifEnabled("client_invoice_email")])
   const due = await sbGet(
     `invoice_scheduled_sends?status=eq.pending&send_at=lte.${new Date().toISOString()}&select=id,invoice_id,channel&order=send_at.asc&limit=20`,
   )
@@ -814,6 +828,8 @@ async function runScheduledInvoiceSends(): Promise<string> {
         continue
       }
       const cust = inv.customers || {}
+      const wantsSms = row.channel === "sms" || row.channel === "both"
+      const wantsEmail = row.channel === "email" || row.channel === "both"
 
       // Mint the pay link on first send (payments fn also marks the invoice sent).
       let url = inv.payment_url
@@ -829,8 +845,14 @@ async function runScheduledInvoiceSends(): Promise<string> {
       }
 
       let smsPaused = false
+      let smsSent = false
+      if (wantsSms && !smsGate) {
+        // Invoice texts turned off globally (Notifications tab): behave like
+        // a paused text — the email fallback below still applies.
+        smsPaused = true
+      }
       const textTo = (cust.contact_phone || cust.phone || "").trim() // POC number wins (0055)
-      if ((row.channel === "sms" || row.channel === "both") && textTo) {
+      if (wantsSms && smsGate && textTo) {
         const tpl = settings.sms_invoice_template || DEFAULT_TPL
         const body = String(tpl).replace(/\{(\w+)\}/g, (m, k) => {
           const vars: Record<string, string> = {
@@ -854,6 +876,8 @@ async function runScheduledInvoiceSends(): Promise<string> {
           smsPaused = true
         } else if (!d?.ok) {
           throw new Error(d?.error || "SMS send failed")
+        } else {
+          smsSent = true
         }
       }
 
@@ -862,8 +886,18 @@ async function runScheduledInvoiceSends(): Promise<string> {
         failed++
         continue
       }
+      if (!emailGate && (wantsEmail || smsPaused) && !(wantsSms && smsSent)) {
+        // Invoice emails turned off globally (Notifications tab) and the SMS
+        // leg didn't deliver either — fail with a clear note.
+        const note = wantsSms && smsGate
+          ? "Invoice emails are turned off in the Notifications tab"
+          : "Invoice sends are turned off in the Notifications tab"
+        await sbPatch(`invoice_scheduled_sends?id=eq.${row.id}`, { status: "failed", last_error: note })
+        failed++
+        continue
+      }
 
-      if (row.channel === "email" || row.channel === "both" || smsPaused) {
+      if (emailGate && (wantsEmail || smsPaused)) {
         const r = await fetch(`${SUPABASE_URL}/functions/v1/payments`, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${SERVICE_KEY}` },

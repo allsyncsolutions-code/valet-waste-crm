@@ -32,6 +32,17 @@ function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { ...CORS, "Content-Type": "application/json" } })
 }
 
+// Global kill switch for a notification type (Notifications tab, mig 0065).
+// Reads the app_settings.notification_toggles JSONB map; a missing key = ON.
+async function notifEnabled(key: string): Promise<boolean> {
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/app_settings?id=eq.1&select=notification_toggles`, { headers: rest })
+    const rows = await r.json()
+    const t = (Array.isArray(rows) && rows[0]?.notification_toggles) || {}
+    return t[key] !== false
+  } catch (_e) { return true }
+}
+
 async function sbGet(path: string): Promise<any[]> {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, { headers: rest })
   if (!r.ok) throw new Error(`GET ${path} → ${r.status}`)
@@ -128,6 +139,7 @@ Deno.serve(async (req: Request) => {
 
     const p = (await sbGet(`properties?id=eq.${propertyId}&select=id,name,address,notes,pickup_days,pickup_frequency,pickup_start_date,created_at,customers(name)`))[0]
     if (!p) return json({ error: "Property not found." }, 404)
+    if (!await notifEnabled("team_new_property")) return json({ ok: true, skipped: "toggle_off" })
     const customerName = p.customers?.name || "A client"
 
     const days = (p.pickup_days || []).map((d: string) => DAY_SHORT[d] || d).join(" & ") || "(days not set yet)"

@@ -37,6 +37,17 @@ const rest = {
   "Content-Type": "application/json",
 }
 
+// Global kill switch for a notification type (Notifications tab, mig 0065).
+// Reads the app_settings.notification_toggles JSONB map; a missing key = ON.
+async function notifEnabled(key: string): Promise<boolean> {
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/app_settings?id=eq.1&select=notification_toggles`, { headers: rest })
+    const rows = await r.json()
+    const t = (Array.isArray(rows) && rows[0]?.notification_toggles) || {}
+    return t[key] !== false
+  } catch (_e) { return true }
+}
+
 // Expo push to the customer's registered app tokens (client app registers via
 // the portal fn, mig 0058). Hardened shape: per-device record check (single-
 // message pushes return an object, not an array) + DeviceNotRegistered prune.
@@ -170,6 +181,7 @@ async function sendEmail(to: string, subject: string, textBody: string, cust: an
 }
 
 async function notifyComplete(stopId: string, sentBy?: string | null) {
+  if (!await notifEnabled("client_complete")) return { ok: true, skipped: "toggle_off" }
   const settings = await getSettings()
   if (!settings.notify_on_complete) return { ok: true, skipped: "disabled" }
 

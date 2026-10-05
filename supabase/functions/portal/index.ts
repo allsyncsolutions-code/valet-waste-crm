@@ -81,6 +81,15 @@ async function sbGet(path: string) {
   if (!r.ok) throw new Error(`GET ${path}: ${r.status} ${await r.text()}`)
   return await r.json()
 }
+// Global kill switch for a notification type (Notifications tab, mig 0065).
+// Reads the app_settings.notification_toggles JSONB map; a missing key = ON.
+async function notifEnabled(key: string): Promise<boolean> {
+  try {
+    const rows = await sbGet(`app_settings?id=eq.1&select=notification_toggles`)
+    const t = (Array.isArray(rows) && rows[0]?.notification_toggles) || {}
+    return t[key] !== false
+  } catch (_e) { return true }
+}
 async function sbPost(path: string, body: unknown) {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
     method: "POST",
@@ -950,6 +959,7 @@ Deno.serve(async (req) => {
       if (!cust) return json({ error: "Client not found." }, 404)
       if (!cust.portal_slug) return json({ error: `${cust.name} has no portal slug — check the client record.` }, 400)
       if (!cust.email) return json({ error: `${cust.name} has no email on file — add one first.` }, 400)
+      if (!await notifEnabled("client_portal_invite")) return json({ error: "Portal invites are turned off in the Notifications tab." }, 400)
 
       const codeRaw = randomToken(24)
       await sbPost("portal_magic_links", {

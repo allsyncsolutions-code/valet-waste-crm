@@ -59,6 +59,15 @@ async function sbGet(path: string) {
   if (!r.ok) throw new Error(`GET ${path}: ${r.status} ${await r.text()}`)
   return await r.json()
 }
+// Global kill switch for a notification type (Notifications tab, mig 0065).
+// Reads the app_settings.notification_toggles JSONB map; a missing key = ON.
+async function notifEnabled(key: string): Promise<boolean> {
+  try {
+    const rows = await sbGet(`app_settings?id=eq.1&select=notification_toggles`)
+    const t = (Array.isArray(rows) && rows[0]?.notification_toggles) || {}
+    return t[key] !== false
+  } catch (_e) { return true }
+}
 async function sbPatch(path: string, body: unknown) {
   await fetch(`${SUPABASE_URL}/rest/v1/${path}`, { method: "PATCH", headers: restHeaders, body: JSON.stringify(body) })
 }
@@ -591,6 +600,7 @@ Deno.serve(async (req) => {
       ))[0]
       if (!inv) return json({ error: "Invoice not found." }, 404)
       if (inv.status === "void") return json({ error: "This invoice is void." }, 400)
+      if (!await notifEnabled("client_invoice_email")) return json({ error: "Invoice emails are turned off in the Notifications tab." }, 400)
       const cust = (await sbGet(`customers?id=eq.${inv.customer_id}&select=name,email,portal_slug`))[0]
       if (!cust?.email) return json({ error: "This customer has no email on file." }, 400)
       if (!cust?.portal_slug) return json({ error: "This customer has no portal — add a portal slug first." }, 400)

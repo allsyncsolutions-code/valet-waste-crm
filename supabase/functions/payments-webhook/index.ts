@@ -36,6 +36,16 @@ async function sbInsert(path: string, body: unknown) {
   })
 }
 
+// Global kill switch for a notification type (Notifications tab, mig 0065).
+// Reads the app_settings.notification_toggles JSONB map; a missing key = ON.
+async function notifEnabled(key: string): Promise<boolean> {
+  try {
+    const rows = await sbGet(`app_settings?id=eq.1&select=notification_toggles`)
+    const t = (Array.isArray(rows) && rows[0]?.notification_toggles) || {}
+    return t[key] !== false
+  } catch (_e) { return true }
+}
+
 async function verifySig(raw: string, sigHeader: string, secret: string): Promise<boolean> {
   // Header format: "sha256=<hex>"
   const expected = sigHeader.replace(/^sha256=/i, "").trim()
@@ -51,6 +61,7 @@ async function verifySig(raw: string, sigHeader: string, secret: string): Promis
 
 // ---- SMS to admins (Trashy Randy) — best-effort, never blocks the webhook ---
 async function textAdmins(body: string) {
+  if (!await notifEnabled("team_payment_events")) return
   try {
     const staff = await sbGet(`profiles?select=full_name,phone,role&phone=not.is.null&role=eq.admin`)
     for (const s of staff) {
