@@ -46,10 +46,10 @@ Guidelines:
 - assemble_route adds EXISTING properties to a route by selector: by_customer (name), by_tag, or address_contains — e.g. "build Route B today from everything tagged North Side" or "add all of Acme's stops to Route A". add_stop_to_route is for ONE brand-new address (it creates the property). bulk_add_properties imports many NEW addresses for one client.
 - move_stops moves matching stops from one route to another on a date (from_route_code → to_route_code), which hands them to the other route's driver. Pick which stops by_customer or address_contains.
 - assign_driver assigns (or unassigns) a driver for a route on a date; the driver must be flagged in the Team tab. set_default:true makes them the route's default. create_route adds a new route (code + name).
-- When the user gives you MORE THAN ONE property/address for the same client (a pasted list, a vendor sheet, etc.), use bulk_add_properties ONCE with all of them — do not call add_stop_to_route in a loop. Pass every row in the properties array and report how many were added.
+- When the user gives you MORE THAN ONE property/address for the same client (a pasted list, a vendor sheet, etc.), use bulk_add_properties ONCE with all of them — do not call add_stop_to_route in a loop. Pass every row in the properties array. Its response includes a "duplicates" count — addresses already on file that were SKIPPED, not re-added — so report both numbers ("12 added, 3 skipped as already on file") and name the skipped addresses so staff can confirm they meant the same place.
 - Staff flag uncertain imported properties as "Needs review" (e.g. unclear pricing or pickup frequency). Use list_needs_review to report what's flagged ("what needs review?"). Use edit_property to fix ONE property the owner is reviewing — set price/service/pickup_days/notes — and pass mark_reviewed:true to clear the flag once it's right. Find the property by address (add client_name if the address is ambiguous); if edit_property returns needs_clarification, ask the user which match they mean.
 - Use flag_properties to flag or unflag MANY properties at once by client, tag, or address (e.g. "flag everything for Staylah for review" → by_customer:"Staylah"; "clear review on all Palm Coast properties" → address_contains:"Palm Coast", needs_review:false). It defaults to flagging; pass needs_review:false to clear.
-- DUPLICATE ADDRESSES ARE NORMAL AND NOT A BLOCKER. When the CRM was set up, the owner and the office assistant both entered the same customers, so plenty of addresses sit on file twice under different clients. Never treat that as an error, never stall a task over it, and never make the user pick a client just to get something done — do the work on the copy you're already on and mention the duplicate once, in passing. Use find_duplicates when they ask about them: it returns groups of the same address used under more than one client; summarize the count and call out a few examples (address + the clients involved). You canNOT merge duplicates yourself — the owner does it on the Clients tab, where the orange duplicate banner has one "Edit & Merge" button per address that opens a screen to pick which copy stays and tick what to carry over from the other. Point them there for end-of-day cleanup. flag_properties can still flag a group for review.
+- DUPLICATE ADDRESSES: the CRM was set up with plenty of addresses on file twice under different clients, and those historical ones are NORMAL and NOT A BLOCKER. Never treat that as an error, never stall a task over it, and never make the user pick a client just to get something done — do the work on the copy you're already on and mention the duplicate once, in passing. Since 2026-10-06 the import path skips exact normalized matches, so a NEW exact duplicate should not happen — if one shows up it's a typo-level near-duplicate or a pre-fix leftover; still not a blocker, mention it once. Use find_duplicates when they ask about them: it returns groups of the same address used under more than one client; summarize the count and call out a few examples (address + the clients involved). You canNOT merge duplicates yourself — the owner does it on the Clients tab, where the orange duplicate banner has one "Edit & Merge" button per address that opens a screen to pick which copy stays and tick what to carry over from the other. Point them there for end-of-day cleanup. flag_properties can still flag a group for review.
 - Use list_skipped_stops to report addresses that were NOT checked in (skipped) on a day — e.g. "what got skipped yesterday?" or "which stops weren't picked up on June 24?". It defaults to today; pass a date or a route_code to narrow it.
 - Use add_property_photo to log a dated photo/missed-pickup entry onto an ADDRESS's file (e.g. "log that 123 Main wasn't picked up June 24, bin not out"). You can't take a picture yourself, so unless the user gives you an image_url this logs a dated note the owner attaches the real photo to in Clients › property › Photos. Always set the date to the day it applies to. Resolve the property by address (add client_name if ambiguous); if it returns needs_clarification, ask which match.
 - Use text_invoice to text a client their invoice with a Stripe payment link (by invoice number, or client name for their newest unpaid). Pass preview_to with a staff member's name to send them a preview first — the invoice isn't marked sent until you call it for real. You still cannot charge cards directly.
@@ -1539,8 +1539,24 @@ async function addStopToRoute(a: any) {
     }
   }
 
-  // property by address (create if missing) — geocode best-effort
-  let props = await sbGet(`properties?address=ilike.${enc(`*${address}*`)}&select=id,name,address,service,lat,lng,customer_id&limit=10`)
+  // property by address (create if missing) — geocode best-effort.
+  // Normalized exact match FIRST: the old raw-ilike lookup missed formatting
+  // variants ("Main St" stored vs "Main Street" typed, zip/city present or
+  // not) and quietly created duplicate properties. ilike remains only as a
+  // fallback for addresses not on file in any form.
+  let props: any[] = []
+  try {
+    const nr = await fetch(`${REST}/rpc/norm_address`, { method: "POST", headers: HEADERS, body: JSON.stringify({ a: address }) })
+    if (nr.ok) {
+      const norm = String((await nr.json()) ?? "").trim()
+      if (norm) props = await sbGet(`properties?norm_address=eq.${enc(norm)}&select=id,name,address,service,lat,lng,customer_id&limit=20`)
+    }
+  } catch (_e) { /* fall back to ilike below */ }
+  if (!props.length) {
+    let il = await sbGet(`properties?address=ilike.${enc(`*${address}*`)}&select=id,name,address,service,lat,lng,customer_id&limit=50`)
+    if (customerId) il = il.filter((p: any) => p.customer_id === customerId) // client filter BEFORE narrowing
+    props = il
+  }
   if (customerId && props.length > 1) props = props.filter((p: any) => p.customer_id === customerId)
   if (props.length > 1) {
     return { needs_clarification: true, which: "property", matches: props.map((p: any) => ({ id: p.id, address: p.address || p.name })) }
