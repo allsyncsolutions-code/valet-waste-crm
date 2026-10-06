@@ -1448,12 +1448,21 @@ Deno.serve(async (req) => {
       const custId = inserted?.[0]?.id
       if (!custId) return json({ error: "Signup could not be saved — please call us to start service." }, 500)
 
+      // Flag (never block) when the address is already on file under another
+      // customer — a new tenant can legitimately sign up at a served address,
+      // so the reviewer confirms the match at placement instead of us refusing.
+      let dupeNote: string | null = null
+      try {
+        const exA = await sbGet(`properties?select=address,customers(name)&norm_address=eq.${enc(normAddress(addr))}&limit=1`)
+        if (exA[0]) dupeNote = `⚠ Possible duplicate — same address already on file under ${exA[0].customers?.name || "another client"} (${exA[0].address}). Confirm before placing.`
+      } catch (_e) { /* flag is best-effort */ }
+
       const prop = await sbPost("properties", {
         customer_id: custId,
         name: `${name} — ${street}`,
         address: addr,
         service: "Trash",
-        notes: [areaLabel ? `Service area: ${areaLabel}.` : null, scheduleType === "on_call" ? "ON-DEMAND service." : null, notes || null].filter(Boolean).join(" ") || null,
+        notes: [areaLabel ? `Service area: ${areaLabel}.` : null, scheduleType === "on_call" ? "ON-DEMAND service." : null, dupeNote, notes || null].filter(Boolean).join(" ") || null,
         price,
         pickup_days: scheduleType === "weekly" ? serviceDays : [],
         pickup_frequency: scheduleType,

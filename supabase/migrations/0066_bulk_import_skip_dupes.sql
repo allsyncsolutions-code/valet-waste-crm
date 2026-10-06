@@ -120,3 +120,32 @@ begin
 
   return jsonb_build_object('customer_id', v_customer_id, 'inserted', v_count, 'duplicates', v_dupes);
 end $function$;
+
+-- Backstop trigger: a same-client exact-normalized duplicate can never be
+-- INSERTed, no matter which app path sent it (CRM add-address form, portal
+-- request approval, future tools, direct SQL). Frontend code also pre-checks
+-- for a friendly message; this is the guarantee. Deliberately same-client
+-- only: signup flows create a NEW customer (allowed — new tenant at a served
+-- address), and the rare legitimate cross-client copy stays possible via the
+-- CRM UI, where the duplicate scanner will surface it for review.
+create or replace function public.properties_reject_same_client_dupe()
+returns trigger
+language plpgsql
+as $function$
+begin
+  if new.customer_id is not null and nullif(new.address, '') is not null then
+    if exists (
+      select 1 from public.properties ex
+      where ex.customer_id = new.customer_id
+        and public.norm_address(ex.address) = public.norm_address(new.address)
+    ) then
+      raise exception 'Duplicate address: "%" already exists on this client (normalized match). Edit the existing address instead.', new.address;
+    end if;
+  end if;
+  return new;
+end $function$;
+
+drop trigger if exists properties_reject_same_client_dupe on public.properties;
+create trigger properties_reject_same_client_dupe
+  before insert on public.properties
+  for each row execute function public.properties_reject_same_client_dupe();

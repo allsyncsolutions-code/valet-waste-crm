@@ -896,7 +896,7 @@ const tools = [
   {
     name: "add_property",
     description:
-      "Add ONE new service address (property) under an existing client. Use for 'add 123 Oak St to Acme' / 'they have a new address'. Geocodes the address immediately. For MANY addresses at once use bulk_add_properties instead. To change an existing address use edit_property.",
+      "Add ONE new service address (property) under an existing client. Use for 'add 123 Oak St to Acme' / 'they have a new address'. Geocodes the address immediately. For MANY addresses at once use bulk_add_properties instead. To change an existing address use edit_property. Refuses with an error if the address is already on file under ANY client (normalized match) — work the existing property instead.",
     input_schema: {
       type: "object",
       properties: {
@@ -2301,11 +2301,25 @@ async function addProperty(a: any) {
   if (!address) throw new Error("An address is required.")
   const client = await resolveClient(a)
   if (client.error || client.needs_clarification) return client
-  // Duplicate guard: same address already under this client?
-  const dupes = await sbGet(`properties?customer_id=eq.${enc(client.id)}&address=ilike.${enc(`*${address}*`)}&select=id,address&limit=3`)
-  if (dupes.length) {
-    return { error: `${client.name} already has a property matching "${dupes[0].address}". Use edit_property to change it, or give a different address.` }
-  }
+  // Duplicate guard: normalized match ANYWHERE on file. The old same-client
+  // raw-ilike guard missed formatting variants ("Main St" vs "Main Street")
+  // and same-address copies under other clients — both create duplicates the
+  // owner then has to merge. A match errors with the existing client so staff
+  // work the copy already there (the CRM UI remains the escape hatch for the
+  // rare legitimate cross-client add; the DB trigger backstops same-client).
+  try {
+    const nr = await fetch(`${REST}/rpc/norm_address`, { method: "POST", headers: HEADERS, body: JSON.stringify({ a: address }) })
+    if (nr.ok) {
+      const norm = String((await nr.json()) ?? "").trim()
+      if (norm) {
+        const dupes = await sbGet(`properties?norm_address=eq.${enc(norm)}&select=id,address,customers(name)&limit=3`)
+        if (dupes.length) {
+          const owners = [...new Set(dupes.map((d: any) => d.customers?.name).filter(Boolean))]
+          return { error: `"${address}" is already on file${owners.length ? ` under ${owners.join(", ")}` : ""}. Work with that property via edit_property — or if it genuinely belongs to ${client.name} too, have the office add it from the Clients tab.` }
+        }
+      }
+    }
+  } catch (_e) { /* guard is best-effort; the 0066 DB trigger backstops same-client dupes */ }
   const loc = await geocode(address)
   const [p] = await sbPost("properties", {
     customer_id: client.id,

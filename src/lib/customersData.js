@@ -5,6 +5,7 @@ import { supabase } from './supabaseClient.js'
 import { logActivity } from './activityData.js'
 import { loadStopPhotos } from './photosData.js'
 import { loadPropertyPhotos } from './propertyPhotosData.js'
+import { normAddress } from './duplicateCheck.js'
 
 function mapCustomer(row) {
   const pickup = (row.pickup_schedules || [])[0] || null
@@ -154,6 +155,20 @@ export async function loadProperties(customerId) {
 // approval flow passes { notify: false } — that path already alerted staff
 // when the client submitted the request.
 export async function addProperty(customerId, fields, opts = {}) {
+  // Duplicate guard (same client, normalized match): mirrors the DB trigger
+  // from migration 0066 so staff get a friendly message instead of a raw
+  // database error. Cross-client adds stay possible here by design — the
+  // trigger only blocks same-client copies — for the rare legitimate case.
+  const norm = normAddress(fields.address || '')
+  if (norm) {
+    const { data: dup } = await supabase
+      .from('properties')
+      .select('id, address')
+      .eq('customer_id', customerId)
+      .eq('norm_address', norm)
+      .limit(1)
+    if (dup && dup.length) throw new Error(`This client already has "${dup[0].address}" — edit that address instead of adding it again.`)
+  }
   const { data, error } = await supabase
     .from('properties')
     .insert({
