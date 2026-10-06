@@ -54,6 +54,19 @@
 //                                  placement" queue), optionally vaults a card
 //                                  ($0 auth, 5th-week-free pitch), texts admins.
 //                                  Honeypot field `company` must be empty.
+//   public_bulk_signup {…}       → PUBLIC (no auth): property-manager bulk
+//                                  intake (?signup=bulk). One contact + billing
+//                                  address, an array of service-address rows
+//                                  (parsed from the CSV template on the client),
+//                                  one optional card on file covering the batch.
+//                                  Validates every row, skips in-file and
+//                                  existing-property duplicates (norm_address),
+//                                  creates ONE customer + one needs_review
+//                                  property per accepted row, texts admins a
+//                                  count summary. Service area is guessed from
+//                                  city (same map as SignupPage); staff confirm
+//                                  area/days/route at placement. Honeypot field
+//                                  `website` must be empty.
 //
 // Secrets: SENDGRID_API_KEY (required), SENDGRID_FROM. Run Merchant credentials
 // live in app_settings (set via the `payments` function's save_credentials).
@@ -687,6 +700,61 @@ async function loadSignupForm(slug: string): Promise<SignupForm | null> {
   return rows[0] ? sanitizeFormConfig(rows[0]) : null
 }
 
+// ---- Bulk signup helpers (?signup=bulk) ---------------------------------------
+// TS mirror of src/lib/duplicateCheck.js normAddress — itself a mirror of the
+// DB's norm_address() (migration 0033). The SQL function is the source of
+// truth; keep all three in sync. Used to match uploaded rows against
+// properties.norm_address so a re-uploaded list skips what already exists.
+const NORM_PHRASES: [RegExp, string][] = [
+  [/united states of america|united states|usa|us\b/g, " "],
+  [/new hampshire/g, "nh"], [/new jersey/g, "nj"], [/new mexico/g, "nm"],
+  [/new york/g, "ny"], [/north carolina/g, "nc"], [/north dakota/g, "nd"],
+  [/rhode island/g, "ri"], [/south carolina/g, "sc"], [/south dakota/g, "sd"],
+  [/west virginia/g, "wv"],
+]
+const NORM_WORDS: Record<string, string> = {
+  street: "st", saint: "st", avenue: "ave", drive: "dr", road: "rd",
+  boulevard: "blvd", lane: "ln", court: "ct", circle: "cir", highway: "hwy",
+  place: "pl", terrace: "ter", parkway: "pkwy",
+  north: "n", south: "s", east: "e", west: "w", apartment: "apt",
+  alabama: "al", alaska: "ak", arizona: "az", arkansas: "ar", california: "ca",
+  colorado: "co", connecticut: "ct", delaware: "de", florida: "fl",
+  georgia: "ga", hawaii: "hi", idaho: "id", illinois: "il", indiana: "in",
+  iowa: "ia", kansas: "ks", kentucky: "ky", louisiana: "la", maine: "me",
+  maryland: "md", massachusetts: "ma", michigan: "mi", minnesota: "mn",
+  mississippi: "ms", missouri: "mo", montana: "mt", nebraska: "ne",
+  nevada: "nv", ohio: "oh", oklahoma: "ok", oregon: "or",
+  pennsylvania: "pa", tennessee: "tn", texas: "tx", utah: "ut",
+  vermont: "vt", virginia: "va", washington: "wa", wisconsin: "wi",
+  wyoming: "wy",
+}
+function normAddress(a: string): string {
+  let t = String(a || "").toLowerCase()
+  for (const [re, to] of NORM_PHRASES) t = t.replace(re, to)
+  t = t.replace(/[.,#]/g, " ")
+  t = t.split(" ").map((w) => NORM_WORDS[w] || w).filter(Boolean).join(" ")
+  return t.replace(/\s+/g, " ").trim()
+}
+
+// City → service area, same mapping as SignupPage's guessArea (owner rule,
+// 2026-09-30). Bulk rows don't pick days; this pre-fills the area hint staff
+// confirm at placement.
+const BULK_AREA_LABELS: Record<string, string> = {
+  duval: "Duval County",
+  st_johns: "St. Johns County",
+  palm_coast: "Palm Coast",
+  flagler: "Flagler County",
+}
+function guessAreaKey(city: string): string | null {
+  const c = String(city || "").toLowerCase()
+  if (!c.trim()) return null
+  if (c.includes("jacksonville") || c.includes("atlantic beach") || c.includes("neptune beach") || c.includes("orange park")) return "duval"
+  if (c.includes("palm coast")) return "palm_coast"
+  if (["st. augustine", "st augustine", "saint augustine", "ponte vedra", "st. johns", "st johns", "elkton", "hastings", "fruit cove", "world golf"].some((k) => c.includes(k))) return "st_johns"
+  if (c.includes("flagler") || c.includes("bunnell") || c.includes("beverly beach") || c.includes("marineland")) return "flagler"
+  return null
+}
+
 // ---- HTTP entry -----------------------------------------------------------------
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS })
@@ -1281,6 +1349,7 @@ Deno.serve(async (req) => {
       const startDate = /^\d{4}-\d{2}-\d{2}$/.test(str(body.start_date, 10)) ? str(body.start_date, 10) : null
       const notes = str(body.notes, 1000)
       const ebilling = !!body.ebilling
+      const isPm = !!body.property_manager // "I'm a property manager" checkbox
 
       if (!firstName || !lastName) return json({ error: "Please enter your first and last name." }, 400)
       if (phone.replace(/\D/g, "").length < 10) return json({ error: "Please enter a valid phone number." }, 400)
@@ -1358,6 +1427,7 @@ Deno.serve(async (req) => {
         : `${areaLabel}: ${serviceDays.join(" + ")} — ${pickupsPerWeek} pickup${pickupsPerWeek > 1 ? "s" : ""}/week${price != null ? ` ($${price.toFixed(2)}/wk)` : ""}`
       const consentNote = `Web signup agreement approved ${nowIso}${ip ? ` (IP ${ip})` : ""} — ${scheduleTxt}. Form: ${form.name} (${slug}).`
       const noteParts = [consentNote]
+      if (isPm) noteParts.push("Property manager account (self-reported on the signup form) — may add more addresses later.")
       if (!bSame) noteParts.push(`Billing address: ${billAddr}`)
       if (ebilling) noteParts.push("Enrolled in e-billing.")
       if (notes) noteParts.push(`Service notes: ${notes}`)
@@ -1399,9 +1469,261 @@ Deno.serve(async (req) => {
       const cardTxt = vault?.run_card_last4 ? ` Card on file ${String(vault.run_card_brand || "card").toUpperCase()} ••${vault.run_card_last4} (5th week free).` : " No card on file — bill after first visit."
       const startTxt = startDate && scheduleType === "weekly" ? ` starting ${startDate}` : ""
       const noteTxt = notes ? ` Notes: "${notes.slice(0, 160)}"` : ""
-      await textAdmins(`🌐 New web signup (${form.name}): ${name} @ ${addr} — ${scheduleTxt}${startTxt}.${cardTxt}${noteTxt} — Trashy Randy`)
+      await textAdmins(`🌐 New web signup (${form.name}): ${name}${isPm ? " (property manager)" : ""} @ ${addr} — ${scheduleTxt}${startTxt}.${cardTxt}${noteTxt} — Trashy Randy`)
 
       return json({ ok: true, customer_id: custId, property_id: prop?.[0]?.id || null, card_saved: !!vault })
+    }
+
+    if (action === "public_bulk_signup") {
+      // Public bulk intake (?signup=bulk) — property managers upload a CSV of
+      // service addresses. Same guarantees as public_signup: the optional card
+      // is vaulted BEFORE any row is created; every row is validated and
+      // deduplicated here (never trust the client); each accepted address
+      // becomes a needs_review property in the Dashboard "awaiting placement"
+      // queue; the Approve button is the e-signature (evidence on the customer
+      // row). Uses the default web form for branding/pricing/terms — a
+      // dedicated bulk form config can come later if owners want one.
+      if (String(body.website || "").trim()) return json({ ok: true }) // honeypot
+
+      const form = await loadSignupForm("default")
+      if (!form || !form.active) return json({ error: "Signup is temporarily unavailable — please call us to start service." }, 400)
+
+      const str = (v: unknown, max = 200) => String(v ?? "").trim().slice(0, max)
+      const pmName = str(body.name, 120)
+      const company = str(body.company_name, 120)
+      const phone = str(body.phone, 30)
+      const email = str(body.email, 200).toLowerCase()
+      const bStreet = str(body.billing_street, 200)
+      const bCity = str(body.billing_city, 100)
+      // normAddress maps full state names to codes ("new york"→"ny"); 2-letter
+      // codes pass through. Same helper the client uses.
+      const bState = normAddress(str(body.billing_state, 20)).replace(/\s+/g, " ").toUpperCase()
+      const bZip = str(body.billing_zip, 20)
+      if (!pmName) return json({ error: "Please enter your name." }, 400)
+      if (phone.replace(/\D/g, "").length < 10) return json({ error: "Please enter a valid phone number." }, 400)
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ error: "Please enter a valid email address." }, 400)
+      if (!bStreet || !bCity || !bState || !bZip) return json({ error: "Please enter your full billing address." }, 400)
+      if (!body.agreed) return json({ error: "Please review the agreement and tap Approve to start service." }, 400)
+
+      const rawRows = Array.isArray(body.addresses) ? body.addresses : []
+      if (!rawRows.length) return json({ error: "No service addresses were uploaded." }, 400)
+      if (rawRows.length > 500) return json({ error: "Please upload at most 500 addresses per batch." }, 400)
+
+      // Normalize + validate every row. schedule: '' defaults to 1x.
+      type BulkRow = {
+        i: number
+        street: string; unit: string; city: string; state: string; zip: string
+        schedule: "1x" | "2x" | "on_demand"
+        startDate: string | null
+        notes: string; residentName: string; residentPhone: string
+        addr: string // display address, exactly as stored on the property
+        norm: string // normAddress(addr) — the dedupe key
+        problem: string | null
+      }
+      const schedOf = (v: unknown): "1x" | "2x" | "on_demand" | null => {
+        const s = str(v, 20).toLowerCase().replace(/[\s-]+/g, "_")
+        if (["", "1", "1x", "one", "weekly", "1_pickup"].includes(s)) return "1x"
+        if (["2", "2x", "two", "2_pickups"].includes(s)) return "2x"
+        if (["on_demand", "ondemand", "demand", "on_call", "one_time"].includes(s)) return "on_demand"
+        return null
+      }
+      const rows: BulkRow[] = rawRows.map((r: any, i: number) => {
+        const street = str(r?.street, 200)
+        const unit = str(r?.unit, 40)
+        const city = str(r?.city, 100)
+        const state = normAddress(str(r?.state, 20)).replace(/\s+/g, " ").toUpperCase()
+        const zip = str(r?.zip, 20)
+        const schedule = schedOf(r?.schedule) // null = invalid value (checked below)
+        const rawStart = str(r?.start_date, 20)
+        let startDate: string | null = null
+        if (rawStart) {
+          let m = rawStart.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/)
+          if (m && Number(m[2]) >= 1 && Number(m[2]) <= 12 && Number(m[3]) >= 1 && Number(m[3]) <= 31) startDate = `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}`
+          else if ((m = rawStart.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)) && Number(m[1]) >= 1 && Number(m[1]) <= 12 && Number(m[2]) >= 1 && Number(m[2]) <= 31) startDate = `${m[3]}-${m[1].padStart(2, "0")}-${m[2].padStart(2, "0")}`
+        }
+        const notes = str(r?.notes, 1000)
+        const residentName = str(r?.resident_name, 120)
+        const residentPhone = str(r?.resident_phone, 30)
+        const residentDigits = residentPhone.replace(/\D/g, "")
+        const addr = `${street}${unit ? ` Unit ${unit}` : ""}, ${city}, ${state} ${zip}`.replace(/^,\s*|,\s*$/g, "")
+        let problem: string | null = null
+        if (!street || !city) problem = "Missing street or city."
+        else if (!/^[A-Z]{2}$/.test(state)) problem = "State must be a 2-letter code (e.g. FL)."
+        else if (!/^\d{5}(-\d{4})?$/.test(zip)) problem = "Zip must be 5 digits (e.g. 32080)."
+        else if (str(r?.schedule, 20) && !schedule) problem = `Unrecognized schedule "${str(r?.schedule, 20)}" — use 1x, 2x, or on_demand.`
+        else if (rawStart && !startDate) problem = `Unrecognized start date "${rawStart}" — use YYYY-MM-DD.`
+        else if (residentPhone && residentDigits.length < 10) problem = "Resident phone needs at least 10 digits."
+        return {
+          i, street, unit, city, state, zip,
+          schedule: schedule || "1x",
+          startDate, notes, residentName, residentPhone, addr,
+          norm: normAddress(addr),
+          problem,
+        }
+      })
+
+      // In-file duplicates (same normalized address appearing twice in the CSV).
+      const seen = new Map<string, number>()
+      for (const r of rows) {
+        if (r.problem) continue
+        if (!r.norm) { r.problem = "Address could not be read."; continue }
+        const first = seen.get(r.norm)
+        if (first != null) r.problem = `Duplicate of row ${first + 1} in your file.`
+        else seen.set(r.norm, r.i)
+      }
+
+      // Existing-property duplicates: batch-query properties.norm_address in
+      // chunks (PostgREST in-list URL length). Rows whose norm matches an
+      // existing property are skipped, not created.
+      const candidates = rows.filter((r) => !r.problem)
+      const existingNorms = new Set<string>()
+      for (let c = 0; c < candidates.length; c += 50) {
+        const chunk = candidates.slice(c, c + 50)
+        const list = chunk.map((r) => `"${r.norm.replace(/"/g, "")}"`).join(",")
+        try {
+          const hits = await sbGet(`properties?select=norm_address&norm_address=in.(${enc(list)})`)
+          for (const h of hits) if (h.norm_address) existingNorms.add(String(h.norm_address))
+        } catch (_e) { /* dedupe is best-effort; placement review catches strays */ }
+      }
+      for (const r of candidates) {
+        if (existingNorms.has(r.norm)) r.problem = "This address already has service with us."
+      }
+
+      const accepted = rows.filter((r) => !r.problem)
+      const rejected = rows.filter((r) => r.problem)
+      if (!accepted.length) {
+        return json({ ok: false, error: "None of the uploaded rows could be used.", results: rows.map((r) => ({ i: r.i, status: "invalid", reason: r.problem, address: r.addr })) }, 400)
+      }
+
+      // Optional card on file — ONE vault covers the whole batch (5th-week-free
+      // pitch, same $0 auth as public_signup). Vaulted before any row exists.
+      const card = body.card && typeof body.card === "object" ? body.card as Record<string, unknown> : null
+      let vault: Record<string, unknown> | null = null
+      if (card && card.account_token) {
+        const settings = await getSettings()
+        if (!settings.run_mid) return json({ error: "Payments aren't set up yet — please skip the card and we'll bill you after service starts." }, 400)
+        const { token: runToken, mid, env } = await runAccessToken(settings)
+        const res = await runApi(env, runToken, "charge", {
+          method: "POST",
+          body: {
+            mid,
+            amount: "0.00",
+            account_token: String(card.account_token),
+            expiration: String(card.expiration || ""),
+            capture: "N",
+            vault: "Y",
+            cof: "C",
+            cof_sched: "N",
+            cof_perm: card.consent ? "Y" : "N",
+            name: pmName,
+            email,
+            cvn: card.cvn ? String(card.cvn) : undefined,
+            account_zip: bZip,
+            currency: "USD",
+          },
+        })
+        if (res.result && res.result !== "A") {
+          return json({ error: `${res.resp_text || "Your card couldn't be verified."} — nothing was submitted; please fix the card or choose "bill me after service starts" and try again.`, card_declined: true })
+        }
+        vault = {
+          run_vault_id: res.vault_id ?? null,
+          run_vault_holder_id: res.vault_holder_id ?? null,
+          run_card_brand: res.card_brand || res.card_type || null,
+          run_card_last4: String(res.card_number || "").slice(-4) || null,
+          run_card_exp: String(card.expiration) || null,
+          run_card_zip: bZip,
+          autopay_consent: !!card.consent,
+          autopay_consented_at: card.consent ? new Date().toISOString() : null,
+        }
+      }
+
+      // Consent evidence — the Approve tap IS the signature (same as public_signup).
+      const ip = (req.headers.get("x-forwarded-for") || "").split(",")[0].trim()
+      const nowIso = new Date().toISOString()
+      const billAddr = `${bStreet}, ${bCity}, ${bState} ${bZip}`
+      const displayName = company ? `${company} — ${pmName}` : pmName
+      const schedCount = (s: string) => accepted.filter((r) => r.schedule === s).length
+      const consentNote =
+        `Property manager bulk signup agreement approved ${nowIso}${ip ? ` (IP ${ip})` : ""} — ` +
+        `${accepted.length} service address${accepted.length === 1 ? "" : "es"} in one batch ` +
+        `(1x/wk: ${schedCount("1x")}, 2x/wk: ${schedCount("2x")}, on-demand: ${schedCount("on_demand")}). ` +
+        `Service days/routes to be confirmed by our team before the first visit. Form: ${form.name} (default/bulk).`
+      const noteParts = [consentNote, `Billing address: ${billAddr}`]
+      if (!vault) noteParts.push("No card on file — bill after service starts.")
+
+      const inserted = await sbPost("customers", {
+        name: displayName,
+        email,
+        phone,
+        address: billAddr,
+        status: "active",
+        business_line: "waste",
+        billing_type: "subscription",
+        lead_source: "web_form",
+        notes: noteParts.join("\n"),
+        ...(vault || {}),
+      })
+      const custId = inserted?.[0]?.id
+      if (!custId) return json({ error: "Signup could not be saved — please call us to start service." }, 500)
+
+      // One needs_review property per accepted row — same queue the single
+      // signup lands in (★ NEW badge until staff slot it onto a route).
+      let created = 0
+      for (const r of accepted) {
+        const areaKey = guessAreaKey(r.city)
+        const areaLabel = areaKey ? BULK_AREA_LABELS[areaKey] : null
+        const price = r.schedule === "1x" ? form.pricing.one_pickup : r.schedule === "2x" ? form.pricing.two_pickup : null
+        const rowNotes = [
+          `Bulk upload row #${r.i + 1}.`,
+          areaLabel ? `Service area (guessed from city): ${areaLabel} — confirm at placement.` : "Service area unknown — assign at placement.",
+          r.schedule === "on_demand" ? "ON-DEMAND service." : null,
+          r.residentName ? `Resident: ${r.residentName}${r.residentPhone ? ` (${r.residentPhone})` : ""}.` : null,
+          r.notes ? `Service notes: ${r.notes}` : null,
+        ].filter(Boolean).join(" ")
+        try {
+          const prop = await sbPost("properties", {
+            customer_id: custId,
+            name: `${displayName} — ${r.street}`,
+            address: r.addr,
+            service: "Trash",
+            notes: rowNotes || null,
+            price,
+            pickup_days: [],
+            pickup_frequency: r.schedule === "on_demand" ? "on_call" : "weekly",
+            pickup_start_date: r.schedule === "on_demand" ? null : r.startDate,
+            needs_review: true,
+            business_line: "waste",
+            paused: false,
+          })
+          if (prop?.[0]?.id) {
+            created++
+            r.problem = null // mark created via results below
+            ;(r as any).property_id = prop[0].id
+          } else {
+            r.problem = "Could not be saved — our team will add it manually."
+          }
+        } catch (_e) {
+          r.problem = "Could not be saved — our team will add it manually."
+        }
+      }
+
+      const results = rows.map((r) => ({
+        i: r.i,
+        status: r.problem ? (/already has service/.test(r.problem) ? "duplicate" : "invalid") : "created",
+        reason: r.problem,
+        address: r.addr,
+      }))
+      const dupCount = results.filter((x) => x.status === "duplicate").length
+      const badCount = results.filter((x) => x.status === "invalid").length
+
+      const skipTxt = [dupCount ? `${dupCount} already existed` : "", badCount ? `${badCount} invalid` : ""].filter(Boolean).join(", ")
+      const cardTxt = vault?.run_card_last4 ? ` Card on file ${String(vault.run_card_brand || "card").toUpperCase()} ••${vault.run_card_last4} (5th week free).` : " No card on file — bill after service starts."
+      await textAdmins(
+        `🌐 Bulk web signup: ${displayName} — ${created} of ${rawRows.length} addresses submitted${skipTxt ? ` (${skipTxt})` : ""}.` +
+        `${cardTxt} Each property is in the awaiting-placement queue. — Trashy Randy`
+      )
+
+      return json({ ok: true, customer_id: custId, created, results, card_saved: !!vault })
     }
 
     return json({ error: "Unknown action." }, 400)

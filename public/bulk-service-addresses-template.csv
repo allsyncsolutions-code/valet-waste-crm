@@ -1,0 +1,4 @@
+street,unit,city,state,zip,schedule,start_date,notes,resident_name,resident_phone
+123 Ocean Breeze Dr,4B,St. Augustine,FL,32080,1x,2026-11-01,Gate code 4412 / cart by the garage,Jane Doe,904-555-0134
+456 Palmetto Way,,Palm Coast,FL,32137,2x,,,
+789 Marshview Ln,,Jacksonville,FL,32225,on_demand,,Call resident before first pickup,,

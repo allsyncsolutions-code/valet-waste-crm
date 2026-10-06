@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { MONO } from '../data.js'
 import { parseRows, loadClients, bulkImport, geocodeAll, pendingGeocodeCount } from '../lib/importData.js'
+import { parseCsv, buildRows, looksLikeTemplate, templateRowNotes } from '../lib/csvImport.js'
 import { findDuplicateProperties, mergeProperties, deleteProperty } from '../lib/customersData.js'
 
 const DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
@@ -38,8 +39,33 @@ export default function Import({ app }) {
   const [pending, setPending] = useState(0)
   const [dupBusy, setDupBusy] = useState(false)
   const [dupGroups, setDupGroups] = useState(null) // null = not scanned yet; [] = none
+  // PM bulk-template parse ({rows, headerError}) when the pasted/uploaded text
+  // is the same CSV template the public ?signup=bulk form hands out — those
+  // rows get per-row validation + an accept/reject preview instead of the
+  // loose legacy parsing. Null = legacy format.
+  const [tpl, setTpl] = useState(null)
 
-  const rows = parseRows(text)
+  // Rows fed to the import RPC. Template rows become full addresses with the
+  // per-row schedule/start/resident details folded into notes (the RPC takes
+  // batch-level schedule); rejected rows never reach it.
+  const validTpl = tpl ? tpl.rows.filter((r) => !r.problems.length) : []
+  const badTpl = tpl ? tpl.rows.filter((r) => r.problems.length) : []
+  const rows = tpl
+    ? validTpl.map((r) => ({ code: '', name: '', address: r.addr, service: '', notes: templateRowNotes(r) }))
+    : parseRows(text)
+
+  function applyText(t) {
+    setText(t)
+    if (looksLikeTemplate(t)) {
+      const parsed = buildRows(parseCsv(t))
+      setTpl(parsed)
+      // External data from a PM — default the batch to Needs review so every
+      // property gets eyeballed before billing. (Staff can uncheck.)
+      if (parsed.rows.some((r) => !r.problems.length)) setMarkReview(true)
+    } else {
+      setTpl(null)
+    }
+  }
 
   async function refreshPending() {
     try { setPending(await pendingGeocodeCount()) } catch (e) {}
@@ -52,7 +78,7 @@ export default function Import({ app }) {
   function onFile(file) {
     if (!file) return
     const reader = new FileReader()
-    reader.onload = () => setText(String(reader.result || ''))
+    reader.onload = () => applyText(String(reader.result || ''))
     reader.readAsText(file)
   }
 
@@ -79,6 +105,7 @@ export default function Import({ app }) {
       })
       setResult({ inserted: res?.inserted ?? 0, duplicates: res?.duplicates ?? 0 })
       setText('')
+      setTpl(null)
       loadClients().then(setClients).catch(() => {})
       // Fill in coordinates in the background, throttled.
       setGeo({ updated: 0, remaining: null })
@@ -128,6 +155,7 @@ export default function Import({ app }) {
     <div style={{ maxWidth: 900, margin: '0 auto' }}>
       <div style={{ fontSize: 13, color: '#5d6b63', marginBottom: 16 }}>
         Paste a property list (or upload a file) to add many service locations to one client at once. Coordinates are filled in automatically after import.
+        Accepts the pipe format, plain addresses, or a property manager’s filled-in bulk template (street, unit, city, state, zip, schedule…) from the public signup page — the template gets per-row validation before import.
         <div style={{ marginTop: 6 }}>
           The pickup day(s) you choose below apply to every property in this batch — pick more than one if these addresses run multiple days a week. For a client whose addresses run on <i>different</i> days (some Monday-only, some Thursday-only), import each set as a separate batch.
         </div>
@@ -205,7 +233,7 @@ export default function Import({ app }) {
         <div style={{ marginTop: 14 }}>
           <label style={lbl}>Properties</label>
           <textarea
-            value={text} onChange={(e) => setText(e.target.value)} rows={10}
+            value={text} onChange={(e) => applyText(e.target.value)} rows={10}
             style={{ ...inp, fontFamily: MONO, fontSize: 12.5, lineHeight: 1.5, resize: 'vertical' }}
             placeholder={'One per line:  CODE | Address, City Zip | Service | Bin location\n(only the address is required)\n\nTW | 302 Twelfth St, St. Augustine 32084 | Trash | West side behind gate\nLC | 402 Twelfth St, St. Augustine 32084 | Trash/Recycle | Under carport'}
           />
@@ -219,6 +247,30 @@ export default function Import({ app }) {
             </div>
           </div>
         </div>
+
+        {tpl && (
+          <div style={{ marginTop: 12, border: `1px solid ${badTpl.length ? '#f5c6c0' : '#bfe3cd'}`, borderRadius: 10, padding: '12px 14px', background: badTpl.length ? '#fdf3f1' : '#f2faf5' }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: badTpl.length ? '#a02c22' : '#1f7a4d' }}>
+              PM bulk template detected — {validTpl.length} of {tpl.rows.length} rows ready
+            </div>
+            <div style={{ fontSize: 12, color: '#5d6b63', marginTop: 4, lineHeight: 1.5 }}>
+              Per-address schedule, start date, and resident details are copied into each property's notes — set the batch pickup day above.
+              Addresses already in the system are still imported here (the RPC flags them); use <b>Scan for duplicates</b> below to clean up.
+            </div>
+            {tpl.headerError && <div style={{ fontSize: 12.5, color: '#a02c22', marginTop: 6 }}>{tpl.headerError}</div>}
+            {badTpl.length > 0 && (
+              <div style={{ maxHeight: 170, overflowY: 'auto', marginTop: 8, border: '1px solid #f5c6c0', borderRadius: 8, background: '#fff' }}>
+                {badTpl.slice(0, 50).map((r) => (
+                  <div key={r.i} style={{ padding: '7px 12px', borderTop: '1px solid #fbe3df', fontSize: 12.5, color: '#5d6b63' }}>
+                    <b>Row {r.i + 2}:</b> {r.addr || '(address unreadable)'}
+                    <div style={{ color: '#a02c22' }}>{r.problems.map((p) => `• ${p}`).join('  ')}</div>
+                  </div>
+                ))}
+                {badTpl.length > 50 && <div style={{ padding: '7px 12px', fontSize: 12, color: '#7c8a82' }}>+ {badTpl.length - 50} more</div>}
+              </div>
+            )}
+          </div>
+        )}
 
         {rows.length > 0 && (
           <div style={{ marginTop: 14, border: '1px solid #eef0ed', borderRadius: 10, overflow: 'hidden' }}>

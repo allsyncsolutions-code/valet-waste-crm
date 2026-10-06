@@ -89,6 +89,7 @@ export default function SignupPage({ slug } = {}) {
   const [bState, setBState] = useState('')
   const [bZip, setBZip] = useState('')
   const [ebilling, setEbilling] = useState(true)
+  const [isPm, setIsPm] = useState(false) // "I'm a property manager" — tags the account
   // Step 2 — service
   const [scheduleType, setScheduleType] = useState('weekly') // 'weekly' | 'on_call'
   const [pickupsPerWeek, setPickupsPerWeek] = useState(1) // 1 | 2
@@ -184,6 +185,7 @@ export default function SignupPage({ slug } = {}) {
         service_days: scheduleType === 'weekly' ? serviceDays : [],
         area: areaObj ? areaObj.value : null,
         start_date: startDate || null, notes,
+        property_manager: isPm,
         card,
         agreed: true,
         company,
@@ -329,6 +331,9 @@ export default function SignupPage({ slug } = {}) {
             <div style={{ flex: 1 }}><input style={inp} value={stateVal} onChange={(e) => setStateVal(e.target.value)} autoComplete="address-level1" placeholder="State" maxLength={2} /></div>
             <div style={{ flex: 1.4 }}><input style={inp} value={zip} onChange={(e) => setZip(e.target.value)} autoComplete="postal-code" placeholder="Zip" /></div>
           </div>
+          <div style={{ fontSize: 13, color: '#66766c', margin: '0 0 10px' }}>
+            Managing more than one property? <a href="?signup=bulk" style={{ color: GREEN, fontWeight: 700 }}>Upload a list of service addresses instead</a>
+          </div>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, margin: '4px 0 10px', cursor: 'pointer' }}>
             <input type="checkbox" checked={billingSame} onChange={(e) => setBillingSame(e.target.checked)} style={{ width: 17, height: 17 }} />
             Billing address is the same
@@ -348,6 +353,15 @@ export default function SignupPage({ slug } = {}) {
             <input type="checkbox" checked={ebilling} onChange={(e) => setEbilling(e.target.checked)} style={{ width: 17, height: 17 }} />
             Email my invoices (e-billing)
           </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, marginTop: 10, cursor: 'pointer' }}>
+            <input type="checkbox" checked={isPm} onChange={(e) => setIsPm(e.target.checked)} style={{ width: 17, height: 17 }} />
+            I'm a property manager
+          </label>
+          {isPm && (
+            <div style={{ fontSize: 13, color: '#66766c', margin: '6px 0 0', lineHeight: 1.5 }}>
+              Managing several properties? You can <a href="?signup=bulk" style={{ color: GREEN, fontWeight: 700 }}>upload the whole list at once</a> instead of signing up one address at a time.
+            </div>
+          )}
           <div style={{ marginTop: 14 }}>{nextBtn(() => { const e = validContact(); if (e) { setErr(e); return } setErr(''); setArea((a) => a || guessArea(city)); setStep(2) })}</div>
         </div>
       )}
