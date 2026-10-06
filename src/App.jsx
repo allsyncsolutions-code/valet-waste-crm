@@ -13,6 +13,7 @@ import Drivers from './views/Drivers.jsx'
 import Team from './views/Team.jsx'
 import Automations from './views/Automations.jsx'
 import Notifications from './views/Notifications.jsx'
+import DuplicateFixNotice from './components/DuplicateFixNotice.jsx'
 import JobCalendar from './views/JobCalendar.jsx'
 import EmployeePay from './views/EmployeePay.jsx'
 import MyDay from './views/MyDay.jsx'
@@ -540,6 +541,9 @@ export default function App({ user, onSignOut }) {
           />
         </>
       )}
+
+      {/* one-time admin notice: duplicate-address fix (web only, admins only) */}
+      {isAdmin && <DuplicateFixNotice />}
     </div>
   )
 }
