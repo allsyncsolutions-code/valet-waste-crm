@@ -107,7 +107,9 @@ Deno.serve(async (req) => {
     }
 
     if (action === "set_lines") {
-      const VALID = ["waste", "junk", "lawn"]
+      // Lawn care discontinued 2026-10-14 (archived) — it is no longer an
+      // assignable line. Existing lawn data is untouched.
+      const VALID = ["waste", "junk"]
       const lines = Array.isArray(business_lines) ? business_lines.filter((l: string) => VALID.includes(l)) : null
       if (!id || !lines || !lines.length) return json({ error: "Pick at least one business line." }, 400)
       await rest(`profiles?id=eq.${id}`, { method: "PATCH", prefer: "return=minimal", body: { business_lines: lines } })

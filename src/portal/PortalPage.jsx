@@ -56,7 +56,6 @@ const REQUEST_KINDS = [
   ['extra_pickup', 'Extra trash pickup'],
   ['new_property', 'New property'],
   ['junk_removal', 'Junk removal'],
-  ['lawn_care', 'Lawn care'],
   ['billing', 'Billing question'],
   ['other', 'Something else'],
 ]

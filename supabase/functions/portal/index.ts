@@ -1225,7 +1225,12 @@ Deno.serve(async (req) => {
     if (action === "request_service") {
       const cust = await customerFromToken(String(token || ""))
       if (!cust) return json({ error: "Session expired — sign in again." }, 401)
-      const kind = ["extra_pickup", "junk_removal", "lawn_care", "billing", "other", "new_property"].includes(body.kind) ? body.kind : "other"
+      // Lawn care was discontinued 2026-10-14 (archived) — a lawn request from
+      // a stale portal session degrades to a generic "other" request so the
+      // customer's message isn't lost. The label maps below intentionally keep
+      // lawn_care so historical requests still render correctly.
+      const rawKind = body.kind === "lawn_care" ? "other" : body.kind
+      const kind = ["extra_pickup", "junk_removal", "billing", "other", "new_property"].includes(rawKind) ? rawKind : "other"
       const message = String(body.message || "").slice(0, 1000)
       const propertyIds = Array.isArray(body.property_ids) ? body.property_ids.slice(0, 50) : []
 

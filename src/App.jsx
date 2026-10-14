@@ -138,7 +138,10 @@ export default function App({ user, onSignOut }) {
   const activeLineObj = LINES.find((l) => l.id === activeLine) || LINES[0]
 
   // Business-line access: members only see/switch to lines they're assigned.
-  const myLines = (user && user.business_lines && user.business_lines.length) ? user.business_lines : ['waste', 'junk', 'lawn']
+  // Lawn care was discontinued 2026-10-14 — archived, not yet deleted (scheduled
+  // ~2027-01-14); it simply drops out of the defaults. Historical lawn data
+  // (routes, stops, pay) is untouched.
+  const myLines = (user && user.business_lines && user.business_lines.length) ? user.business_lines : ['waste', 'junk']
   const visibleLines = LINES.filter((l) => myLines.includes(l.id))
 
   // Junk Removal is one-time work — no recurring routes. Its Schedules tab is

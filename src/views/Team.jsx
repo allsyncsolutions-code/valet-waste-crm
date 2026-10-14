@@ -5,7 +5,6 @@ import { loadTeam, inviteMember, setMemberRole, setMemberDriver, setMemberLines,
 const LINE_OPTS = [
   ['waste', 'Waste', '#1f7a4d'],
   ['junk', 'Junk', '#2f6db0'],
-  ['lawn', 'Lawn', '#7a9e2e'],
 ]
 
 const ROLE_STYLE = {
@@ -74,7 +73,7 @@ export default function Team({ app }) {
 
   async function toggleLine(m, lid) {
     setErr('')
-    const cur = m.business_lines && m.business_lines.length ? m.business_lines : ['waste', 'junk', 'lawn']
+    const cur = m.business_lines && m.business_lines.length ? m.business_lines : ['waste', 'junk']
     const next = cur.includes(lid) ? cur.filter((x) => x !== lid) : [...cur, lid]
     if (!next.length) { setErr('Each member needs at least one business line.'); return }
     setMembers((list) => list.map((x) => (x.id === m.id ? { ...x, business_lines: next } : x)))
@@ -180,7 +179,7 @@ export default function Team({ app }) {
                     <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap', alignItems: 'center' }}>
                       <span style={{ fontSize: 11.5, color: '#7c8a82', marginRight: 2 }}>Lines:</span>
                       {LINE_OPTS.map(([lid, label, color]) => {
-                        const has = (m.business_lines && m.business_lines.length ? m.business_lines : ['waste', 'junk', 'lawn']).includes(lid)
+                        const has = (m.business_lines && m.business_lines.length ? m.business_lines : ['waste', 'junk']).includes(lid)
                         return (
                           <button
                             key={lid}
