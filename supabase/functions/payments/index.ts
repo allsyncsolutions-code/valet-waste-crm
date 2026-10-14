@@ -81,6 +81,18 @@ async function sbPost(path: string, body: unknown) {
 }
 const enc = encodeURIComponent
 
+// Best-effort email receipt for the Communications page (mig 0066) — records
+// every send attempt (success and failure) without ever blocking the send.
+async function logEmail(row: Record<string, unknown>) {
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/email_messages`, {
+      method: "POST",
+      headers: restHeaders,
+      body: JSON.stringify(row),
+    })
+  } catch (_e) { /* receipts never block a send */ }
+}
+
 // ---- crypto helpers ----------------------------------------------------------
 async function sha256(s: string): Promise<string> {
   const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s))
@@ -104,7 +116,12 @@ async function sendRevealEmail(to: string, code: string) {
       content: [{ type: "text/html", value: `<p>Someone requested to view the Run Merchant credentials in Valet Waste Settings.</p><p>Your code is: <b style="font-size:20px;letter-spacing:2px">${code}</b></p><p>It expires in 15 minutes. If you didn't request this, you can ignore this email.</p>` }],
     }),
   })
-  if (!r.ok) throw new Error(`SendGrid ${r.status}: ${await r.text()}`)
+  if (!r.ok) {
+    const msg = `SendGrid ${r.status}: ${await r.text()}`
+    await logEmail({ to_email: to, from_email: from, subject: "Your Run Merchant key reveal code", body_html: "Run Merchant reveal code (redacted)", status: "failed", error: msg.slice(0, 500), purpose: "staff_alert", related_type: "settings" })
+    throw new Error(msg)
+  }
+  await logEmail({ to_email: to, from_email: from, subject: "Your Run Merchant key reveal code", body_html: "Run Merchant reveal code (redacted)", status: "sent", purpose: "staff_alert", related_type: "settings" })
 }
 
 // Mask a secret for display: show first 4 + last 4, hide the middle.
@@ -307,7 +324,7 @@ async function invoiceStopNotes(invoiceId: string) {
   return byStop
 }
 
-function invoiceEmailHtml(c: Record<string, unknown>, s: Record<string, unknown>, inv: Record<string, unknown>, items: Array<Record<string, unknown>>, url: string, photosByStop: Map<string, string[]> = new Map(), attachedPhotos: Array<{ url: string, taken_on?: string | null, note?: string | null }> = [], notesByStop: Map<string, string> = new Map()) {
+function invoiceEmailHtml(c: Record<string, unknown>, s: Record<string, unknown>, inv: Record<string, unknown>, items: Array<Record<string, unknown>>, url: string, photosByStop: Map<string, string[]> = new Map(), attachedPhotos: Array<{ url: string, taken_on?: string | null, note?: string | null, isImage?: boolean, name?: string }> = [], notesByStop: Map<string, string> = new Map()) {
   const company = s.company_name || "Valet Waste FL"
   const money = (v: unknown) => "$" + Number(v || 0).toFixed(2)
   const esc = (t: unknown) => String(t ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" } as Record<string, string>)[ch])
@@ -368,15 +385,22 @@ function invoiceEmailHtml(c: Record<string, unknown>, s: Record<string, unknown>
         <a href="${url}" style="display:inline-block;background:#1f7a4d;color:#fff;text-decoration:none;font-size:15px;font-weight:600;padding:13px 34px;border-radius:9px">Pay Now</a>
         <div style="font-size:12px;color:#7c8a82;margin-top:10px;word-break:break-all">Or paste this link: ${url}</div>
       </div>
-      ${attachedPhotos.length ? `<div style="margin:22px 0 0;border-top:1px solid #e6ece8;padding-top:18px">
+      ${attachedPhotos.length ? (() => {
+        const imgs = attachedPhotos.filter((p) => p.isImage !== false)
+        const files = attachedPhotos.filter((p) => p.isImage === false)
+        return `${imgs.length ? `<div style="margin:22px 0 0;border-top:1px solid #e6ece8;padding-top:18px">
         <div style="font-size:12px;color:#7c8a82;text-transform:uppercase;letter-spacing:.04em;margin-bottom:12px">Service photos</div>
         <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px">
-          ${attachedPhotos.map((p) => `<div>
+          ${imgs.map((p) => `<div>
             <a href="${p.url}" target="_blank"><img src="${p.url}" alt="Service photo" style="width:100%;border-radius:8px;border:1px solid #e6ece8;display:block" /></a>
             ${(p.taken_on || p.note) ? `<div style="font-size:11px;color:#9aa69e;margin-top:4px">${esc([p.taken_on, p.note].filter(Boolean).join(" — "))}</div>` : ""}
           </div>`).join("")}
         </div>
-      </div>` : ""}
+      </div>` : ""}${files.length ? `<div style="margin:22px 0 0;border-top:1px solid #e6ece8;padding-top:18px">
+        <div style="font-size:12px;color:#7c8a82;text-transform:uppercase;letter-spacing:.04em;margin-bottom:12px">Attachments</div>
+        ${files.map((p) => `<div style="margin:0 0 8px"><a href="${p.url}" target="_blank" style="display:block;border:1px solid #e6ece8;border-radius:9px;padding:11px 14px;text-decoration:none;color:#1a2420;font-size:14px;font-weight:600">📎 ${esc(p.name || "Attachment")}</a>${p.note ? `<div style="font-size:11px;color:#9aa69e;margin-top:3px">${esc(p.note)}</div>` : ""}</div>`).join("")}
+      </div>` : ""}`
+      })() : ""}
       ${inv.notes ? `<p style="margin:18px 0 0;font-size:13px;color:#5d6b63"><b>Notes:</b> ${esc(inv.notes)}</p>` : ""}
       ${s.invoice_terms ? `<p style="margin:14px 0 0;font-size:12px;color:#7c8a82;border-top:1px solid #e6ece8;padding-top:14px">${esc(s.invoice_terms)}</p>` : ""}
     </div>
@@ -387,7 +411,7 @@ function invoiceEmailHtml(c: Record<string, unknown>, s: Record<string, unknown>
 </body></html>`
 }
 
-async function sendInvoiceEmail(to: string, subject: string, html: string, text: string, fromName: string) {
+async function sendInvoiceEmail(to: string, subject: string, html: string, text: string, fromName: string, meta: Record<string, unknown> = {}) {
   const key = Deno.env.get("SENDGRID_API_KEY")
   if (!key) throw new Error("SENDGRID_API_KEY is not configured.")
   const from = Deno.env.get("SENDGRID_FROM") || "valetwastefl@allsynccrm.com"
@@ -404,7 +428,12 @@ async function sendInvoiceEmail(to: string, subject: string, html: string, text:
       ],
     }),
   })
-  if (!r.ok) throw new Error(`SendGrid ${r.status}: ${await r.text()}`)
+  if (!r.ok) {
+    const msg = `SendGrid ${r.status}: ${await r.text()}`
+    await logEmail({ to_email: to, from_email: from, subject, body_text: text, body_html: html, status: "failed", error: msg.slice(0, 500), purpose: "invoice", ...meta })
+    throw new Error(msg)
+  }
+  await logEmail({ to_email: to, from_email: from, subject, body_text: text, body_html: html, status: "sent", purpose: "invoice", ...meta })
 }
 
 // ---- staff auth for save_credentials -----------------------------------------
@@ -625,7 +654,7 @@ Deno.serve(async (req) => {
       // stop merge into that line's thumbnails; the rest render in the
       // trailing "Service photos" grid.
       const lineStopIds = new Set(items.filter((i: any) => i.stop_id).map((i: any) => String(i.stop_id)))
-      const attachedPhotos: Array<{ url: string, taken_on?: string | null, note?: string | null }> = []
+      const attachedPhotos: Array<{ url: string, taken_on?: string | null, note?: string | null, isImage: boolean, name: string }> = []
       try {
         const invPhotos = await sbGet(`invoice_photos?invoice_id=eq.${enc(String(inv.id))}&select=stop_id,path,taken_on,note&order=created_at.asc`)
         for (const p of invPhotos || []) {
@@ -634,7 +663,10 @@ Deno.serve(async (req) => {
             if (!photosByStop.has(String(p.stop_id))) photosByStop.set(String(p.stop_id), [])
             photosByStop.get(String(p.stop_id))!.push(url)
           } else {
-            attachedPhotos.push({ url, taken_on: p.taken_on, note: p.note })
+            // Invoice-level attach (incl. one-time invoices with no stop):
+            // images ride the photo grid; other files render as download links.
+            const isImage = /\.(jpe?g|png|gif|webp)$/i.test(String(p.path || ""))
+            attachedPhotos.push({ url, taken_on: p.taken_on, note: p.note, isImage, name: p.note || String(p.path || "attachment").split("/").pop() })
           }
         }
       } catch (_e) { /* attachments never block the email */ }
@@ -648,6 +680,7 @@ Deno.serve(async (req) => {
         invoiceEmailHtml(cust, s, inv, items, url, photosByStop, attachedPhotos, notesByStop),
         invoiceEmailText(cust, s, inv, items, url),
         company,
+        { customer_id: inv.customer_id, related_type: "invoice", related_id: String(inv.number || inv.id) },
       )
       return json({ ok: true, url, to: cust.email })
     }

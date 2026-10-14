@@ -37,6 +37,13 @@ const restHeaders = {
   Authorization: `Bearer ${SERVICE_KEY}`,
   "Content-Type": "application/json",
 }
+
+// Best-effort email receipt for the Communications page (mig 0066).
+async function logEmail(row: Record<string, unknown>) {
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/email_messages`, { method: "POST", headers: restHeaders, body: JSON.stringify(row) })
+  } catch (_e) { /* receipts never block a send */ }
+}
 async function sbGet(path: string) {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, { headers: restHeaders })
   if (!r.ok) throw new Error(`GET ${path}: ${r.status} ${await r.text()}`)
@@ -72,7 +79,13 @@ async function sendEmail(to: string, subject: string, html: string, companyName:
       content: [{ type: "text/html", value: html }],
     }),
   })
-  if (!r.ok) throw new Error(`SendGrid ${r.status}: ${await r.text()}`)
+  const base = { to_email: to, from_email: SENDGRID_FROM, subject, body_html: html, purpose: "reset" }
+  if (!r.ok) {
+    const msg = `SendGrid ${r.status}: ${await r.text()}`
+    await logEmail({ ...base, status: "failed", error: msg.slice(0, 500) })
+    throw new Error(msg)
+  }
+  await logEmail({ ...base, status: "sent" })
 }
 
 function codeHtml(name: string | null, code: string, companyName: string) {

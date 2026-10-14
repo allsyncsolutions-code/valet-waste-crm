@@ -36,6 +36,13 @@ const rest = {
   "Content-Type": "application/json",
 }
 
+// Best-effort email receipt for the Communications page (mig 0066).
+async function logEmail(row: Record<string, unknown>) {
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/email_messages`, { method: "POST", headers: rest, body: JSON.stringify(row) })
+  } catch (_e) { /* receipts never block a send */ }
+}
+
 // Expo push to the customer's registered app tokens (client app registers via
 // the portal fn, mig 0058). Same hardened shape as automations-run: check the
 // per-device record (single-message pushes return an object, not an array)
@@ -166,7 +173,13 @@ async function sendEmail(to: string, subject: string, textBody: string, cust: an
       ],
     }),
   })
-  if (!r.ok) throw new Error(`sendgrid ${r.status} ${await r.text()}`)
+  const base = { to_email: to, from_email: from, subject, body_text: textBody, body_html: html, purpose: "arrival", customer_id: cust?.id || null }
+  if (!r.ok) {
+    const msg = `sendgrid ${r.status} ${await r.text()}`
+    await logEmail({ ...base, status: "failed", error: msg.slice(0, 500) })
+    throw new Error(msg)
+  }
+  await logEmail({ ...base, status: "sent" })
   return { sent: true }
 }
 

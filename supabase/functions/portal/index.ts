@@ -89,6 +89,13 @@ const restHeaders = {
   Authorization: `Bearer ${SERVICE_KEY}`,
   "Content-Type": "application/json",
 }
+
+// Best-effort email receipt for the Communications page (mig 0066).
+async function logEmail(row: Record<string, unknown>) {
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/email_messages`, { method: "POST", headers: restHeaders, body: JSON.stringify(row) })
+  } catch (_e) { /* receipts never block a send */ }
+}
 async function sbGet(path: string) {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, { headers: restHeaders })
   if (!r.ok) throw new Error(`GET ${path}: ${r.status} ${await r.text()}`)
@@ -262,7 +269,7 @@ async function alertAdminsRunCredsDead(status: number, d: Record<string, unknown
       `Fix: Run Merchant dashboard → Settings → Developer API → Create a new key, then paste it ` +
       `into CRM Settings → Payments. (Sent automatically; repeats at most every 6 hours.)`
     for (const p of staff.filter((x: any) => ["admin", "staff"].includes(x.role || ""))) {
-      await fetch("https://api.sendgrid.com/v3/mail/send", {
+      const rr = await fetch("https://api.sendgrid.com/v3/mail/send", {
         method: "POST",
         headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -271,7 +278,13 @@ async function alertAdminsRunCredsDead(status: number, d: Record<string, unknown
           subject: "ACTION NEEDED: Run Payments credentials rejected — card saves failing",
           content: [{ type: "text/plain", value: body }],
         }),
-      }).catch(() => {})
+      }).catch(() => null)
+      await logEmail({
+        to_email: p.email, from_email: from, subject: "ACTION NEEDED: Run Payments credentials rejected — card saves failing",
+        body_text: body, purpose: "staff_alert", related_type: "payments_config",
+        status: rr && rr.ok ? "sent" : "failed",
+        error: rr && rr.ok ? null : "send failed or SendGrid unreachable",
+      })
     }
   } catch (_e) { /* alerting never breaks payments */ }
 }
@@ -356,7 +369,13 @@ async function sendStaffAlertEmail(to: string, subject: string, text: string) {
       content: [{ type: "text/plain", value: text }],
     }),
   })
-  if (!r.ok) throw new Error(`SendGrid ${r.status}: ${await r.text()}`)
+  const base = { to_email: to, from_email: SENDGRID_FROM, subject, body_text: text, purpose: "staff_alert", sent_by: "Trashy Randy" }
+  if (!r.ok) {
+    const msg = `SendGrid ${r.status}: ${await r.text()}`
+    await logEmail({ ...base, status: "failed", error: msg.slice(0, 500) })
+    throw new Error(msg)
+  }
+  await logEmail({ ...base, status: "sent" })
 }
 
 async function pushStaffDevices(title: string, body: string): Promise<number> {

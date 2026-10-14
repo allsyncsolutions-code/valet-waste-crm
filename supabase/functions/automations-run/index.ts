@@ -62,6 +62,18 @@ async function sbDelete(path: string) {
   if (!r.ok) console.error(`DELETE ${path}: ${r.status} ${await r.text()}`)
 }
 
+// Best-effort email receipt for the Communications page (mig 0066) — records
+// every send attempt (success and failure) without ever blocking the send.
+async function logEmail(row: Record<string, unknown>) {
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/email_messages`, {
+      method: "POST",
+      headers: restHeaders,
+      body: JSON.stringify(row),
+    })
+  } catch (_e) { /* receipts never block a send */ }
+}
+
 const fmtMoney = (v: number) => `$${Number(v || 0).toFixed(2)}`
 const fmtDay = (ts: string | null) => {
   if (!ts) return "never"
@@ -140,7 +152,7 @@ function renderTemplate(tpl: string, f: Record<string, string>): string {
   return out
 }
 
-async function sendCustomerEmail(to: string, subject: string, text: string, payUrl: string, amount: string, company: string) {
+async function sendCustomerEmail(to: string, subject: string, text: string, payUrl: string, amount: string, company: string, meta: Record<string, unknown> = {}) {
   const key = Deno.env.get("SENDGRID_API_KEY")
   if (!key) throw new Error("SENDGRID_API_KEY is not configured.")
   const from = Deno.env.get("SENDGRID_FROM") || "valetwastefl@allsynccrm.com"
@@ -160,7 +172,13 @@ async function sendCustomerEmail(to: string, subject: string, text: string, payU
       content: [{ type: "text/html", value: html }],
     }),
   })
-  if (!r.ok) throw new Error(`SendGrid ${r.status}: ${await r.text()}`)
+  const base = { to_email: to, from_email: from, subject, body_text: text, body_html: html, purpose: "reminder", customer_id: meta.customer_id || null }
+  if (!r.ok) {
+    const msg = `SendGrid ${r.status}: ${await r.text()}`
+    await logEmail({ ...base, status: "failed", error: msg.slice(0, 500) })
+    throw new Error(msg)
+  }
+  await logEmail({ ...base, status: "sent" })
 }
 
 // Expo push to staff devices (profile-keyed rows on push_tokens — the mobile
@@ -293,7 +311,7 @@ async function runInvoiceReminders(auto: any): Promise<string> {
     // channels on top of the rule selection itself.
     const emailOn = !!r.email && !!cust.email && cust.notify_email !== false && emailGate
     if (emailOn) {
-      try { await sendCustomerEmail(cust.email, `Reminder: invoice ${inv.number} — ${amount}`, text, payUrl, amount, company); e++ } catch (_err) { /* try other channels */ }
+      try { await sendCustomerEmail(cust.email, `Reminder: invoice ${inv.number} — ${amount}`, text, payUrl, amount, company, { customer_id: cust.id, related_type: "invoice", related_id: String(inv.number || inv.id) }); e++ } catch (_err) { /* try other channels */ }
     }
     // Per-customer text opt-out ('No Service Notifications'): no reminder
     // TEXTS — the email channel (if the rule has one) still applies.
@@ -312,7 +330,7 @@ async function runInvoiceReminders(auto: any): Promise<string> {
           // Texting is paused (or failed) and email wasn't selected — fall
           // back to email so the reminder still goes out (logged as paused
           // in sms_messages by the sms fn).
-          try { await sendCustomerEmail(cust.email, `Reminder: invoice ${inv.number} — ${amount}`, text, payUrl, amount, company); e++; smsFellBack++ } catch (_err) { /* best effort */ }
+          try { await sendCustomerEmail(cust.email, `Reminder: invoice ${inv.number} — ${amount}`, text, payUrl, amount, company, { customer_id: cust.id, related_type: "invoice", related_id: String(inv.number || inv.id) }); e++; smsFellBack++ } catch (_err) { /* best effort */ }
         }
       } catch (_err) { /* best effort */ }
     }
@@ -366,7 +384,7 @@ function scheduleHits(sched: { day_of_week: string; frequency: string; start_dat
   }
 }
 
-async function sendPlainCustomerEmail(to: string, subject: string, text: string, company: string) {
+async function sendPlainCustomerEmail(to: string, subject: string, text: string, company: string, meta: Record<string, unknown> = {}) {
   const key = Deno.env.get("SENDGRID_API_KEY")
   if (!key) throw new Error("SENDGRID_API_KEY is not configured.")
   const from = Deno.env.get("SENDGRID_FROM") || "valetwastefl@allsynccrm.com"
@@ -379,7 +397,13 @@ async function sendPlainCustomerEmail(to: string, subject: string, text: string,
     headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
     body: JSON.stringify({ personalizations: [{ to: [{ email: to }] }], from: { email: from, name: company }, subject, content: [{ type: "text/html", value: html }] }),
   })
-  if (!r.ok) throw new Error(`SendGrid ${r.status}: ${await r.text()}`)
+  const base = { to_email: to, from_email: from, subject, body_text: text, body_html: html, purpose: meta.purpose || "other", customer_id: meta.customer_id || null }
+  if (!r.ok) {
+    const msg = `SendGrid ${r.status}: ${await r.text()}`
+    await logEmail({ ...base, status: "failed", error: msg.slice(0, 500) })
+    throw new Error(msg)
+  }
+  await logEmail({ ...base, status: "sent" })
 }
 
 async function runServiceReminders(auto: any): Promise<string> {
@@ -432,7 +456,7 @@ async function runServiceReminders(auto: any): Promise<string> {
       try { const n = await sendCustomerPush(cust.id, company, body, url); pushed += n; if (n) sentAny = true } catch (_e) { /* best effort */ }
     }
     if (emailOn && cust.email && cust.notify_email !== false) {
-      try { await sendPlainCustomerEmail(cust.email, `Pickup tomorrow — ${company}`, body, company); emailed++; sentAny = true } catch (_e) { /* best effort */ }
+      try { await sendPlainCustomerEmail(cust.email, `Pickup tomorrow — ${company}`, body, company, { purpose: "service_reminder", customer_id: cust.id }); emailed++; sentAny = true } catch (_e) { /* best effort */ }
     }
     if (!sentAny) noApp++
   }
@@ -651,7 +675,7 @@ const DOW: Record<string, number> = { sun: 0, sunday: 0, mon: 1, monday: 1, tue:
 // Texts via the sms fn; while texting is PAUSED (RingCentral limit, 2026-08-26)
 // — or when a staffer has no phone — the same message goes out by email via
 // SendGrid instead (project-level secret, same one the payments fn uses).
-async function sendStaffEmail(to: string, subject: string, body: string) {
+async function sendStaffEmail(to: string, subject: string, body: string, meta: Record<string, unknown> = {}) {
   const key = Deno.env.get("SENDGRID_API_KEY")
   if (!key) throw new Error("SENDGRID_API_KEY is not configured.")
   const from = Deno.env.get("SENDGRID_FROM") || "valetwastefl@allsynccrm.com"
@@ -665,7 +689,13 @@ async function sendStaffEmail(to: string, subject: string, body: string) {
       content: [{ type: "text/plain", value: body }],
     }),
   })
-  if (!r.ok) throw new Error(`SendGrid ${r.status}: ${await r.text()}`)
+  const base = { to_email: to, from_email: from, subject, body_text: body, purpose: meta.purpose || "staff_alert", sent_by: "Trashy Randy" }
+  if (!r.ok) {
+    const msg = `SendGrid ${r.status}: ${await r.text()}`
+    await logEmail({ ...base, status: "failed", error: msg.slice(0, 500) })
+    throw new Error(msg)
+  }
+  await logEmail({ ...base, status: "sent" })
 }
 
 async function notifyStaff(body: string, purpose: string, subject: string): Promise<{ texted: number; emailed: number; total: number }> {

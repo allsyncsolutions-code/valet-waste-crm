@@ -901,17 +901,37 @@ function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, on
           </div>
         )}
 
-        {/* manually attached photos not tied to a line's stop */}
+        {/* manually attached items not tied to a line's stop: images in a grid,
+            other files (PDFs, receipts…) as download chips */}
         {loosePhotos.length > 0 && (
           <div style={{ marginTop: 14 }}>
-            <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.08em', color: '#9aa69e', margin: '10px 0 8px' }}>SERVICE PHOTOS · ATTACHED ({loosePhotos.length})</div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 7 }}>
-              {loosePhotos.map((p) => (
-                <a key={p.id} href={p.url} target="_blank" rel="noreferrer" title={[p.taken_on ? fmtDate(p.taken_on) : null, p.note].filter(Boolean).join(' — ')}>
-                  <img src={p.url} alt="Service photo" style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 8, border: '1px solid #e6eae6', display: 'block' }} />
-                </a>
-              ))}
-            </div>
+            <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.08em', color: '#9aa69e', margin: '10px 0 8px' }}>ATTACHED TO THIS INVOICE ({loosePhotos.length})</div>
+            {(() => {
+              const imgs = loosePhotos.filter((p) => /\.(jpe?g|png|gif|webp)$/i.test(p.path || ''))
+              const files = loosePhotos.filter((p) => !/\.(jpe?g|png|gif|webp)$/i.test(p.path || ''))
+              return (
+                <>
+                  {imgs.length > 0 && (
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 7, marginBottom: files.length ? 8 : 0 }}>
+                      {imgs.map((p) => (
+                        <a key={p.id} href={p.url} target="_blank" rel="noreferrer" title={[p.taken_on ? fmtDate(p.taken_on) : null, p.note].filter(Boolean).join(' — ')}>
+                          <img src={p.url} alt="Attached" style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 8, border: '1px solid #e6eae6', display: 'block' }} />
+                        </a>
+                      ))}
+                    </div>
+                  )}
+                  {files.length > 0 && (
+                    <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
+                      {files.map((p) => (
+                        <a key={p.id} href={p.url} target="_blank" rel="noreferrer" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, border: '1px solid #e6eae6', background: '#fff', borderRadius: 8, padding: '8px 11px', fontSize: 12.5, fontWeight: 600, color: '#1a2420', textDecoration: 'none', maxWidth: 260 }}>
+                          📎 <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.note || (p.path || '').split('/').pop()}</span>
+                        </a>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )
+            })()}
           </div>
         )}
       </div>
@@ -980,7 +1000,7 @@ function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, on
           <button onClick={onTakePayment} disabled={busy} style={{ background: '#fff', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: busy ? 0.6 : 1 }}>💳 Take payment</button>
         )}
         {inv.status !== 'paid' && <button onClick={onMarkPaid} disabled={busy} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: busy ? 0.6 : 1 }}>Mark paid</button>}
-        <button onClick={onAddPhotos} disabled={busy} title="Manually attach proof-of-service photos for past services — picks the date, service and address from this client's history" style={{ background: '#fff', border: '1px solid #dde2dd', color: '#1a2420', borderRadius: 9, padding: '10px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>📷 Add photos</button>
+        <button onClick={onAddPhotos} disabled={busy} title="Attach photos or files (PDFs, receipts, contracts…) to this invoice — with or without a service visit. Attachments go out with the email / pay page." style={{ background: '#fff', border: '1px solid #dde2dd', color: '#1a2420', borderRadius: 9, padding: '10px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>📎 Photos & files</button>
         <div style={{ flex: 1 }} />
         <button onClick={onDelete} disabled={busy} style={{ background: '#fff', border: '1px solid #f0c9c2', color: '#c0492f', borderRadius: 9, padding: '10px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Delete</button>
       </div>
@@ -1353,6 +1373,11 @@ function AddPhotosModal({ invoice, onClose, onDone }) {
   const [attached, setAttached] = useState([]) // invoice_photos rows for THIS invoice
   const [busyKey, setBusyKey] = useState(null)
   const [err, setErr] = useState(null)
+  const [invNote, setInvNote] = useState('')
+  const [invDate, setInvDate] = useState('')
+
+  const isImg = (p) => /\.(jpe?g|png|gif|webp)$/i.test(p.path || '')
+  const invLevel = attached.filter((p) => !p.stop_id)
 
   async function reload() {
     try {
@@ -1372,7 +1397,7 @@ function AddPhotosModal({ invoice, onClose, onDone }) {
   }
   useEffect(() => { reload() }, [invoice.id])
 
-  async function addFiles(ev, stopId, takenOn) {
+  async function addFiles(ev, stopId, takenOn, note = null) {
     const files = Array.from(ev.target.files || [])
     ev.target.value = ''
     if (!files.length) return
@@ -1381,7 +1406,7 @@ function AddPhotosModal({ invoice, onClose, onDone }) {
     try {
       const who = await currentActorName().catch(() => null)
       for (const f of files) {
-        await uploadInvoicePhoto(invoice.id, f, { stopId, takenOn, createdBy: who })
+        await uploadInvoicePhoto(invoice.id, f, { stopId, takenOn, note, createdBy: who })
       }
       setAttached(await loadInvoicePhotos(invoice.id))
       onDone && onDone()
@@ -1426,19 +1451,51 @@ function AddPhotosModal({ invoice, onClose, onDone }) {
     <div onClick={() => !busyKey && onClose()} style={overlay}>
       <div onClick={(e) => e.stopPropagation()} style={{ ...modal, width: 600, maxHeight: '86vh', display: 'flex', flexDirection: 'column' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
-          <div style={{ fontWeight: 700, fontSize: 16, flex: 1 }}>Add service photos — {invoice.number}</div>
+          <div style={{ fontWeight: 700, fontSize: 16, flex: 1 }}>Add photos & attachments — {invoice.number}</div>
           <div onClick={() => !busyKey && onClose()} style={{ cursor: 'pointer', color: '#7c8a82', fontSize: 18 }}>✕</div>
         </div>
         <div style={{ fontSize: 12.5, color: '#7c8a82', marginBottom: 14 }}>
-          {invoice.customerName} — pick the visit these photos belong to. Photos attach to the invoice (and to its line item when one bills that visit), and go out with the email / pay page.
+          {invoice.customerName} — attach files straight to the invoice (any file type), or pick the visit photos belong to. Everything attached goes out with the email / pay page.
         </div>
         {err && <div style={{ background: '#fdecea', border: '1px solid #f3b7b0', color: '#9a2c1e', borderRadius: 9, padding: '8px 12px', fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
+
+        {/* Invoice-level attachments — no visit required (one-time invoices,
+            contracts, receipts, before/after photos…). */}
+        <div style={{ border: '1px solid #cfe7da', background: '#f7fbf8', borderRadius: 11, padding: '10px 12px', marginBottom: 10 }}>
+          <div style={{ fontSize: 13, fontWeight: 700 }}>On this invoice — no visit needed</div>
+          <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap', alignItems: 'center', margin: '8px 0' }}>
+            <input value={invNote} onChange={(e) => setInvNote(e.target.value)} placeholder="Label / note (e.g. Contract, Gate receipt)" style={{ ...inp, flex: '1 1 170px', fontSize: 12.5 }} />
+            <input type="date" value={invDate} onChange={(e) => setInvDate(e.target.value)} style={{ ...inp, fontSize: 12.5 }} title="Date shown with the file (optional)" />
+            <label title="Attach a photo or file to the invoice" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: '#1f7a4d', color: '#fff', borderRadius: 8, padding: '7px 12px', fontSize: 12, fontWeight: 600, cursor: busyKey ? 'wait' : 'pointer', opacity: busyKey === 'null' ? 0.6 : 1 }}>
+              {busyKey === 'null' ? 'Adding…' : '＋ Upload'}
+              <input type="file" multiple accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.csv,.txt" style={{ display: 'none' }} onChange={(ev) => addFiles(ev, null, invDate || null, invNote.trim() || null)} />
+            </label>
+          </div>
+          {invLevel.length > 0 && (
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4, alignItems: 'center' }}>
+              {invLevel.map((p) => (
+                <div key={p.id} style={{ position: 'relative' }}>
+                  {isImg(p) ? (
+                    <a href={p.url} target="_blank" rel="noreferrer" title={p.note || 'Attached photo'}>
+                      <img src={p.url} alt="Attached" style={{ width: 54, height: 54, objectFit: 'cover', borderRadius: 7, border: '1px solid #cfe7da', display: 'block' }} />
+                    </a>
+                  ) : (
+                    <a href={p.url} target="_blank" rel="noreferrer" title={p.note || 'Attached file'} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, border: '1px solid #cfe7da', background: '#fff', borderRadius: 8, padding: '8px 10px', fontSize: 12, fontWeight: 600, color: '#1a2420', textDecoration: 'none', maxWidth: 220 }}>
+                      📎 <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.note || (p.path || '').split('/').pop()}</span>
+                    </a>
+                  )}
+                  <button onClick={() => removeAttached(p)} title="Remove from this invoice" style={{ position: 'absolute', top: -6, right: -6, width: 17, height: 17, borderRadius: '50%', background: '#c0492f', color: '#fff', border: '2px solid #fff', fontSize: 9, lineHeight: 1, cursor: 'pointer', padding: 0 }}>×</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
 
         <div style={{ flex: 1, overflowY: 'auto', margin: '0 -8px', padding: '0 8px' }}>
           {events === null ? (
             <div style={{ padding: 24, textAlign: 'center', color: '#9aa69e', fontSize: 13 }}>Loading service history…</div>
           ) : events.length === 0 ? (
-            <div style={{ padding: 24, textAlign: 'center', color: '#9aa69e', fontSize: 13 }}>No service history found for this client yet — add stops on a route first.</div>
+            <div style={{ padding: 24, textAlign: 'center', color: '#9aa69e', fontSize: 13 }}>No service history for this client — attach files to the invoice directly in the section above.</div>
           ) : events.map((e) => {
             const mine = attachedFor(e.stopId)
             const onFile = stopPics[e.stopId] || []
