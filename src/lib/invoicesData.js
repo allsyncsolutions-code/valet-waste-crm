@@ -403,10 +403,18 @@ export async function sendInvoiceLink(invoice) {
 // Text the customer their invoice: ensure a pay link exists, render the
 // invoice SMS template from settings, send via the sms edge function, and
 // mark the invoice sent. Mirrors the old app's purpose:"invoice" trigger.
+//
+// The sms fn answers soft-failures WITHOUT an `error` key (deliberately —
+// server callers read `paused`/`blocked_optout` and degrade). The UI is not
+// a server caller: here a paused or opted-out text must fail LOUDLY, and it
+// must never record the invoice as successfully sent.
 export async function textInvoice(invoice, customMessage) {
   if (!invoice.customerPhone) throw new Error('This customer has no phone number on file.')
 
-  // Reuse the stored pay link, or mint one (also marks the invoice sent).
+  const wasDraft = invoice.status === 'draft'
+  // Reuse the stored pay link, or mint one. Minting marks a draft invoice
+  // 'sent' server-side (payments fn side effect) — if the text then fails we
+  // roll the draft back so a silent non-send never records as sent.
   let payUrl = invoice.paymentUrl || invoice.stripePaymentUrl
   if (!payUrl) payUrl = await sendInvoiceLink(invoice)
 
@@ -422,9 +430,11 @@ export async function textInvoice(invoice, customMessage) {
 
   const r = await sendSms(invoice.customerPhone, body, { customerId: invoice.customerId, purpose: 'invoice' })
 
-  if (invoice.status === 'draft') {
-    await setInvoiceStatus(invoice.id, 'sent', { sent_at: new Date().toISOString() })
+  if (!r || !r.ok) {
+    if (wasDraft) await setInvoiceStatus(invoice.id, 'draft', { sent_at: null }).catch(() => {})
+    throw new Error((r && r.message) || 'The text could not be sent.')
   }
+  if (wasDraft) await setInvoiceStatus(invoice.id, 'sent', { sent_at: new Date().toISOString() })
   logActivity({ type: 'invoice_texted', summary: `Texted invoice ${invoice.number} to ${invoice.customerName || 'customer'}`, entityType: 'invoice', entityId: invoice.id })
   return r
 }

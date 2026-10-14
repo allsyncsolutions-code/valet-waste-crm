@@ -247,14 +247,27 @@ async function runInvoiceReminders(auto: any): Promise<string> {
     already.add(`${s.invoice_id}:${s.reminder_key}`)
   }
 
+  // Re-enable restart (config.restart_as_of, ISO date): invoices that were
+  // already open when reminders were switched back on get their after_sent
+  // cadence re-anchored so the first reminder lands restart_as_of + 2 days
+  // (office staff may have re-sent some invoices by hand in the meantime) —
+  // no same-day catch-up blast of every missed step, and the spacing between
+  // rules is preserved. Invoices sent on/after restart_as_of follow the
+  // normal rules from their own sent date.
+  const restartAsOf = String(auto?.config?.restart_as_of || "").slice(0, 10)
+  const firstRuleDays = Math.min(...rules.filter((r: any) => r.type === "after_sent").map((r: any) => Number(r.days)))
+
   let sent = 0, emailed = 0, texted = 0, pushed = 0, smsFellBack = 0, noContact = 0
   for (const inv of invoices) {
     const cust = customers[inv.customer_id]
     if (!cust || !cust.portal_slug) { noContact++; continue }
     const due = rules.filter((r, idx) => {
       if (already.has(`${inv.id}:${r.key || idx}`)) return false
-      const base = r.type === "after_sent" ? String(inv.sent_at || "").slice(0, 10) : inv.due_date
+      let base = r.type === "after_sent" ? String(inv.sent_at || "").slice(0, 10) : inv.due_date
       if (!base) return false
+      if (restartAsOf && r.type === "after_sent" && base < restartAsOf && Number.isFinite(firstRuleDays)) {
+        base = addDays(restartAsOf, 2 - firstRuleDays) // first restarted reminder = restart_as_of + 2 days
+      }
       const offset = r.type === "before_due" ? -Number(r.days) : Number(r.days)
       return today >= addDays(base.slice(0, 10), offset)
     })

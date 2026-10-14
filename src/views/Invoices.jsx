@@ -313,10 +313,10 @@ export default function Invoices({ app }) {
   const onSendEmail = () => action(async () => { await emailInvoice(cur) })
   const onSendBoth = () => action(async () => {
     const errs = []
-    try { await textInvoice(cur) } catch (e) { errs.push(`text: ${e.message || e}`) }
-    try { await emailInvoice(cur) } catch (e) { errs.push(`email: ${e.message || e}`) }
+    try { await textInvoice(cur) } catch (e) { errs.push(`the text didn't send (${e.message || e})`) }
+    try { await emailInvoice(cur) } catch (e) { errs.push(`the email didn't send (${e.message || e})`) }
     if (errs.length === 2) throw new Error(errs.join(' · '))
-    if (errs.length) setErr(`Sent, but the ${errs[0]}`)
+    if (errs.length) setErr(`Sent, but ${errs[0]}`)
   })
 
   async function refreshSends(invoiceId) {
