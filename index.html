@@ -39,6 +39,10 @@
       .print-doc { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
       .print-hide, .print-hide * { display: none !important; }
     }
+    /* Client-side PDF capture (downloadInvoicePdf): html2canvas reads SCREEN
+       styles, not @media print — hide the same action buttons while the
+       snapshot is taken. */
+    body.pdf-capturing .print-hide, body.pdf-capturing .print-hide * { display: none !important; }
   </style>
 </head>
 <body>
