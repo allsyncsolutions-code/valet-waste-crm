@@ -27,10 +27,11 @@ import {
   deleteInvoicePhoto,
   attachExistingPhoto,
   loadClientServiceHistory,
+  mergeInvoiceInto,
 } from '../lib/invoicesData.js'
 import { loadStopPhotos } from '../lib/photosData.js'
 import { currentActorName } from '../lib/activityData.js'
-import { printInvoiceDoc } from '../lib/printInvoice.js'
+import { printInvoiceDoc, downloadInvoicePdf } from '../lib/printInvoice.js'
 
 const money = (v) => '$' + Number(v || 0).toFixed(2)
 const initialsOf = (name) =>
@@ -90,6 +91,9 @@ export default function Invoices({ app }) {
   const [settings, setSettings] = useState(null) // logo/terms/contact for the invoice preview
   const [pendingSends, setPendingSends] = useState([]) // future-dated invoice sends for the selected invoice
   const [schedOpen, setSchedOpen] = useState(false)
+  // Merge flow: fold a draft's lines into another draft (or a fresh one)
+  const [mergeOpen, setMergeOpen] = useState(false)
+  const [mergeTargetId, setMergeTargetId] = useState('') // '' = brand-new draft for the same client
   const [schedChannel, setSchedChannel] = useState('sms')
   const [schedDate, setSchedDate] = useState('')
   const [schedTime, setSchedTime] = useState('09:00')
@@ -180,6 +184,14 @@ export default function Invoices({ app }) {
   const tipsTotal = round2(dateFiltered.filter((i) => i.status === 'paid').reduce((s, i) => s + (i.tipAmount || 0), 0))
   const tippedCount = dateFiltered.filter((i) => i.status === 'paid' && i.tipAmount > 0).length
   const draftCount = dateFiltered.filter((i) => i.status === 'draft').length
+  // "Running" drafts — the invoices that accumulate line items as drivers
+  // complete stops (and the lawn cron adds visits). Same-customer first so a
+  // client's month-to-date build-up reads top-down; then by age, oldest first
+  // (those need sending the most).
+  const running = useMemo(() => invoices
+    .filter((i) => i.status === 'draft')
+    .sort((a, b) => (a.customerName || '').localeCompare(b.customerName || '') || String(a.createdAt).localeCompare(String(b.createdAt))),
+  [invoices])
 
   // ---- form helpers ----
   const setF = (patch) => setForm((f) => ({ ...f, ...patch }))
@@ -386,6 +398,33 @@ export default function Invoices({ app }) {
     })
   }
 
+  function openMerge() {
+    setMergeTargetId('')
+    setMergeOpen(true)
+  }
+  // Direct PDF download — rasterizes the open invoice doc and saves it,
+  // skipping the print dialog entirely (which is the old "Save as PDF" path).
+  const onDownloadPdf = () => action(async () => {
+    await downloadInvoicePdf(cur.number)
+    setNotice(`Downloaded Invoice ${cur.number} as a PDF.`)
+  })
+  async function submitMerge() {
+    if (!cur) return
+    setBusy(true)
+    setErr(null)
+    try {
+      const r = await mergeInvoiceInto(cur.id, { targetId: mergeTargetId || null })
+      setMergeOpen(false)
+      setNotice(`Moved ${r.moved} line item(s) from ${cur.number} into ${r.targetNumber} — ${cur.number} was voided.`)
+      await refresh()
+      setSelId(r.targetId)
+    } catch (e) {
+      setErr(e.message || String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div style={{ maxWidth: 1240, margin: '0 auto' }}>
       {/* summary — all cards follow the date filter above the list */}
@@ -408,6 +447,37 @@ export default function Invoices({ app }) {
       {!paymentsOk && !loading && (
         <div style={{ marginBottom: 14, background: '#fff7e9', border: '1px solid #f0dcb0', color: '#8a6320', borderRadius: 11, padding: '9px 13px', fontSize: 12.5 }}>
           Run Merchant isn’t connected yet — you can still create and edit invoices, but “Send” needs Run Merchant set up in Settings → Payments.
+        </div>
+      )}
+
+      {running.length > 0 && (
+        <div style={{ marginBottom: 14, background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '12px 14px' }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 4 }}>
+            <div style={{ fontWeight: 700, fontSize: 13.5 }}>🟢 Running invoices</div>
+            <div style={{ fontSize: 11.5, color: '#9aa69e', flex: 1 }}>drafts building up line items from completed stops — send at month end</div>
+            <div style={{ fontFamily: MONO, fontSize: 12, fontWeight: 600, color: '#5d6b63' }}>{money(running.reduce((s, i) => s + i.total, 0))}</div>
+          </div>
+          <div style={{ display: 'flex', gap: 8, overflowX: 'auto', paddingBottom: 2 }}>
+            {running.map((inv) => {
+              const on = inv.id === selId
+              const opened = inv.createdAt ? Math.max(0, Math.floor((Date.now() - new Date(inv.createdAt).getTime()) / 86400000)) : null
+              return (
+                <div key={inv.id} onClick={() => setSelId(inv.id)} title={`${inv.number} — click to review & send`} style={{ flex: 'none', minWidth: 168, maxWidth: 200, cursor: 'pointer', borderRadius: 10, padding: '9px 11px', border: `1px solid ${on ? '#1f7a4d' : '#e6eae6'}`, background: on ? '#f3faf5' : '#fafbfa' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                    <div style={{ width: 26, height: 26, borderRadius: 7, background: '#e7f1eb', color: '#1f7a4d', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontWeight: 600, fontSize: 9, flex: 'none' }}>{initialsOf(inv.customerName)}</div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{inv.customerName || 'Unknown'}</div>
+                      <div style={{ fontFamily: MONO, fontSize: 9.5, color: '#9aa69e' }}>{inv.number}</div>
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginTop: 6 }}>
+                    <span style={{ fontFamily: MONO, fontSize: 12.5, fontWeight: 600 }}>{money(inv.total)}</span>
+                    <span style={{ fontSize: 10.5, color: '#9aa69e' }}>{inv.items.length} line{inv.items.length === 1 ? '' : 's'}{opened != null ? ` · ${opened === 0 ? 'today' : opened === 1 ? '1d' : `${opened}d`}` : ''}</span>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
         </div>
       )}
 
@@ -490,7 +560,7 @@ export default function Invoices({ app }) {
               Select an invoice, or create a new one.
             </div>
           )}
-          {cur && <InvoiceDetail inv={cur} settings={settings} paymentsOk={paymentsOk} busy={busy} onEdit={() => openEdit(cur)} onMarkPaid={onMarkPaid} onSendSms={onSendSms} onSendEmail={onSendEmail} onSendBoth={onSendBoth} onSchedule={openSchedule} pendingSends={pendingSends} onCancelSend={onCancelSend} onDelete={onDelete} onTakePayment={payCfg ? () => setTakePay(true) : null} onAddPhotos={() => setPhotosOpen(true)} onEditBillTo={onEditBillTo} />}
+          {cur && <InvoiceDetail inv={cur} settings={settings} paymentsOk={paymentsOk} busy={busy} onEdit={() => openEdit(cur)} onMarkPaid={onMarkPaid} onSendSms={onSendSms} onSendEmail={onSendEmail} onSendBoth={onSendBoth} onSchedule={openSchedule} pendingSends={pendingSends} onCancelSend={onCancelSend} onDelete={onDelete} onTakePayment={payCfg ? () => setTakePay(true) : null} onAddPhotos={() => setPhotosOpen(true)} onEditBillTo={onEditBillTo} onMerge={openMerge} onDownloadPdf={onDownloadPdf} />}
         </div>
       </div>
 
@@ -541,6 +611,42 @@ export default function Invoices({ app }) {
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
               <button type="button" onClick={() => setSchedOpen(false)} style={ghostBtn}>Cancel</button>
               <button type="button" onClick={submitSchedule} disabled={busy || !schedDate || !schedTime} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: busy || !schedDate || !schedTime ? 0.6 : 1 }}>{busy ? 'Scheduling…' : 'Schedule send'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {mergeOpen && cur && (
+        <div onClick={() => !busy && setMergeOpen(false)} style={overlay}>
+          <div onClick={(e) => e.stopPropagation()} style={{ ...modal, width: 460 }}>
+            <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 4 }}>⇲ Merge into another draft</div>
+            <div style={{ fontSize: 12, color: '#7c8a82', marginBottom: 14 }}>
+              Invoice {cur.number} · {cur.customerName || 'Unknown'} — its {cur.items.length} line item(s) ({money(cur.subtotal)}) move to the invoice you pick, keeping each line tied to its stop (photos, visit notes and the double-billing guard ride along). {cur.number} is then voided.
+            </div>
+
+            <label style={{ display: 'block', fontSize: 11.5, color: '#5d6b63', fontWeight: 600, marginBottom: 14 }}>
+              Move the lines into…
+              <select value={mergeTargetId} onChange={(e) => setMergeTargetId(e.target.value)} style={{ ...inp, marginTop: 4, width: '100%' }}>
+                <option value="">＋ New draft for {cur.customerName || 'this client'}</option>
+                {invoices
+                  .filter((i) => i.status === 'draft' && i.id !== cur.id)
+                  .sort((a, b) => (a.customerId === cur.customerId ? -1 : 1) - (b.customerId === cur.customerId ? -1 : 1) || (b.createdAt || '').localeCompare(a.createdAt || ''))
+                  .map((i) => (
+                    <option key={i.id} value={i.id}>
+                      {i.number} — {i.customerName || 'Unknown'}{i.customerId === cur.customerId ? '' : ' (different client)'} · {money(i.total)}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            {mergeTargetId && invoices.find((i) => i.id === mergeTargetId && i.customerId !== cur.customerId) && (
+              <div style={{ fontSize: 11.5, color: '#8a6320', background: '#fdf2e0', border: '1px solid #f0dcb0', borderRadius: 9, padding: '8px 11px', marginBottom: 14 }}>
+                Heads up — that draft belongs to a different client. The lines move over as-is, and the target stays assigned to its own customer.
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button type="button" onClick={() => setMergeOpen(false)} style={ghostBtn}>Cancel</button>
+              <button type="button" onClick={submitMerge} disabled={busy || !cur.items.length} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '10px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: busy || !cur.items.length ? 0.6 : 1 }}>{busy ? 'Merging…' : 'Merge & void this draft'}</button>
             </div>
           </div>
         </div>
@@ -766,7 +872,7 @@ function useStopNoteMap(stopIds) {
   return byStop
 }
 
-function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, onSendSms, onSendEmail, onSendBoth, onSchedule, pendingSends, onCancelSend, onDelete, onTakePayment, onAddPhotos, onEditBillTo }) {
+function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, onSendSms, onSendEmail, onSendBoth, onSchedule, pendingSends, onCancelSend, onDelete, onTakePayment, onAddPhotos, onEditBillTo, onMerge, onDownloadPdf }) {
   const meta = STATUS_META[inv.status] || STATUS_META.draft
   const company = settings || {}
   const contactBits = [company.company_phone, company.company_email, company.company_address].filter(Boolean)
@@ -982,7 +1088,9 @@ function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, on
       {/* actions */}
       <div className="print-hide" style={{ display: 'flex', gap: 9, padding: '14px 22px', borderTop: '1px solid #f0f2ef', flexWrap: 'wrap' }}>
         {inv.status === 'draft' && <button onClick={onEdit} disabled={busy} style={ghostBtn}>Edit</button>}
-        <button onClick={() => printInvoiceDoc(inv)} disabled={busy} title="Print or save this invoice as a PDF" style={{ background: '#fff', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: busy ? 0.6 : 1 }}>⬇ PDF</button>
+        {inv.status === 'draft' && inv.items.length > 0 && <button onClick={onMerge} disabled={busy} title="Fold this draft's lines into another draft (or a new one) and void it — e.g. two drafts built up for the same client" style={{ background: '#fff', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: busy ? 0.6 : 1 }}>⇲ Merge into…</button>}
+        <button onClick={() => printInvoiceDoc(inv.number)} disabled={busy} title="Open the print dialog (paper or 'Save as PDF')" style={{ background: '#fff', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: busy ? 0.6 : 1 }}>🖨 Print</button>
+        <button onClick={onDownloadPdf} disabled={busy} title="Download this invoice as a PDF file — no print dialog" style={{ background: '#fff', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: busy ? 0.6 : 1 }}>{busy ? 'Building…' : '⬇ Download PDF'}</button>
         {inv.status !== 'paid' && paymentsOk && (
           <SendMenu
             busy={busy}

@@ -388,6 +388,86 @@ export async function deleteInvoice(id, number) {
   logActivity({ type: 'invoice_deleted', summary: `Deleted invoice ${number || ''}`.trim(), entityType: 'invoice' })
 }
 
+// Fold one draft's line items into another draft — an existing one (targetId)
+// or a fresh draft for the same customer (targetId null) — then void the
+// source. Every line keeps its stop_id, so per-line photos / visit notes and
+// the double-billing guard survive the move; attached photos & files ride
+// along too. Only drafts merge — sent/paid invoices are immutable. Pending
+// scheduled sends on the source are cancelled by the send worker (it skips
+// void invoices), so nothing fires for the folded invoice.
+export async function mergeInvoiceInto(sourceId, { targetId = null } = {}) {
+  const { data: src, error: srcErr } = await supabase
+    .from('invoices')
+    .select('id, number, customer_id, status, discount, invoice_line_items(*)')
+    .eq('id', sourceId)
+    .single()
+  if (srcErr) throw srcErr
+  if (!src) throw new Error('That invoice no longer exists.')
+  if (src.status !== 'draft') throw new Error('Only draft invoices can be merged.')
+  const lines = (src.invoice_line_items || []).slice().sort((a, b) => (a.position ?? 0) - (b.position ?? 0))
+  if (!lines.length) throw new Error('This draft has no line items to move.')
+
+  let target
+  if (targetId) {
+    if (targetId === sourceId) throw new Error('Pick a different invoice to merge into.')
+    const { data, error } = await supabase
+      .from('invoices')
+      .select('id, number, status, discount, invoice_line_items(*)')
+      .eq('id', targetId)
+      .single()
+    if (error) throw error
+    if (!data) throw new Error('The target invoice no longer exists.')
+    if (data.status !== 'draft') throw new Error('You can only merge into another draft.')
+    target = data
+  } else {
+    const { data, error } = await supabase
+      .from('invoices')
+      .insert({ customer_id: src.customer_id, status: 'draft', subtotal: 0, total: 0, discount: 0 })
+      .select('id, number, discount, invoice_line_items(*)')
+      .single()
+    if (error) throw error
+    target = data
+  }
+
+  // Append the source lines after the target's existing ones, stop link intact.
+  const basePos = Math.max(-1, ...(target.invoice_line_items || []).map((l) => l.position ?? 0)) + 1
+  const rows = lines.map((li, i) => ({
+    invoice_id: target.id,
+    stop_id: li.stop_id || null,
+    title: li.title || null,
+    description: li.description || null,
+    quantity: num(li.quantity) || 1,
+    unit_price: num(li.unit_price),
+    amount: round2(num(li.quantity) * num(li.unit_price)),
+    position: basePos + i,
+  }))
+  const { error: insErr } = await supabase.from('invoice_line_items').insert(rows)
+  if (insErr) throw insErr
+
+  // Move manually attached photos/files to the target as well.
+  await supabase.from('invoice_photos').update({ invoice_id: target.id }).eq('invoice_id', sourceId)
+
+  // Recompute the target's totals from all of its lines.
+  const { data: allLines } = await supabase
+    .from('invoice_line_items')
+    .select('quantity, unit_price')
+    .eq('invoice_id', target.id)
+  const subtotal = round2((allLines || []).reduce((s, l) => s + round2(num(l.quantity) * num(l.unit_price)), 0))
+  await supabase
+    .from('invoices')
+    .update({ subtotal, total: Math.max(0, round2(subtotal - num(target.discount))) })
+    .eq('id', target.id)
+
+  await setInvoiceStatus(sourceId, 'void')
+  logActivity({
+    type: 'invoice_updated',
+    summary: `Merged ${lines.length} line item(s) from ${src.number} into ${target.number} — ${src.number} voided`,
+    entityType: 'invoice',
+    entityId: target.id,
+  })
+  return { targetId: target.id, targetNumber: target.number, moved: lines.length }
+}
+
 // Mint a Run Merchant pay link (the in-portal Runner.js pay screen) for the
 // invoice, store it, and mark sent.
 export async function sendInvoiceLink(invoice) {
