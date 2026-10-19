@@ -11,12 +11,24 @@ export function loadRunner() {
   if (loader) return loader
   loader = new Promise((resolve, reject) => {
     if (typeof window !== 'undefined' && window.Runner) return resolve(window.Runner)
-    const s = document.createElement('script')
-    s.src = RUNNER_SRC
-    s.async = true
-    s.onload = () => (window.Runner ? resolve(window.Runner) : reject(new Error('Runner.js failed to initialize.')))
-    s.onerror = () => reject(new Error('Could not load the Run Payments card form. Check your connection and try again.'))
-    document.head.appendChild(s)
+    // One automatic retry: script-tag loads occasionally fail on a flaky
+    // connection, a racing content blocker, or a CDN hiccup — a single
+    // fresh attempt (cache-busted) clears the large majority of those.
+    // Only a second failure is a real "can't load" for the user.
+    let attempt = 0
+    const tryLoad = () => {
+      attempt += 1
+      const s = document.createElement('script')
+      s.src = RUNNER_SRC + (attempt > 1 ? `?r=${Date.now()}` : '')
+      s.async = true
+      s.onload = () => (window.Runner ? resolve(window.Runner) : reject(new Error('Runner.js failed to initialize.')))
+      s.onerror = () => {
+        if (attempt === 1) setTimeout(tryLoad, 2000)
+        else reject(new Error('Could not load the Run Payments card form. Check your connection and try again. (An ad blocker, VPN, or company network can also block it — try another network or disable the blocker for this site.)'))
+      }
+      document.head.appendChild(s)
+    }
+    tryLoad()
   })
   return loader
 }
