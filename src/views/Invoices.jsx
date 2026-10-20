@@ -1268,6 +1268,7 @@ const primaryBtn = { flex: 1, background: '#1f7a4d', color: '#fff', border: 'non
 function TakePaymentModal({ inv, cfg, onClose, onPaid }) {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
+  const [runnerErr, setRunnerErr] = useState('') // secure-form load failure — keyed card only; saved-card charge is unaffected
   const [done, setDone] = useState(false)
   const [zip, setZip] = useState('') // keyed card's billing zip — required (surcharge-enabled MID)
   const [runnerReady, setRunnerReady] = useState(false)
@@ -1277,6 +1278,7 @@ function TakePaymentModal({ inv, cfg, onClose, onPaid }) {
   useEffect(() => {
     if (!cfg?.public_key) return
     let cancelled = false
+    setRunnerErr('')
     loadRunner().then((Runner) => {
       if (cancelled) return
       const r = new Runner()
@@ -1290,7 +1292,7 @@ function TakePaymentModal({ inv, cfg, onClose, onPaid }) {
       })
       runnerRef.current = r
       setRunnerReady(true)
-    }).catch((e) => setErr(e.message || String(e)))
+    }).catch((e) => { if (!cancelled) setRunnerErr(e.message || String(e)) })
     return () => { cancelled = true; runnerRef.current = null }
   }, [cfg?.public_key, cfg?.mid, cfg?.env, formKey])
 
@@ -1394,7 +1396,12 @@ function TakePaymentModal({ inv, cfg, onClose, onPaid }) {
             {/* Runner.js owns #run-take-form's children — keep React out of it
                 (rendering inside breaks reconciliation → removeChild crash). */}
             <div key={formKey} id="run-take-form" style={{ minHeight: 64, marginBottom: 6 }} />
-            {!runnerReady && <div style={{ color: '#9aa69e', fontSize: 12.5, padding: '0 2px 8px' }}>Loading secure card form…</div>}
+            {!runnerReady && !runnerErr && <div style={{ color: '#9aa69e', fontSize: 12.5, padding: '0 2px 8px' }}>Loading secure card form…</div>}
+            {runnerErr && (
+              <div style={{ background: '#fdf6ec', border: '1px solid #f0dcb0', color: '#8a6320', borderRadius: 9, padding: '8px 11px', fontSize: 12, marginBottom: 8 }}>
+                Card form unavailable — {inv.savedCard ? 'use the saved card above, or ' : ''}try again in a moment. ({runnerErr})
+              </div>
+            )}
             <Field label="Billing ZIP (required — the card's own zip)">
               <input value={zip} onChange={(e) => setZip(e.target.value)} inputMode="numeric" maxLength={10} placeholder="e.g. 32082" style={inp} />
             </Field>

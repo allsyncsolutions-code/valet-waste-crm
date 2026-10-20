@@ -16,15 +16,16 @@ export function loadRunner() {
     // fresh attempt (cache-busted) clears the large majority of those.
     // Only a second failure is a real "can't load" for the user.
     let attempt = 0
+    const fail = (msg) => { loader = null; reject(new Error(msg)) } // leave no cached rejection: the next loadRunner() (modal reopen, remount) starts fresh
     const tryLoad = () => {
       attempt += 1
       const s = document.createElement('script')
       s.src = RUNNER_SRC + (attempt > 1 ? `?r=${Date.now()}` : '')
       s.async = true
-      s.onload = () => (window.Runner ? resolve(window.Runner) : reject(new Error('Runner.js failed to initialize.')))
+      s.onload = () => (window.Runner ? resolve(window.Runner) : fail('Runner.js failed to initialize.'))
       s.onerror = () => {
         if (attempt === 1) setTimeout(tryLoad, 2000)
-        else reject(new Error('Could not load the Run Payments card form. Check your connection and try again. (An ad blocker, VPN, or company network can also block it — try another network or disable the blocker for this site.)'))
+        else fail('Could not load the Run Payments card form. Check your connection and try again. (An ad blocker, VPN, or company network can also block it — try another network or disable the blocker for this site.)')
       }
       document.head.appendChild(s)
     }
