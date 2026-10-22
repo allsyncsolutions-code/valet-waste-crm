@@ -69,6 +69,9 @@ export default function BulkSignupPage() {
   const runnerRef = useRef(null)
   const formRef = useRef(null)
   const [formKey, setFormKey] = useState(0)
+  // Card token captured at the step 3 → 4 transition (see review()); approve()
+  // on step 4 sends this — the Runner iframe is gone by then.
+  const [cardToken, setCardToken] = useState(null)
 
   useEffect(() => {
     let cancelled = false
@@ -94,6 +97,9 @@ export default function BulkSignupPage() {
       })
       runnerRef.current = r
       setRunnerReady(true)
+      // Fresh empty fields — a token stashed from an earlier pass no longer
+      // matches what's on screen, so the customer must re-enter the card.
+      setCardToken(null)
     }).catch((e) => setErr(e.message || String(e)))
     return () => { cancelled = true; runnerRef.current = null }
   }, [step, cardChoice, cfg, formKey])
@@ -101,6 +107,7 @@ export default function BulkSignupPage() {
   function resetCardForm() {
     runnerRef.current = null
     setRunnerReady(false)
+    setCardToken(null)
     setFormKey((k) => k + 1)
   }
 
@@ -135,6 +142,33 @@ export default function BulkSignupPage() {
     e.target.value = '' // allow re-picking the same file after fixing it
   }
 
+  // Step 3 → 4 transition. The card must be tokenized HERE: the Runner iframe
+  // only exists on step 3, and the effect cleanup nulls runnerRef the moment
+  // the step changes — approve() on the review step cannot read the fields.
+  // The token is stashed in state; the single-use fields are consumed either way.
+  async function review() {
+    setErr('')
+    if (cardChoice === 'skip') { setStep(4); return }
+    if (!runnerRef.current) { setErr('The secure card form is still loading — give it a second and try again.'); return }
+    if (!consent) { setErr('Please check the box agreeing to automatic monthly charges first.'); return }
+    setBusy(true)
+    try {
+      const t = await tokenizeCard(runnerRef.current)
+      if (!t || (!t.account_token && !t.token)) {
+        resetCardForm()
+        setErr("We couldn't read the card details. Please re-enter your card information and try again.")
+        return
+      }
+      setCardToken(t)
+      setStep(4)
+    } catch (e) {
+      resetCardForm()
+      setErr(e.message || String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function approve() {
     setErr('')
     const contactErr = validContact()
@@ -144,14 +178,12 @@ export default function BulkSignupPage() {
     try {
       let card = null
       if (cardChoice === 'card') {
-        if (!runnerRef.current) throw new Error('The secure card form is still loading — give it a second and try again.')
-        if (!consent) throw new Error('Please check the box agreeing to automatic monthly charges first.')
-        const t = await tokenizeCard(runnerRef.current)
-        if (!t || (!t.account_token && !t.token)) {
+        if (!cardToken || (!cardToken.account_token && !cardToken.token)) {
           resetCardForm()
-          throw new Error("We couldn't read the card details. Please re-enter your card information and try again.")
+          setStep(3)
+          throw new Error('Please re-enter your card information on the Payment step and tap Review my signup.')
         }
-        card = { account_token: t.account_token || t.token, expiration: t.expiry, cvn: t.cvv, consent: true }
+        card = { account_token: cardToken.account_token || cardToken.token, expiration: cardToken.expiry, cvn: cardToken.cvv, consent: true }
       }
       const res = await signupApi({
         action: 'public_bulk_signup',
@@ -389,7 +421,7 @@ export default function BulkSignupPage() {
               No problem — we’ll bill you after service starts. You can add a card any time from your client portal.
             </div>
           )}
-          <div style={{ marginTop: 14 }}>{nextBtn(() => { setErr(''); setStep(4) }, 'Review my signup')}</div>
+          <div style={{ marginTop: 14 }}>{nextBtn(review, busy ? 'Checking card…' : 'Review my signup', busy)}</div>
           {backBtn}
         </div>
       )}
