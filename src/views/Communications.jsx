@@ -20,7 +20,7 @@ const PURPOSE_LABEL = {
   invoice: 'Invoice', reminder: 'Reminder', arrival: 'Arrival', complete: 'Complete',
   service_reminder: 'Pickup reminder', portal: 'Portal', staff_alert: 'Staff alert',
   payments: 'Payment', manual: 'Manual', randy_sms: 'Randy', on_my_way: 'On my way',
-  reset: 'Password reset', other: 'Other',
+  reset: 'Password reset', announcement: 'Announcement', other: 'Other',
 }
 
 const fmtTime = (v) => new Date(v).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })

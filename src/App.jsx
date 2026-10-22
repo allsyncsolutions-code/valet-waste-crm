@@ -14,6 +14,7 @@ import Team from './views/Team.jsx'
 import Automations from './views/Automations.jsx'
 import Notifications from './views/Notifications.jsx'
 import Communications from './views/Communications.jsx'
+import Announcements from './views/Announcements.jsx'
 import DuplicateFixNotice from './components/DuplicateFixNotice.jsx'
 import JobCalendar from './views/JobCalendar.jsx'
 import EmployeePay from './views/EmployeePay.jsx'
@@ -46,6 +47,7 @@ const NAV_FIELD = [
   { id: 'clients', glyph: '◎', label: 'Clients' },
   { id: 'automations', glyph: '⟳', label: 'Automations' },
   { id: 'notifications', glyph: '🔔', label: 'Notifications' },
+  { id: 'announcements', glyph: '📣', label: 'Announcements' },
   { id: 'communications', glyph: '✉', label: 'Comms' },
   { id: 'drivers', glyph: '⛟', label: 'Drivers & Field' },
   { id: 'team', glyph: '⚇', label: 'Team' },
@@ -238,6 +240,7 @@ export default function App({ user, onSignOut }) {
     settings: ['Settings', 'Manage tags and configuration'],
     automations: ['Automations', 'Scheduled jobs Trashy Randy runs — plus his suggestions awaiting approval'],
     notifications: ['Notifications', 'Every message the system sends — flip each type on or off, and see which clients opted out'],
+    announcements: ['Announcements', 'Blast a text or email to every client matching a filter set'],
     employees: ['Employees', 'Lawn jobs, per-job pay, overrides, and timesheets (Sun–Sat)'],
   }
   const [viewTitle, viewSubtitle] = VIEW_META[activeView] || VIEW_META.dashboard
@@ -335,6 +338,7 @@ export default function App({ user, onSignOut }) {
     settings: <Settings app={app} />,
     automations: <Automations app={app} />,
     notifications: <Notifications app={app} />,
+    announcements: <Announcements app={app} />,
     communications: <Communications app={app} />,
     employees: <EmployeePay app={app} />,
   }
