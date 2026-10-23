@@ -262,6 +262,7 @@ async function sendSms(to: string, body: string, customerId?: string | null, pur
     secrets.rc_client_secret &&
     secrets.rc_jwt
 
+  let rcErr: string | null = null
   // RingCentral first (matches old app priority)
   if (rcReady) {
     const from = e164(String(settings.sms_from_number))
@@ -277,6 +278,7 @@ async function sendSms(to: string, body: string, customerId?: string | null, pur
       return { ok: true, provider: "ringcentral", id: d?.id }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
+      rcErr = msg
       // fall through to Telnyx if available; otherwise surface the error
       if (!Deno.env.get("TELNYX_API_KEY")) {
         await logMessage({ direction: "out", provider: "ringcentral", to_number: toNum, body, status: "failed", error: msg, customer_id: customerId || null, ...meta })
@@ -293,7 +295,10 @@ async function sendSms(to: string, body: string, customerId?: string | null, pur
     return { ok: true, provider: "telnyx", id: d?.data?.id }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
-    await logMessage({ direction: "out", provider: "telnyx", to_number: toNum, body, status: "failed", error: msg, customer_id: customerId || null, ...meta })
+    // Log BOTH providers' reasons when both were tried — the fallback's
+    // error alone hides why RingCentral (the primary) refused the send.
+    const combined = rcErr ? `RingCentral: ${rcErr} · Telnyx: ${msg}` : msg
+    await logMessage({ direction: "out", provider: "telnyx", to_number: toNum, body, status: "failed", error: combined, customer_id: customerId || null, ...meta })
     throw e
   }
 }

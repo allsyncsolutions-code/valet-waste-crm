@@ -10,8 +10,9 @@ import { getSmsConfig } from '../lib/smsData.js'
 import { currentActorName } from '../lib/activityData.js'
 import {
   AUDIENCE_OPTIONS, EMPTY_FILTERS, audienceLabel, buildRecipients,
-  estimateSmsUsage, firstNameOf, loadAnnouncementActivity, loadAnnouncements,
-  monthToDateTexts, renderAnnouncement, sendAnnouncement,
+  estimateSmsUsage, firstNameOf, groupFailures, loadAnnouncementActivity,
+  loadAnnouncements, loadAnnouncementFailures, monthToDateTexts,
+  renderAnnouncement, sendAnnouncement,
 } from '../lib/announcementsData.js'
 
 const card = { background: '#fff', border: '1px solid #e6eae6', borderRadius: 14, marginBottom: 16, overflow: 'hidden' }
@@ -35,6 +36,7 @@ export default function Announcements({ app }) {
   const [confirming, setConfirming] = useState(false)
   const [sending, setSending] = useState(null) // { done, total }
   const [result, setResult] = useState(null) // totals or { error }
+  const [why, setWhy] = useState(null) // { ann, rows: [] | null, err? } — failure reasons for a history row
   const [history, setHistory] = useState(null) // rows + source note
   const [err, setErr] = useState('')
   const bodyRef = useRef(null)
@@ -107,6 +109,54 @@ export default function Announcements({ app }) {
       setResult({ error: msg })
     } finally {
       setSending(null)
+    }
+  }
+
+  // Re-text only the people a blast failed to reach (deduped by number) —
+  // everyone it reached the first time is left alone.
+  async function retryFailed(failures, label, announcement) {
+    const seen = new Set()
+    const recipients = []
+    for (const f of failures) {
+      if (f.channel !== 'sms' || !f.target) continue
+      const key = String(f.target).replace(/\D/g, '').slice(-10)
+      if (!key || seen.has(key)) continue
+      seen.add(key)
+      recipients.push({ id: f.customerId || null, name: f.name || f.target, phone: f.target, email: '', optedOutOfTexts: false })
+    }
+    if (!recipients.length) { setResult({ error: 'No failed text recipients found to retry.' }); return }
+    setSending({ done: 0, total: recipients.length })
+    setResult(null)
+    try {
+      const actor = await currentActorName()
+      const totals = await sendAnnouncement({
+        channel: 'sms',
+        subject: (announcement && announcement.subject) || subject.trim(),
+        body: (announcement && announcement.body) || body.trim(),
+        recipients,
+        label: `${label} — retry of ${recipients.length} failed text${recipients.length === 1 ? '' : 's'}`,
+        filters: { retryOf: announcement?.id || null },
+        actorName: actor || 'Staff',
+        onProgress: (p) => setSending({ ...p }),
+      })
+      setResult(totals)
+      refreshHistory()
+    } catch (e) {
+      setResult({ error: e.message || String(e) })
+    } finally {
+      setSending(null)
+    }
+  }
+
+  // "why?" on a history row: pull the failed receipts from around that blast.
+  async function toggleWhy(h) {
+    if (why && why.ann.id === h.id) { setWhy(null); return }
+    setWhy({ ann: h, rows: null })
+    try {
+      const rows = await loadAnnouncementFailures(h)
+      setWhy({ ann: h, rows })
+    } catch (e) {
+      setWhy({ ann: h, rows: [], err: e.message || String(e) })
     }
   }
 
@@ -289,6 +339,13 @@ export default function Announcements({ app }) {
             {result.warnings.join(' · ')}
           </div>
         )}
+        {!sending && result && !result.error && (result.failures || []).length > 0 && (
+          <FailurePanel
+            failures={result.failures}
+            onRetry={() => retryFailed(result.failures, labelText)}
+            retryBusy={!!sending}
+          />
+        )}
       </div>
       {sending && (
         <div style={{ height: 6, background: '#e6eae6', borderRadius: 4, marginBottom: 16, overflow: 'hidden' }}>
@@ -311,25 +368,54 @@ export default function Announcements({ app }) {
           <div style={{ padding: 32, textAlign: 'center', color: '#9aa69e', fontSize: 13 }}>Nothing sent yet{history.note ? ` — ${history.note}` : ''}</div>
         ) : (
           <>
-            {history.rows.map((h, i) => (
-              <div key={h.id} style={{ display: 'flex', gap: 12, padding: '11px 16px', borderBottom: i === history.rows.length - 1 ? 'none' : '1px solid #f2f4f2' }}>
-                <div style={{ width: 30, height: 30, borderRadius: 9, background: h.channel === 'email' ? '#e8f0fa' : '#e7f4ed', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, flex: 'none' }}>
-                  {h.channel === 'email' ? '✉' : h.channel === 'both' ? '💬✉' : '💬'}
-                </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {h.subject || (h.body || '').split('\n')[0] || '(announcement)'}
+            {history.rows.map((h, i) => {
+              const failed = (h.counts?.failedSms || 0) + (h.counts?.failedEmail || 0)
+              return (
+                <div key={h.id} style={{ borderBottom: i === history.rows.length - 1 ? 'none' : '1px solid #f2f4f2' }}>
+                  <div style={{ display: 'flex', gap: 12, padding: '11px 16px' }}>
+                    <div style={{ width: 30, height: 30, borderRadius: 9, background: h.channel === 'email' ? '#e8f0fa' : '#e7f4ed', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, flex: 'none' }}>
+                      {h.channel === 'email' ? '✉' : h.channel === 'both' ? '💬✉' : '💬'}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {h.subject || (h.body || '').split('\n')[0] || '(announcement)'}
+                      </div>
+                      <div style={{ fontSize: 11.5, color: '#7c8a82', marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {h.audienceLabel}{h.sentByName ? ` · by ${h.sentByName}` : ''}
+                      </div>
+                    </div>
+                    <div style={{ flex: 'none', textAlign: 'right', fontSize: 11.5, color: '#9aa69e', lineHeight: 1.5 }}>
+                      <div>{countsText(h.counts)}</div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'flex-end', marginTop: 2 }}>
+                        {fmtTime(h.createdAt)}
+                        {failed > 0 && (
+                          <button onClick={() => toggleWhy(h)} style={{ border: 'none', background: 'none', color: '#c0492f', fontSize: 11.5, fontWeight: 700, cursor: 'pointer', padding: 0, textDecoration: 'underline' }}>
+                            why?
+                          </button>
+                        )}
+                      </div>
+                    </div>
                   </div>
-                  <div style={{ fontSize: 11.5, color: '#7c8a82', marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {h.audienceLabel}{h.sentByName ? ` · by ${h.sentByName}` : ''}
-                  </div>
+                  {why && why.ann.id === h.id && (
+                    <div style={{ padding: '0 16px 12px' }}>
+                      {why.rows === null ? (
+                        <div style={{ fontSize: 12.5, color: '#9aa69e' }}>Loading failure reasons…</div>
+                      ) : why.err ? (
+                        <div style={{ fontSize: 12.5, color: '#c0492f' }}>{why.err}</div>
+                      ) : why.rows.length === 0 ? (
+                        <div style={{ fontSize: 12.5, color: '#9aa69e' }}>No failed receipts found near this announcement.</div>
+                      ) : (
+                        <FailurePanel
+                          failures={why.rows}
+                          onRetry={() => retryFailed(why.rows, h.audienceLabel, h)}
+                          retryBusy={!!sending}
+                        />
+                      )}
+                    </div>
+                  )}
                 </div>
-                <div style={{ flex: 'none', textAlign: 'right', fontSize: 11.5, color: '#9aa69e', lineHeight: 1.5 }}>
-                  <div>{countsText(h.counts)}</div>
-                  <div>{fmtTime(h.createdAt)}</div>
-                </div>
-              </div>
-            ))}
+              )
+            })}
             {history.note && <div style={{ padding: '8px 16px 12px', fontSize: 11, color: '#9aa69e' }}>{history.note}</div>}
           </>
         )}
@@ -374,4 +460,37 @@ function countsText(counts = {}) {
   if (counts.failedEmail) parts.push(`${counts.failedEmail} email failed`)
   if (counts.skippedOptOut) parts.push(`${counts.skippedOptOut} opted out`)
   return parts.join(' · ') || ''
+}
+
+// "Why did N fail?" — failed receipts grouped by humanized reason, with a
+// one-click re-send to just the failed text recipients.
+function FailurePanel({ failures, onRetry, retryBusy }) {
+  const groups = groupFailures(failures)
+  const smsCount = failures.filter((f) => f.channel === 'sms').length
+  return (
+    <div style={{ flexBasis: '100%', background: '#fdecea', border: '1px solid #f3b7b0', borderRadius: 11, padding: '12px 14px', fontSize: 12.5 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 9 }}>
+        <strong style={{ color: '#9a2c1e', fontSize: 13 }}>Why {failures.length} failed</strong>
+        {smsCount > 0 && onRetry && (
+          <button
+            onClick={onRetry}
+            disabled={retryBusy}
+            title="Text only the people this blast failed to reach — everyone already texted is left alone"
+            style={{ marginLeft: 'auto', background: '#fff', border: '1px solid #f3b7b0', color: '#c0492f', borderRadius: 8, padding: '6px 11px', fontSize: 12, fontWeight: 700, cursor: retryBusy ? 'default' : 'pointer', opacity: retryBusy ? 0.6 : 1 }}
+          >{retryBusy ? 'Retrying…' : `↻ Retry ${smsCount} failed text${smsCount === 1 ? '' : 's'}`}</button>
+        )}
+      </div>
+      {groups.map((g) => (
+        <div key={g.reason} style={{ marginBottom: 8 }}>
+          <div style={{ color: '#9a2c1e' }}><strong>{g.count}</strong> · {g.reason}</div>
+          {g.who.length > 0 && (
+            <div style={{ fontSize: 11.5, color: '#7c8a82', marginTop: 2, lineHeight: 1.5 }}>
+              {g.who.join(', ')}{g.count > g.who.length ? ` +${g.count - g.who.length} more` : ''}
+            </div>
+          )}
+        </div>
+      ))}
+      <div style={{ fontSize: 11, color: '#9aa69e', marginTop: 6 }}>Per-message receipts (with the raw provider error) are in the Comms tab.</div>
+    </div>
+  )
 }
