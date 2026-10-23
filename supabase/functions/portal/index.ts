@@ -30,6 +30,13 @@
 //   remove_card {token}          → delete vault payment account + clear autopay
 //   quote_respond {token, quote_id, response, note} → approve/decline a quote,
 //                                  Randy texts admins
+//   estimate_info {slug, quote_id} → one estimate + company info for the
+//                                  standalone accept page (bearer = slug+id)
+//   estimate_respond {slug, quote_id, response, note} → accept/decline from
+//                                  the standalone page; Randy texts admins
+//   estimate_url {quote_id}       → staff: the accept-page link
+//   email_estimate {quote_id}     → staff: full-document email with an Accept
+//                                  button (SendGrid, receipt in email_messages)
 //   request_service {token, kind, property_ids, message, photos} → log request
 //                                  (photos: up to 4 image data URLs, resized
 //                                  client-side; stored in stop-photos under
@@ -200,6 +207,10 @@ function runHost(env?: string | null) {
   return RUN_HOSTS[(env === "uat" ? "uat" : "production") as keyof typeof RUN_HOSTS]
 }
 
+function escapeHtml(s: string): string {
+  return String(s || "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] as string))
+}
+
 type RunSettings = {
   run_mid?: string | null
   run_public_key?: string | null
@@ -209,7 +220,7 @@ type RunSettings = {
   run_env?: string | null
 }
 async function getSettings() {
-  return (await sbGet(`app_settings?id=eq.1&select=company_name,logo_url,run_mid,run_public_key,run_refresh_token,run_api_key,run_api_key_expires_at,run_env`))[0] || {}
+  return (await sbGet(`app_settings?id=eq.1&select=company_name,logo_url,company_phone,company_email,company_address,invoice_terms,run_mid,run_public_key,run_refresh_token,run_api_key,run_api_key_expires_at,run_env`))[0] || {}
 }
 
 async function runAccessToken(s: RunSettings): Promise<{ token: string; mid: string; env: string }> {
@@ -620,7 +631,7 @@ async function portalData(cust: any) {
     .reduce((s: number, i: any) => s + Number(i.total || 0), 0)
 
   const quotes = await sbGet(
-    `quotes?customer_id=eq.${cust.id}&status=in.(sent,approved,declined)&select=id,number,title,notes,line_items,subtotal,total,status,sent_at,responded_at,created_at&order=created_at.desc&limit=24`,
+    `quotes?customer_id=eq.${cust.id}&status=in.(sent,approved,declined)&select=id,number,title,notes,line_items,subtotal,total,status,sent_at,responded_at,response_note,created_at&order=created_at.desc&limit=24`,
   )
 
   const requests = await sbGet(
@@ -630,7 +641,14 @@ async function portalData(cust: any) {
   const settings = await getSettings()
 
   return {
-    company: { name: settings.company_name || "Valet Waste FL", logo_url: settings.logo_url || null },
+    company: {
+      name: settings.company_name || "Valet Waste FL",
+      logo_url: settings.logo_url || null,
+      phone: settings.company_phone || null,
+      email: settings.company_email || null,
+      address: settings.company_address || null,
+      terms: settings.invoice_terms || null,
+    },
     customer: { name: cust.name, email: cust.email },
     slug: cust.portal_slug,
     properties: props.map((p: any) => ({
@@ -1219,6 +1237,137 @@ Deno.serve(async (req) => {
       return json({ ok: true })
     }
 
+    // --- Estimates: quotes laid out like invoices, answered not paid ---------
+    // Standalone accept page — mirrors pay_info: the slug + estimate id pair
+    // in the texted/emailed link is the bearer capability; only this ONE
+    // estimate (plus company masthead info) is ever returned.
+    if (action === "estimate_info") {
+      const quoteId = String(body.quote_id || "")
+      if (!slug || !quoteId) return json({ error: "Missing slug or quote_id." }, 400)
+      const cust = (await sbGet(`customers?portal_slug=eq.${enc(String(slug))}&select=id,name,email,phone,contact_phone,address`))[0]
+      if (!cust) return json({ error: "This estimate link isn't valid." }, 404)
+      const q = (await sbGet(`quotes?id=eq.${enc(quoteId)}&customer_id=eq.${cust.id}&select=*`))[0]
+      if (!q) return json({ error: "This estimate link isn't valid." }, 404)
+      const s = (await sbGet(`app_settings?id=eq.1&select=company_name,logo_url,company_phone,company_email,company_address,invoice_terms`))[0] || {}
+      return json({
+        ok: true,
+        customer: { name: cust.name, email: cust.email, phone: cust.phone || cust.contact_phone, address: cust.address },
+        estimate: {
+          id: q.id, number: q.number, title: q.title, status: q.status,
+          line_items: q.line_items || [], subtotal: Number(q.subtotal || 0), total: Number(q.total || 0),
+          notes: q.notes, sent_at: q.sent_at, created_at: q.created_at,
+          responded_at: q.responded_at, response_note: q.response_note,
+        },
+        company: {
+          name: s.company_name || "Valet Waste FL", logo_url: s.logo_url || null,
+          phone: s.company_phone || null, email: s.company_email || null, address: s.company_address || null,
+        },
+        terms: s.invoice_terms || null,
+      })
+    }
+
+    // Public twin of quote_respond for the standalone accept page: slug +
+    // estimate id instead of a portal session.
+    if (action === "estimate_respond") {
+      const quoteId = String(body.quote_id || "")
+      const response = String(body.response || "")
+      if (!slug || !quoteId || !["approved", "declined"].includes(response)) return json({ error: "Bad request." }, 400)
+      const cust = (await sbGet(`customers?portal_slug=eq.${enc(String(slug))}&select=id,name`))[0]
+      if (!cust) return json({ error: "This estimate link isn't valid." }, 404)
+      const q = (await sbGet(`quotes?id=eq.${enc(quoteId)}&customer_id=eq.${cust.id}&select=id,number,title,total,status`))[0]
+      if (!q) return json({ error: "This estimate link isn't valid." }, 404)
+      if (q.status !== "sent") return json({ error: "This estimate can no longer be responded to." }, 400)
+      await sbPatch(`quotes?id=eq.${q.id}`, {
+        status: response,
+        responded_at: new Date().toISOString(),
+        response_note: body.note ? String(body.note).slice(0, 500) : null,
+      })
+      const m = `$${Number(q.total || 0).toFixed(2)}`
+      await textAdmins(
+        response === "approved"
+          ? `✅ ${cust.name} APPROVED estimate ${q.number}${q.title ? ` (${q.title})` : ""} — ${m}.${body.note ? ` Note: "${String(body.note).slice(0, 160)}"` : ""} — Trashy Randy`
+          : `❌ ${cust.name} declined estimate ${q.number}${q.title ? ` (${q.title})` : ""} — ${m}.${body.note ? ` Note: "${String(body.note).slice(0, 160)}"` : ""} — Trashy Randy`,
+      )
+      return json({ ok: true })
+    }
+
+    // Staff: the standalone accept-page link (for texting + copying).
+    if (action === "estimate_url") {
+      if (!(await staffFromAuthHeader(req))) return json({ error: "Staff only." }, 403)
+      const q = (await sbGet(`quotes?id=eq.${enc(String(body.quote_id || ""))}&select=id,number,customer_id,status`))[0]
+      if (!q) return json({ error: "Estimate not found." }, 404)
+      const cust = (await sbGet(`customers?id=eq.${q.customer_id}&select=portal_slug`))[0]
+      if (!cust?.portal_slug) return json({ error: "This customer has no portal — add a portal slug first." }, 400)
+      const origin = String(body.origin || PORTAL_ORIGIN).replace(/\/$/, "")
+      return json({ ok: true, url: `${origin}/?portal=${enc(cust.portal_slug)}&estimate=${enc(String(q.id))}` })
+    }
+
+    // Staff: email the full estimate document with an Accept button (mirrors
+    // the payments fn's email_invoice: SendGrid + an email_messages receipt).
+    if (action === "email_estimate") {
+      if (!(await staffFromAuthHeader(req))) return json({ error: "Staff only." }, 403)
+      const q = (await sbGet(`quotes?id=eq.${enc(String(body.quote_id || ""))}&select=*`))[0]
+      if (!q) return json({ error: "Estimate not found." }, 404)
+      if (q.status === "void") return json({ error: "This estimate is void." }, 400)
+      if (q.status === "approved" || q.status === "declined") return json({ error: "This estimate was already answered — send a new one instead." }, 400)
+      const cust = (await sbGet(`customers?id=eq.${q.customer_id}&select=name,email,portal_slug`))[0]
+      if (!cust?.email) return json({ error: "This customer has no email on file." }, 400)
+      if (!cust?.portal_slug) return json({ error: "This customer has no portal — add a portal slug first." }, 400)
+      const s = (await sbGet(`app_settings?id=eq.1&select=company_name,logo_url,company_phone,company_email,company_address,invoice_terms`))[0] || {}
+      const company = s.company_name || "Valet Waste FL"
+      const money = (v: unknown) => "$" + Number(v || 0).toFixed(2)
+      const origin = String(body.origin || PORTAL_ORIGIN).replace(/\/$/, "")
+      const url = `${origin}/?portal=${enc(cust.portal_slug)}&estimate=${enc(String(q.id))}`
+      if (q.status === "draft") {
+        await sbPatch(`quotes?id=eq.${q.id}`, { status: "sent", sent_at: new Date().toISOString() })
+      }
+      const rows = (q.line_items || []).map((li: any) =>
+        `<tr>` +
+        `<td style="padding:8px 10px;border-bottom:1px solid #eee;font-size:13.5px">${li.title ? `<b>${escapeHtml(li.title)}</b><br>` : ""}${escapeHtml(li.description || "")}</td>` +
+        `<td style="padding:8px 10px;border-bottom:1px solid #eee;text-align:center;font-size:13.5px;color:#555">${Number(li.quantity || 1)}</td>` +
+        `<td style="padding:8px 10px;border-bottom:1px solid #eee;text-align:right;font-size:13.5px;color:#555">${money(li.unit_price)}</td>` +
+        `<td style="padding:8px 10px;border-bottom:1px solid #eee;text-align:right;font-size:13.5px"><b>${money(li.amount ?? Number(li.quantity || 1) * Number(li.unit_price || 0))}</b></td>` +
+        `</tr>`
+      ).join("")
+      const subject = `${company} — Estimate ${q.number} (${money(q.total)})`
+      const html = `<div style="font-family:system-ui,-apple-system,sans-serif;max-width:560px;margin:0 auto;padding:20px 14px;color:#1a2420">` +
+        `<div style="display:flex;justify-content:space-between;align-items:center;padding-bottom:12px">` +
+        `<div style="font-weight:800;font-size:17px">${escapeHtml(company)}</div>` +
+        `<div style="font-size:11.5px;color:#7c8a82;text-align:right;line-height:1.5">${escapeHtml(s.company_phone || "")}${s.company_email ? `<br>${escapeHtml(s.company_email)}` : ""}</div></div>` +
+        `<div style="height:4px;background:linear-gradient(90deg,#1f7a4d,#2ea56b);border-radius:2px"></div>` +
+        `<div style="padding:16px 2px 4px;display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap">` +
+        `<div><div style="font-size:19px;font-weight:800;letter-spacing:.04em">ESTIMATE</div>` +
+        `<div style="font-size:12.5px;color:#5d6b63">${escapeHtml(q.number)}${q.title ? ` · ${escapeHtml(q.title)}` : ""}</div></div>` +
+        `<div style="font-size:12px;color:#5d6b63;text-align:right"><b style="display:block;font-size:13.5px;color:#1a2420">${escapeHtml(cust.name)}</b>${escapeHtml(cust.email || "")}</div></div>` +
+        `<table style="width:100%;border-collapse:collapse;margin-top:12px">` +
+        `<tr style="background:#1f7a4d;color:#fff"><th style="padding:8px 10px;text-align:left;font-size:10.5px;letter-spacing:.06em">DESCRIPTION</th><th style="padding:8px 10px;font-size:10.5px">QTY</th><th style="padding:8px 10px;text-align:right;font-size:10.5px">PRICE</th><th style="padding:8px 10px;text-align:right;font-size:10.5px">AMOUNT</th></tr>` +
+        rows +
+        `</table>` +
+        `<div style="text-align:right;padding:14px 2px;font-size:15px"><span style="color:#5d6b63;font-size:13px">Estimate total&nbsp;&nbsp;</span><b style="font-size:20px">${money(q.total)}</b></div>` +
+        (q.notes ? `<div style="font-size:12.5px;color:#5d6b63;padding:4px 2px;white-space:pre-wrap">${escapeHtml(q.notes)}</div>` : "") +
+        `<p style="text-align:center;margin:22px 0 8px"><a href="${url}" style="display:inline-block;background:#1f7a4d;color:#fff;padding:12px 30px;border-radius:9px;text-decoration:none;font-weight:700;font-size:15px">Review &amp; accept</a></p>` +
+        `<p style="text-align:center;font-size:12px;color:#7c8a82;margin:0 0 6px">Accept or decline (with an optional note) — no payment needed.</p>` +
+        (s.invoice_terms ? `<div style="font-size:11px;color:#9aa69e;margin-top:16px;border-top:1px solid #eee;padding-top:10px">${escapeHtml(s.invoice_terms)}</div>` : "") +
+        `</div>`
+      const text = `Estimate ${q.number} from ${company}: ${money(q.total)} total.\nReview, accept or decline: ${url}`
+      const key = Deno.env.get("SENDGRID_API_KEY")
+      if (!key) return json({ error: "SENDGRID_API_KEY is not configured." }, 500)
+      const from = Deno.env.get("SENDGRID_FROM") || "valetwastefl@allsynccrm.com"
+      const r = await fetch("https://api.sendgrid.com/v3/mail/send", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ personalizations: [{ to: [{ email: cust.email }] }], from: { email: from, name: company }, subject, content: [{ type: "text/html", value: html }] }),
+      })
+      const receipt = { to_email: cust.email, from_email: from, subject, body_text: text, body_html: html, purpose: "estimate", customer_id: q.customer_id, related_type: "estimate", related_id: String(q.number || q.id) }
+      if (!r.ok) {
+        const msg = `SendGrid ${r.status}: ${await r.text()}`
+        await logEmail({ ...receipt, status: "failed", error: msg.slice(0, 500) })
+        return json({ error: msg.slice(0, 200) }, 502)
+      }
+      await logEmail({ ...receipt, status: "sent" })
+      return json({ ok: true, url, to: cust.email })
+    }
+
     if (action === "quote_respond") {
       const cust = await customerFromToken(String(token || ""))
       if (!cust) return json({ error: "Session expired — sign in again." }, 401)
@@ -1235,8 +1384,8 @@ Deno.serve(async (req) => {
       const money = `$${Number(q.total || 0).toFixed(2)}`
       await textAdmins(
         response === "approved"
-          ? `✅ ${cust.name} APPROVED quote ${q.number}${q.title ? ` (${q.title})` : ""} — ${money}.${body.note ? ` Note: "${String(body.note).slice(0, 160)}"` : ""} — Trashy Randy`
-          : `❌ ${cust.name} declined quote ${q.number}${q.title ? ` (${q.title})` : ""} — ${money}.${body.note ? ` Note: "${String(body.note).slice(0, 160)}"` : ""} — Trashy Randy`,
+          ? `✅ ${cust.name} APPROVED estimate ${q.number}${q.title ? ` (${q.title})` : ""} — ${money}.${body.note ? ` Note: "${String(body.note).slice(0, 160)}"` : ""} — Trashy Randy`
+          : `❌ ${cust.name} declined estimate ${q.number}${q.title ? ` (${q.title})` : ""} — ${money}.${body.note ? ` Note: "${String(body.note).slice(0, 160)}"` : ""} — Trashy Randy`,
       )
       return json({ ok: true })
     }

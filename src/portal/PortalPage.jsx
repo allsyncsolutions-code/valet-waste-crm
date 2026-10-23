@@ -10,6 +10,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '../lib/supabaseClient.js'
 import { loadRunner, tokenizeCard, initRunnerForm, ACH_ENABLED } from '../lib/runnerJs.js'
 import { TipPicker } from '../components/TipPicker.jsx'
+import EstimateDoc from '../components/EstimateDoc.jsx'
+import { printInvoiceDoc } from '../lib/printInvoice.js'
 
 const GREEN = '#1f7a4d'
 const tokenKey = (slug) => `vw_portal_${slug}`
@@ -334,7 +336,7 @@ export default function PortalPage({ slug, code, previewCustomerId, shareToken, 
         ['home', 'Home'],
         ['pickups', 'Pickups'],
         ['photos', 'Photos'],
-        ['quotes', pendingQuotes.length ? `Quotes (${pendingQuotes.length})` : 'Quotes'],
+        ['quotes', pendingQuotes.length ? `Estimates (${pendingQuotes.length})` : 'Estimates'],
         ['invoices', 'Invoices'],
         ['payments', 'Payments'],
         ['request', 'Request service'],
@@ -448,8 +450,8 @@ function HomeTab({ data, nextPickup, pendingQuotes, excessCount, go, shared, onS
         <div onClick={() => go('quotes')} style={{ ...card, background: '#faf3e2', border: '1px solid #ecd9a8', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10 }}>
           <span style={{ fontSize: 17 }}>📋</span>
           <div style={{ flex: 1 }}>
-            <div style={{ fontWeight: 700, fontSize: 13.5, color: '#8a6414' }}>{pendingQuotes.length} quote{pendingQuotes.length > 1 ? 's' : ''} awaiting your approval</div>
-            <div style={{ fontSize: 12, color: '#a3873f' }}>Review and approve or decline — takes a few seconds.</div>
+            <div style={{ fontWeight: 700, fontSize: 13.5, color: '#8a6414' }}>{pendingQuotes.length} estimate{pendingQuotes.length > 1 ? 's' : ''} awaiting your response</div>
+            <div style={{ fontSize: 12, color: '#a3873f' }}>Review and accept or decline — takes a few seconds.</div>
           </div>
           <span style={{ color: '#8a6414', fontWeight: 700 }}>›</span>
         </div>
@@ -662,10 +664,10 @@ function PhotosTab({ data }) {
   )
 }
 
-// ---- Quotes --------------------------------------------------------------------
+// ---- Estimates (invoice-style documents you accept or decline) -------------
 function QuotesTab({ data, token, preview, onChanged }) {
   const [busyId, setBusyId] = useState(null)
-  const [noteFor, setNoteFor] = useState(null) // quote id with the note box open
+  const [noteFor, setNoteFor] = useState(null) // estimate id with the note box open
   const [note, setNote] = useState('')
   const [err, setErr] = useState('')
 
@@ -681,72 +683,75 @@ function QuotesTab({ data, token, preview, onChanged }) {
     setBusyId(null)
   }
 
-  const statusChip = (s) =>
-    s === 'approved' ? <span style={chip('#e7f1eb', GREEN)}>APPROVED</span>
-      : s === 'declined' ? <span style={chip('#fbeae6', '#c0492f')}>DECLINED</span>
-        : <span style={chip('#faf3e2', '#8a6414')}>AWAITING APPROVAL</span>
+  const company = {
+    name: data.company?.name,
+    logoUrl: data.company?.logo_url,
+    phone: data.company?.phone,
+    email: data.company?.email,
+    address: data.company?.address,
+    terms: data.company?.terms,
+  }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       {err && <div style={{ background: '#fbeae6', color: '#c0492f', borderRadius: 9, padding: '9px 12px', fontSize: 13 }}>{err}</div>}
-      {!data.quotes.length && <div style={{ ...card, textAlign: 'center', color: '#9aa69e', fontSize: 13 }}>No quotes yet. When we send you a quote it'll show up here for approval.</div>}
+      {!data.quotes.length && <div style={{ ...card, textAlign: 'center', color: '#9aa69e', fontSize: 13 }}>No estimates yet. When we send you one it'll show up here to accept or decline.</div>}
       {data.quotes.map((q) => (
-        <div key={q.id} style={card}>
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
-            <span style={{ fontWeight: 800, fontSize: 14.5 }}>{q.number}</span>
-            {q.title && <span style={{ fontSize: 13.5, color: '#5d6b63' }}>{q.title}</span>}
-            <span style={{ flex: 1 }} />
-            {statusChip(q.status)}
-          </div>
-          <div style={{ fontSize: 11.5, color: '#9aa69e', marginTop: 3 }}>
-            Sent {fmtD(q.sent_at || q.created_at)}{q.responded_at ? ` · responded ${fmtD(q.responded_at)}` : ''}
-          </div>
-          {(q.line_items || []).length > 0 && (
-            <div style={{ marginTop: 10, borderTop: '1px solid #f0f2ef' }}>
-              {q.line_items.map((li, i) => (
-                <div key={i} style={{ display: 'flex', gap: 10, padding: '7px 0', borderBottom: '1px solid #f0f2ef', fontSize: 13 }}>
-                  <span style={{ flex: 1 }}>{li.description}</span>
-                  {Number(li.quantity) > 1 && <span style={{ color: '#9aa69e' }}>×{li.quantity}</span>}
-                  <span style={{ fontWeight: 600 }}>{money(li.amount ?? (Number(li.quantity || 1) * Number(li.unit_price || 0)))}</span>
-                </div>
-              ))}
-            </div>
-          )}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
-            {q.notes && <span style={{ fontSize: 12.5, color: '#7c8a82', flex: 1 }}>{q.notes}</span>}
-            <span style={{ flex: 1 }} />
-            <span style={{ fontWeight: 800, fontSize: 16 }}>{money(q.total)}</span>
-          </div>
-          {q.status === 'sent' && (
+        <EstimateDoc
+          key={q.id}
+          estimate={{
+            number: q.number,
+            title: q.title,
+            status: q.status,
+            lineItems: (q.line_items || []).map((li) => ({
+              title: li.title || '',
+              description: li.description || '',
+              quantity: Number(li.quantity || 1),
+              unitPrice: Number(li.unit_price || 0),
+              amount: Number(li.amount ?? Number(li.quantity || 1) * Number(li.unit_price || 0)),
+            })),
+            subtotal: q.subtotal,
+            total: q.total,
+            notes: q.notes,
+            sentAt: q.sent_at,
+            createdAt: q.created_at,
+            respondedAt: q.responded_at,
+            responseNote: q.response_note,
+          }}
+          customer={{ name: data.customer?.name, email: data.customer?.email }}
+          company={company}
+        >
+          {q.status === 'sent' ? (
             <>
               {noteFor === q.id && (
-                <textarea
-                  value={note} onChange={(e) => setNote(e.target.value)} rows={2}
-                  placeholder="Optional note back to us…"
-                  style={{ ...inputStyle, marginTop: 10, resize: 'vertical', fontFamily: 'inherit' }}
-                />
+                <div style={{ flexBasis: '100%' }}>
+                  <textarea
+                    value={note} onChange={(e) => setNote(e.target.value)} rows={2}
+                    placeholder="Optional note back to us — especially handy if you're declining…"
+                    style={{ ...inputStyle, resize: 'vertical', fontFamily: 'inherit' }}
+                  />
+                </div>
               )}
-              <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
-                <button
-                  disabled={busyId === q.id || preview}
-                  title={preview ? 'Disabled in admin preview' : undefined}
-                  onClick={() => respond(q, 'approved')}
-                  style={{ ...btnPrimary, opacity: preview ? 0.55 : 1 }}
-                >{busyId === q.id ? 'Working…' : '✓ Approve'}</button>
-                <button
-                  disabled={busyId === q.id || preview}
-                  title={preview ? 'Disabled in admin preview' : undefined}
-                  onClick={() => respond(q, 'declined')}
-                  style={{ ...btnGhost, color: '#c0492f', borderColor: '#eccfc7', opacity: preview ? 0.55 : 1 }}
-                >Decline</button>
-                {noteFor !== q.id && (
-                  <button onClick={() => setNoteFor(q.id)} style={{ background: 'none', border: 'none', color: '#7c8a82', fontSize: 12.5, cursor: 'pointer' }}>+ add a note</button>
-                )}
-              </div>
+              <button
+                disabled={busyId === q.id || preview}
+                title={preview ? 'Disabled in admin preview' : undefined}
+                onClick={() => respond(q, 'approved')}
+                style={{ ...btnPrimary, opacity: preview ? 0.55 : 1 }}
+              >{busyId === q.id ? 'Working…' : '✓ Accept estimate'}</button>
+              <button
+                disabled={busyId === q.id || preview}
+                title={preview ? 'Disabled in admin preview' : undefined}
+                onClick={() => respond(q, 'declined')}
+                style={{ background: '#fff', color: '#c0492f', border: '1px solid #eccfc7', borderRadius: 9, padding: '10px 18px', fontSize: 13.5, fontWeight: 700, cursor: 'pointer', opacity: preview ? 0.55 : 1 }}
+              >Decline</button>
+              {noteFor !== q.id && (
+                <button onClick={() => setNoteFor(q.id)} style={{ background: 'none', border: 'none', color: '#7c8a82', fontSize: 13, cursor: 'pointer' }}>+ add a note</button>
+              )}
             </>
+          ) : (
+            <button onClick={() => printInvoiceDoc(q.number, 'Estimate')} style={{ background: '#fff', border: '1px solid #cfe0d5', color: GREEN, borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>⬇ Download PDF</button>
           )}
-          {q.response_note && <div style={{ marginTop: 8, fontSize: 12.5, color: '#7c8a82' }}>Your note: “{q.response_note}”</div>}
-        </div>
+        </EstimateDoc>
       ))}
     </div>
   )

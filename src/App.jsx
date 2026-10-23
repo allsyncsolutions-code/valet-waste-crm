@@ -235,7 +235,7 @@ export default function App({ user, onSignOut }) {
     myday: ['My Day', 'Your jobs — on my way, clock in, complete, photos'],
     timesheets: ['Time Sheets & Payroll', 'Your hours, jobs, and pay — weekly and monthly'],
     team: ['Team', 'Members and their business-line assignments'],
-    portal: ['Client Portal', 'Search a client to preview their portal, copy their link, or send a quote'],
+    portal: ['Client Portal', 'Search a client to preview their portal, copy their link, or send an estimate'],
     webforms: ['Web Forms', 'Public signup pages — edit, share by link, or embed on a website'],
     settings: ['Settings', 'Manage tags and configuration'],
     automations: ['Automations', 'Scheduled jobs Trashy Randy runs — plus his suggestions awaiting approval'],

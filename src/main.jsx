@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import AuthGate from './AuthGate.jsx'
 import PortalPage from './portal/PortalPage.jsx'
 import PayPage from './portal/PayPage.jsx'
+import EstimatePage from './portal/EstimatePage.jsx'
 import SignupPage from './portal/SignupPage.jsx'
 import BulkSignupPage from './portal/BulkSignupPage.jsx'
 
@@ -11,6 +12,8 @@ import BulkSignupPage from './portal/BulkSignupPage.jsx'
 // ?share=<token> is the read-only homeowner view (no login, no billing).
 // ?portal=<slug>&pay_invoice=<id> is a STANDALONE pay page: no portal chrome,
 // no sign-in — just that one invoice and a card form (PayPage).
+// ?portal=<slug>&estimate=<id> is its estimate twin (EstimatePage): the full
+// invoice-style document with Accept / Decline + optional note instead of pay.
 // ?login=client is the generic public login (no per-client slug) — the link
 // to put on the marketing website: email → 6-digit code → their portal.
 // ?signup=1 is the public web signup (Trashbolt-style agreement → Approve):
@@ -28,11 +31,14 @@ const publicSignup = params.has('signup')
 // A magic-link login (?code=…) still goes through the full portal flow even
 // if pay_invoice is present — the code must be redeemed for a session there.
 const payInvoice = params.get('code') ? null : params.get('pay_invoice')
+const estimateId = params.get('code') ? null : params.get('estimate')
 
 createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     {portalSlug && payInvoice ? (
       <PayPage slug={portalSlug} invoiceId={payInvoice} />
+    ) : portalSlug && estimateId ? (
+      <EstimatePage slug={portalSlug} quoteId={estimateId} />
     ) : portalSlug || shareToken ? (
       <PortalPage slug={portalSlug} code={params.get('code')} shareToken={shareToken} />
     ) : publicSignup ? (

@@ -157,7 +157,7 @@ export default function Portal({ app }) {
               <div style={{ fontWeight: 700, fontSize: 14.5 }}>{selected.name}</div>
               <div style={{ fontSize: 11.5, color: '#7c8a82' }}>Viewing their portal as they see it (actions disabled)</div>
             </div>
-            <button onClick={() => setQuoteOpen(true)} style={btnPrimary}>+ New quote</button>
+            <button onClick={() => setQuoteOpen(true)} style={btnPrimary}>+ New estimate</button>
             {selected.portal_slug && (
               <button
                 onClick={signInAsClient} disabled={loginBusy}
@@ -181,7 +181,7 @@ export default function Portal({ app }) {
           <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6 }}>Search for a client above to preview their portal</div>
           <div style={{ fontSize: 12.5, color: '#7c8a82', maxWidth: 480, margin: '0 auto', lineHeight: 1.55 }}>
             Clients reach their portal from their shareable link or the client sign-in on the app's login page.
-            They see pickups with photos, invoices with Pay now, quotes to approve, and can save a card
+            They see pickups with photos, invoices with Pay now, estimates to accept or decline, and can save a card
             (5th week free) or request service — requests and card saves text every admin via Trashy Randy.
           </div>
         </div>
@@ -199,7 +199,7 @@ export default function Portal({ app }) {
   )
 }
 
-// ---- New quote modal ------------------------------------------------------------
+// ---- New estimate modal --------------------------------------------------------
 function QuoteModal({ customer, isMobile, onClose, onCreated }) {
   const [title, setTitle] = useState('')
   const [notes, setNotes] = useState('')
@@ -246,8 +246,8 @@ function QuoteModal({ customer, isMobile, onClose, onCreated }) {
       <div style={{ position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', width: isMobile ? 'calc(100vw - 24px)' : 520, maxHeight: '86vh', overflowY: 'auto', background: '#fff', borderRadius: 16, padding: 22, zIndex: 510, boxShadow: '0 24px 60px rgba(15,30,20,.3)' }}>
         <div style={{ display: 'flex', alignItems: 'center', marginBottom: 14 }}>
           <div style={{ flex: 1 }}>
-            <div style={{ fontWeight: 700, fontSize: 16 }}>New quote — {customer.name}</div>
-            <div style={{ fontSize: 12, color: '#7c8a82' }}>Shows up in their portal immediately for approval; Randy texts all admins when they respond.</div>
+            <div style={{ fontWeight: 700, fontSize: 16 }}>New estimate — {customer.name}</div>
+            <div style={{ fontSize: 12, color: '#7c8a82' }}>Shows up in their portal immediately for accept / decline; Randy texts all admins when they respond.</div>
           </div>
           <span onClick={onClose} style={{ cursor: 'pointer', color: '#7c8a82', fontSize: 17, padding: 4 }}>✕</span>
         </div>
@@ -278,7 +278,7 @@ function QuoteModal({ customer, isMobile, onClose, onCreated }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 16 }}>
           <div style={{ fontWeight: 800, fontSize: 16, flex: 1 }}>Total ${total.toFixed(2)}</div>
           <button onClick={onClose} style={btnGhost}>Cancel</button>
-          <button onClick={save} disabled={busy} style={{ ...btnPrimary, opacity: busy ? 0.7 : 1 }}>{busy ? 'Sending…' : 'Send quote'}</button>
+          <button onClick={save} disabled={busy} style={{ ...btnPrimary, opacity: busy ? 0.7 : 1 }}>{busy ? 'Sending…' : 'Send estimate'}</button>
         </div>
       </div>
     </>
