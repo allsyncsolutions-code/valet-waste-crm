@@ -8,6 +8,7 @@
 // sms_messages / email_messages with purpose 'announcement'.
 import { supabase } from './supabaseClient.js'
 import { logActivity } from './activityData.js'
+import { sendSms } from './smsData.js'
 
 // --- Audience filters --------------------------------------------------------
 
@@ -64,26 +65,39 @@ export function emailTarget(c) {
   return (c.email || '').trim()
 }
 
+// A number we can actually text: 10 digits, or 11 starting with 1. Anything
+// else (a 5-digit fragment, a mis-typed number…) will be refused by
+// RingCentral, so it's excluded up front instead of burning a failed send.
+export function validUsPhone(raw) {
+  const d = String(raw || '').replace(/\D/g, '')
+  return d.length === 10 || (d.length === 11 && d.startsWith('1'))
+}
+
 // Build the send list from an audience. One entry per customer with resolved
 // text/email targets, then deduped per destination (two client records can
 // share a number/email — a property manager, a couple) so nobody gets the
 // same announcement twice. Opted-out clients (No Service Notifications) keep
-// their email but are skipped for texts.
+// their email but are skipped for texts; numbers that can't be valid are
+// flagged badNumber and never sent.
 export function buildRecipients(customers, f, activeLine) {
   const audience = filterAudience(customers, f, activeLine)
-  const rows = (audience || []).map((c) => ({
-    id: c.id,
-    name: c.name || '',
-    phone: textTarget(c),
-    email: emailTarget(c),
-    optedOutOfTexts: c.notifyOnService === false,
-    tagNames: (c.tags || []).map((t) => t.name),
-  }))
+  const rows = (audience || []).map((c) => {
+    const phone = textTarget(c)
+    return {
+      id: c.id,
+      name: c.name || '',
+      phone,
+      email: emailTarget(c),
+      optedOutOfTexts: c.notifyOnService === false,
+      badNumber: !!phone && !validUsPhone(phone),
+      tagNames: (c.tags || []).map((t) => t.name),
+    }
+  })
   const seenPhone = new Set()
   const seenEmail = new Set()
   let dupeTexts = 0, dupeEmails = 0
   for (const r of rows) {
-    if (r.phone) {
+    if (r.phone && !r.badNumber) {
       const key = r.phone.replace(/\D/g, '').slice(-10)
       if (key && seenPhone.has(key)) { dupeTexts++; r.phone = '' } // same number already covered
       else if (key) seenPhone.add(key)
@@ -98,10 +112,11 @@ export function buildRecipients(customers, f, activeLine) {
     rows,
     counts: {
       total: rows.length,
-      textable: rows.filter((r) => r.phone && !r.optedOutOfTexts).length,
-      optedOut: rows.filter((r) => r.phone && r.optedOutOfTexts).length,
+      textable: rows.filter((r) => r.phone && !r.badNumber && !r.optedOutOfTexts).length,
+      optedOut: rows.filter((r) => r.phone && !r.badNumber && r.optedOutOfTexts).length,
+      badNumbers: rows.filter((r) => r.badNumber).length,
       emailable: rows.filter((r) => r.email).length,
-      noContact: rows.filter((r) => !r.phone && !r.email).length,
+      noContact: rows.filter((r) => (!r.phone || r.badNumber) && !r.email).length,
       dupeTexts,
       dupeEmails,
     },
@@ -159,13 +174,45 @@ export function estimateSmsUsage(body, recipients) {
   let maxSegments = 0
   let messages = 0
   for (const r of recipients) {
-    if (!r.phone || r.optedOutOfTexts) continue
+    if (!r.phone || r.badNumber || r.optedOutOfTexts) continue
     const segs = smsSegments(renderAnnouncement(body, r))
     totalSegments += segs
     maxSegments = Math.max(maxSegments, segs)
     messages++
   }
   return { messages, totalSegments, maxSegments }
+}
+
+// True when the message contains characters outside the GSM alphabet (emoji,
+// curly quotes, em dashes…) — those force UCS-2 encoding, which carries only
+// 70 chars per segment instead of 160 and multiplies the text cost.
+export function usesUcs2(text) {
+  for (const ch of String(text || '')) {
+    if (!GSM7_EXT.has(ch) && !GSM7.has(ch)) return true
+  }
+  return false
+}
+
+// One-click fix for the most common accidental UCS-2 sources: smart
+// punctuation pasted from email/Word. Emoji are left alone (warned, not
+// auto-removed) — only punctuation with a plain ASCII equivalent is swapped.
+export function sanitizeSmartPunct(text) {
+  return String(text || '')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2013\u2014]/g, '-')
+    .replace(/\u2026/g, '...')
+    .replace(/\u00A0/g, ' ')
+    .replace(/\u2022/g, '*')
+}
+
+// Fire the exact announcement (rendered for one sample name) at one number —
+// "text me a test first" in the confirm dialog. Goes through the same sms
+// function as everything else, so pause/opt-out/provider rules apply and the
+// receipt lands in Comms.
+export async function sendTestAnnouncement(to, body, sampleName) {
+  const rendered = renderAnnouncement(body, { firstName: firstNameOf(sampleName || ''), name: sampleName || '' })
+  return sendSms(to, rendered, { purpose: 'test' })
 }
 
 // {firstName} / {name} / {company} personalization — same placeholder idea as
@@ -205,7 +252,7 @@ export async function monthToDateTexts() {
 const CHUNK = 75
 
 export async function sendAnnouncement({ channel, subject, body, recipients, label, filters, actorName, onProgress }) {
-  const active = recipients.filter((r) => (channel !== 'email' && r.phone && !r.optedOutOfTexts) || (channel !== 'sms' && r.email))
+  const active = recipients.filter((r) => (channel !== 'email' && r.phone && !r.badNumber && !r.optedOutOfTexts) || (channel !== 'sms' && r.email))
   const totals = { sentSms: 0, failedSms: 0, skippedOptOut: recipients.filter((r) => channel !== 'email' && r.phone && r.optedOutOfTexts).length, sentEmail: 0, failedEmail: 0, failures: [] }
   const warnings = []
   const chunks = []
@@ -312,6 +359,7 @@ export function humanizeSendError(err) {
     return 'RingCentral rejected the send — exact reason wasn\'t recorded on this blast (almost certainly rate limiting from sending too fast). Fixed for future sends.'
   }
   if (/429|rate limit|too many requests/i.test(s)) return 'Rate limited — RingCentral throttled the burst'
+  if (/too short|skipped.*invalid/i.test(s)) return 'Number too short to be valid — skipped, never sent'
   if (/international/i.test(s)) return 'International number — not supported'
   if (/not.{0,12}sms.{0,12}enabled|isn.t a valid sms|landline/i.test(s)) return 'Number can\'t receive texts (not SMS-enabled / landline)'
   if (/invalid|not a valid|cannot find|does not exist|unallocated/i.test(s)) return 'Invalid or unreachable phone number'

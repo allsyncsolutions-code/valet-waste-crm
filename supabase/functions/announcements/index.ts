@@ -222,7 +222,20 @@ Deno.serve(async (req) => {
 
     // --- Texts -------------------------------------------------------------
     if (wantSms) {
-      const smsTargets = list.filter((r) => r.phone && !optOut.has(String(r.id || "")))
+      const smsTargetsAll = list.filter((r) => r.phone && !optOut.has(String(r.id || "")))
+      // Fail-safe: numbers too short to be valid are skipped up front (the
+      // browser filters them too — this is the server-side guard) so they
+      // fail loudly with a clear reason instead of burning a provider call.
+      const smsTargets: any[] = []
+      for (const r of smsTargetsAll) {
+        const digits = e164(r.phone).replace(/\D/g, "")
+        if (digits.length < 11) {
+          const why = "Skipped — number too short to be a valid US number"
+          await logSms({ direction: "out", provider: "none", to_number: e164(r.phone), body: cleanBody, status: "failed", error: why, customer_id: r.id || null, purpose: "announcement", sent_by: sentByName || null })
+          counts.failedSms++
+          smsFailures.push({ customerId: r.id || null, name: String(r.name || ""), phone: e164(r.phone), error: why })
+        } else smsTargets.push(r)
+      }
       if (settings.sms_paused) {
         warnings.push("Texting is paused — no texts were sent (logged as paused).")
         for (const r of smsTargets) {

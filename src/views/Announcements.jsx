@@ -12,8 +12,10 @@ import {
   AUDIENCE_OPTIONS, EMPTY_FILTERS, audienceLabel, buildRecipients,
   estimateSmsUsage, firstNameOf, groupFailures, loadAnnouncementActivity,
   loadAnnouncements, loadAnnouncementFailures, monthToDateTexts,
-  renderAnnouncement, sendAnnouncement,
+  renderAnnouncement, sanitizeSmartPunct, sendAnnouncement,
+  sendTestAnnouncement, usesUcs2, validUsPhone,
 } from '../lib/announcementsData.js'
+import { supabase } from '../lib/supabaseClient.js'
 
 const card = { background: '#fff', border: '1px solid #e6eae6', borderRadius: 14, marginBottom: 16, overflow: 'hidden' }
 const inp = { background: '#fff', border: '1px solid #d9e2dc', borderRadius: 9, padding: '8px 11px', fontSize: 13, color: '#1a2420', outline: 'none' }
@@ -37,6 +39,9 @@ export default function Announcements({ app }) {
   const [sending, setSending] = useState(null) // { done, total }
   const [result, setResult] = useState(null) // totals or { error }
   const [why, setWhy] = useState(null) // { ann, rows: [] | null, err? } — failure reasons for a history row
+  const [testPhone, setTestPhone] = useState('')
+  const [testBusy, setTestBusy] = useState(false)
+  const [testResult, setTestResult] = useState(null) // 'ok' | { err }
   const [history, setHistory] = useState(null) // rows + source note
   const [err, setErr] = useState('')
   const bodyRef = useRef(null)
@@ -46,6 +51,10 @@ export default function Announcements({ app }) {
     listTags().then(setTags).catch(() => {})
     getSmsConfig().then(setSms).catch(() => setSms({}))
     monthToDateTexts().then(setMtdTexts).catch(() => setMtdTexts(null))
+    // Prefill "text me a test" with the signed-in staffer's own number.
+    supabase.from('profiles').select('phone').eq('id', app.user?.id).maybeSingle()
+      .then(({ data }) => { if (data?.phone) setTestPhone(data.phone) })
+      .catch(() => {})
   }, [])
 
   async function refreshHistory() {
@@ -73,6 +82,7 @@ export default function Announcements({ app }) {
 
   const wantSms = channel !== 'email'
   const wantEmail = channel !== 'sms'
+  const ucs2 = wantSms && usesUcs2(body)
   const smsUsage = useMemo(
     () => estimateSmsUsage(body, recipients),
     [body, recipients],
@@ -81,7 +91,7 @@ export default function Announcements({ app }) {
   // (RingCentral hard limit is 1600 GSM chars); block rather than truncate.
   const tooLong = smsUsage.maxSegments > 10
 
-  const reachable = recipients.filter((r) => (wantSms && r.phone && !r.optedOutOfTexts) || (wantEmail && r.email)).length
+  const reachable = recipients.filter((r) => (wantSms && r.phone && !r.badNumber && !r.optedOutOfTexts) || (wantEmail && r.email)).length
   const smsReady = !wantSms || (!!sms && sms.sms_enabled)
   const canSend = !!body.trim() && reachable > 0 && smsReady && !tooLong && !sending
 
@@ -158,6 +168,22 @@ export default function Announcements({ app }) {
     } catch (e) {
       setWhy({ ann: h, rows: [], err: e.message || String(e) })
     }
+  }
+
+  // Fire the exact message at one number (your own) before blasting anyone.
+  async function sendTest() {
+    if (!validUsPhone(testPhone)) { setTestResult({ err: 'Enter a valid 10-digit mobile number.' }); return }
+    if (!body.trim()) { setTestResult({ err: 'Write the message first.' }); return }
+    setTestBusy(true)
+    setTestResult(null)
+    try {
+      const r = await sendTestAnnouncement(testPhone.trim(), body.trim(), recipients[0]?.name || '')
+      if (r && r.ok === false) setTestResult({ err: (r && r.message) || 'The test text could not be sent.' })
+      else setTestResult('ok')
+    } catch (e) {
+      setTestResult({ err: e.message || String(e) })
+    }
+    setTestBusy(false)
   }
 
   function insertToken(tok) {
@@ -237,6 +263,7 @@ export default function Announcements({ app }) {
               {' · '}<strong>{counts.textable}</strong> can be texted
               {' · '}<strong>{counts.emailable}</strong> can be emailed
               {counts.optedOut > 0 && <span style={{ color: '#6b5a8a' }}> · {counts.optedOut} opted out of texts</span>}
+              {counts.badNumbers > 0 && <span style={{ color: '#c0492f' }}> · {counts.badNumbers} number{counts.badNumbers === 1 ? ' looks' : 's look'} invalid (won't be texted)</span>}
               {counts.noContact > 0 && <span style={{ color: '#b07a1e' }}> · {counts.noContact} have no phone or email</span>}
               {(counts.dupeTexts > 0 || counts.dupeEmails > 0) && (
                 <span style={{ color: '#7c8a82' }}> · {counts.dupeTexts + counts.dupeEmails} shared number/email deduped</span>
@@ -255,6 +282,7 @@ export default function Announcements({ app }) {
                 <div style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 600 }}>{r.name || '(no name)'}</div>
                 <div style={{ color: '#5d6b63', width: 130, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.phone || '—'}</div>
                 <div style={{ color: '#5d6b63', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.email || '—'}</div>
+                {r.badNumber && <span title="Number doesn't look valid — excluded from texts" style={{ flex: 'none', fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 20, color: '#c0492f', background: '#fbeae6' }}>bad #</span>}
                 {r.optedOutOfTexts && <span style={{ flex: 'none', fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 20, color: '#6b5a8a', background: '#efeaf7' }}>no texts</span>}
               </div>
             ))}
@@ -279,22 +307,38 @@ export default function Announcements({ app }) {
         <textarea ref={bodyRef} value={body} onChange={(e) => setBody(e.target.value)} rows={wantEmail ? 7 : 5}
           placeholder={wantSms ? 'e.g. Hi {firstName}, quick note from Valet Waste…' : 'Write the announcement…'}
           style={{ ...inp, width: '100%', resize: 'vertical', lineHeight: 1.55, fontFamily: 'inherit' }} />
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginTop: 8, fontSize: 12, color: '#7c8a82' }}>
-          {wantSms && (
-            <span style={{ fontFamily: MONO, fontSize: 11 }}>
-              {samplePreview.length} chars{smsUsage.messages > 0 ? ` · ${smsUsage.maxSegments || 1} segment${smsUsage.maxSegments === 1 ? '' : 's'} each` : ''}
-              {smsUsage.maxSegments > 1 && smsUsage.messages > 0 ? ` (emoji/special characters split texts into more segments)` : ''}
-            </span>
-          )}
-          <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
-            {['{firstName}', '{name}'].map((t) => (
-              <button key={t} onClick={() => insertToken(t)} style={{ border: '1px solid #d9e2dc', background: '#f7f9f7', borderRadius: 7, padding: '3px 8px', fontFamily: MONO, fontSize: 11, color: '#1f7a4d', cursor: 'pointer' }}>{t}</button>
-            ))}
-          </span>
-        </div>
+        {/* message health — live fail-safe strip */}
+        {wantSms && (
+          <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', fontSize: 12, color: '#7c8a82' }}>
+              <span style={{ fontFamily: MONO, fontSize: 11 }}>
+                {samplePreview.length} chars{smsUsage.messages > 0 ? ` · ${smsUsage.maxSegments || 1} segment${smsUsage.maxSegments === 1 ? '' : 's'} each` : ''}
+                {smsUsage.messages > 0 ? ` · ≈${smsUsage.totalSegments} text${smsUsage.totalSegments === 1 ? '' : 's'} total` : ''}
+              </span>
+              <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+                {['{firstName}', '{name}'].map((t) => (
+                  <button key={t} onClick={() => insertToken(t)} style={{ border: '1px solid #d9e2dc', background: '#f7f9f7', borderRadius: 7, padding: '3px 8px', fontFamily: MONO, fontSize: 11, color: '#1f7a4d', cursor: 'pointer' }}>{t}</button>
+                ))}
+              </span>
+            </div>
+            {ucs2 && !tooLong && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: '#fbf3df', border: '1px solid #ecd9a8', borderRadius: 9, padding: '7px 11px', fontSize: 12, color: '#6b5518' }}>
+                <span style={{ flex: 1 }}>
+                  ⚠ Emoji or smart punctuation (curly quotes “ ” ‘ ’, dashes —, …) are in the message — they cut texts to 70 characters per segment instead of 160, so this blast will use {smsUsage.maxSegments > 1 ? `${smsUsage.maxSegments}× more` : 'more'} texts than plain characters would.
+                </span>
+                <button onClick={() => setBody((b) => sanitizeSmartPunct(b))} title="Swap smart quotes/dashes for plain ones — emoji are left alone" style={{ flex: 'none', background: '#fff', border: '1px solid #ecd9a8', color: '#6b5518', borderRadius: 7, padding: '5px 10px', fontSize: 11.5, fontWeight: 700, cursor: 'pointer' }}>Clean up punctuation</button>
+              </div>
+            )}
+            {!ucs2 && smsUsage.maxSegments >= 3 && !tooLong && (
+              <div style={{ background: '#fbf3df', border: '1px solid #ecd9a8', borderRadius: 9, padding: '7px 11px', fontSize: 12, color: '#6b5518' }}>
+                ⚠ Long message — {smsUsage.maxSegments} segments per recipient. RingCentral bills each segment as one text ({smsUsage.totalSegments} total for this blast). Carriers occasionally join long texts out of order; under ~3 segments is safest.
+              </div>
+            )}
+          </div>
+        )}
         {wantSms && tooLong && (
           <div style={{ marginTop: 10, background: '#fdecea', border: '1px solid #f3b7b0', color: '#9a2c1e', borderRadius: 9, padding: '8px 12px', fontSize: 12.5 }}>
-            This message is over the 10-segment text limit — shorten it (or send it by email instead).
+            This message is over the 10-segment text limit — RingCentral will refuse to send it. Shorten it (or send it by email instead).
           </div>
         )}
       </div>
@@ -313,6 +357,7 @@ export default function Announcements({ app }) {
             <div style={{ marginTop: 6, fontWeight: 600, color: '#9a2c1e' }}>Texting is currently PAUSED in Settings — texts will be logged but not delivered.</div>
           )}
           {counts.optedOut > 0 && <div style={{ marginTop: 4, color: '#6b5a8a' }}>{counts.optedOut} opted-out client{counts.optedOut === 1 ? '' : 's'} will be skipped for texts.</div>}
+          {counts.badNumbers > 0 && <div style={{ marginTop: 4, color: '#9a2c1e' }}>{counts.badNumbers} invalid number{counts.badNumbers === 1 ? ' is' : 's are'} excluded from this send — fix them on the client records to text those customers.</div>}
         </div>
       )}
       {wantSms && sms && !sms.sms_enabled && (
@@ -432,12 +477,25 @@ export default function Announcements({ app }) {
                 <div style={{ marginTop: 8, background: '#fbf3df', border: '1px solid #ecd9a8', borderRadius: 9, padding: '8px 11px', color: '#6b5518' }}>
                   Uses about <strong>{smsUsage.totalSegments} RingCentral text {smsUsage.totalSegments === 1 ? 'message' : 'messages'}</strong>
                   {smsUsage.maxSegments > 1 ? ` (${smsUsage.messages} × ${smsUsage.maxSegments} segments)` : ''} — these count against your plan's texting allowance.
+                  {ucs2 && <div style={{ marginTop: 4 }}>⚠ Contains emoji/smart punctuation — each text carries only 70 chars per segment instead of 160.</div>}
+                  {smsUsage.maxSegments >= 3 && <div style={{ marginTop: 4 }}>⚠ Long message ({smsUsage.maxSegments} segments) — carriers occasionally deliver multi-part texts out of order.</div>}
                 </div>
               )}
-              {wantSms && counts.optedOut > 0 && <div style={{ marginTop: 6, color: '#6b5a8a' }}>{counts.optedOut} opted-out clients will be skipped for texts.</div>}
+              {counts.badNumbers > 0 && <div style={{ marginTop: 6, color: '#9a2c1e' }}>⚠ {counts.badNumbers} invalid number{counts.badNumbers === 1 ? '' : 's'} excluded — those customers won't be texted.</div>}
+              {counts.optedOut > 0 && <div style={{ marginTop: 6, color: '#6b5a8a' }}>{counts.optedOut} opted-out clients will be skipped for texts.</div>}
               <div style={{ marginTop: 10, background: '#f6f8f6', borderRadius: 9, padding: '9px 11px', fontSize: 12.5, color: '#5d6b63', whiteSpace: 'pre-wrap', maxHeight: 120, overflowY: 'auto' }}>
                 {subject.trim() ? <><strong>{subject.trim()}</strong>{'\n\n'}</> : ''}{samplePreview}
               </div>
+              {wantSms && (
+                <div style={{ marginTop: 10, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <input value={testPhone} onChange={(e) => { setTestPhone(e.target.value); setTestResult(null) }} placeholder="Your cell #" style={{ ...inp, width: 150 }} />
+                  <button onClick={sendTest} disabled={testBusy || !testPhone.trim()} style={{ ...inp, cursor: testBusy ? 'default' : 'pointer', fontWeight: 600, opacity: testBusy || !testPhone.trim() ? 0.6 : 1 }}>
+                    {testBusy ? 'Sending…' : 'Text me a test first'}
+                  </button>
+                  {testResult === 'ok' && <span style={{ fontSize: 12, color: '#1f7a4d', fontWeight: 700 }}>✓ Sent — check your phone</span>}
+                  {testResult && testResult.err && <span style={{ fontSize: 12, color: '#c0492f', fontWeight: 600 }}>{testResult.err}</span>}
+                </div>
+              )}
             </div>
             <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
               <button onClick={() => setConfirming(false)} style={{ ...inp, cursor: 'pointer', flex: 1, fontWeight: 600 }}>Cancel</button>
