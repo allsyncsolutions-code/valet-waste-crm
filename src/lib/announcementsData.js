@@ -206,7 +206,7 @@ const CHUNK = 75
 
 export async function sendAnnouncement({ channel, subject, body, recipients, label, filters, actorName, onProgress }) {
   const active = recipients.filter((r) => (channel !== 'email' && r.phone && !r.optedOutOfTexts) || (channel !== 'sms' && r.email))
-  const totals = { sentSms: 0, failedSms: 0, skippedOptOut: recipients.filter((r) => channel !== 'email' && r.phone && r.optedOutOfTexts).length, sentEmail: 0, failedEmail: 0 }
+  const totals = { sentSms: 0, failedSms: 0, skippedOptOut: recipients.filter((r) => channel !== 'email' && r.phone && r.optedOutOfTexts).length, sentEmail: 0, failedEmail: 0, failures: [] }
   const warnings = []
   const chunks = []
   for (let i = 0; i < active.length; i += CHUNK) chunks.push(active.slice(i, i + CHUNK))
@@ -234,6 +234,8 @@ export async function sendAnnouncement({ channel, subject, body, recipients, lab
       totals.failedSms += data.failedSms || 0
       totals.sentEmail += data.sentEmail || 0
       totals.failedEmail += data.failedEmail || 0
+      for (const f of data.smsFailures || []) totals.failures.push({ channel: 'sms', customerId: f.customerId || null, name: f.name, target: f.phone, error: f.error })
+      for (const f of data.emailFailures || []) totals.failures.push({ channel: 'email', customerId: f.customerId || null, name: f.name, target: f.email, error: f.error })
       for (const w of data.warnings || []) if (!warnings.includes(w)) warnings.push(w)
     }
     onProgress && onProgress({ done: Math.min((i + 1) * CHUNK, active.length), total: active.length, totals })
@@ -296,4 +298,77 @@ export async function loadAnnouncementActivity(limit = 200) {
     sentByName: r.actor,
     source: 'activity',
   }))
+}
+
+// --- Failure reasons -----------------------------------------------------------
+
+// Turn a raw provider error into something a human can act on. Old rows (sent
+// before 2026-10-23) logged only the Telnyx fallback's message when
+// RingCentral refused the send — flag those as unrecoverable-but-likely rate
+// limits rather than pretending the fallback was the cause.
+export function humanizeSendError(err) {
+  const s = String(err || '').trim()
+  if (/^Telnyx fallback isn't configured/.test(s)) {
+    return 'RingCentral rejected the send — exact reason wasn\'t recorded on this blast (almost certainly rate limiting from sending too fast). Fixed for future sends.'
+  }
+  if (/429|rate limit|too many requests/i.test(s)) return 'Rate limited — RingCentral throttled the burst'
+  if (/international/i.test(s)) return 'International number — not supported'
+  if (/not.{0,12}sms.{0,12}enabled|isn.t a valid sms|landline/i.test(s)) return 'Number can\'t receive texts (not SMS-enabled / landline)'
+  if (/invalid|not a valid|cannot find|does not exist|unallocated/i.test(s)) return 'Invalid or unreachable phone number'
+  if (/blocked|spam|blacklist|opted out/i.test(s)) return 'Blocked by the carrier'
+  if (/auth|unauthorized|token/i.test(s)) return 'Provider login failed (credentials need attention)'
+  return s.length > 140 ? s.slice(0, 140) + '…' : s
+}
+
+// Group failure rows by humanized reason: [{ reason, count, who: [names], channel }].
+export function groupFailures(failures) {
+  const groups = new Map()
+  for (const f of failures || []) {
+    const reason = humanizeSendError(f.error)
+    if (!groups.has(reason)) groups.set(reason, { reason, count: 0, who: [], channels: new Set() })
+    const g = groups.get(reason)
+    g.count++
+    g.channels.add(f.channel || 'sms')
+    const who = f.name || f.target || 'unknown'
+    if (g.who.length < 12) g.who.push(who)
+  }
+  return [...groups.values()]
+    .map((g) => ({ ...g, channels: [...g.channels] }))
+    .sort((a, b) => b.count - a.count)
+}
+
+// Failed receipts for one past announcement, straight from sms_messages /
+// email_messages (works for blasts sent before failure details were returned
+// to the UI). Table rows are stamped at the START of the send, activity rows
+// at the END — window accordingly.
+export async function loadAnnouncementFailures(announcement) {
+  const t0 = new Date(announcement.createdAt).getTime()
+  const [from, to] = announcement.source === 'activity'
+    ? [t0 - 45 * 60000, t0 + 5 * 60000]
+    : [t0 - 2 * 60000, t0 + 30 * 60000]
+  const range = { gte: new Date(from).toISOString(), lte: new Date(to).toISOString() }
+  const [sms, emails] = await Promise.all([
+    supabase.from('sms_messages')
+      .select('to_number, error, customer_id')
+      .eq('purpose', 'announcement').eq('status', 'failed')
+      .gte('created_at', range.gte).lte('created_at', range.lte).limit(1000),
+    supabase.from('email_messages')
+      .select('to_email, error, customer_id')
+      .eq('purpose', 'announcement').eq('status', 'failed')
+      .gte('created_at', range.gte).lte('created_at', range.lte).limit(1000),
+  ])
+  if (sms.error) throw sms.error
+  if (emails.error) throw emails.error
+  const rows = [
+    ...(sms.data || []).map((r) => ({ channel: 'sms', customerId: r.customer_id || null, name: null, target: r.to_number, error: r.error || '' })),
+    ...(emails.data || []).map((r) => ({ channel: 'email', customerId: r.customer_id || null, name: null, target: r.to_email, error: r.error || '' })),
+  ]
+  // Resolve names where the receipt carries a customer link.
+  const ids = [...new Set(rows.map((r) => r.customerId).filter(Boolean))]
+  if (ids.length) {
+    const { data: custs } = await supabase.from('customers').select('id, name').in('id', ids)
+    const byId = new Map((custs || []).map((c) => [c.id, c.name]))
+    for (const r of rows) if (r.customerId) r.name = byId.get(r.customerId) || null
+  }
+  return rows
 }

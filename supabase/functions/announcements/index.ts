@@ -51,6 +51,7 @@ async function rest(path: string, method = "GET", body?: unknown): Promise<any> 
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
 function escapeHtml(s: string): string {
   return String(s || "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] as string))
@@ -202,6 +203,8 @@ Deno.serve(async (req) => {
     const company = settings.company_name || "Valet Waste FL"
 
     const counts = { sentSms: 0, failedSms: 0, pausedSms: 0, skippedOptOut: 0, sentEmail: 0, failedEmail: 0 }
+    const smsFailures: Array<{ customerId: string | null; name: string; phone: string; error: string }> = []
+    const emailFailures: Array<{ customerId: string | null; name: string; email: string; error: string }> = []
     const warnings: string[] = []
     const wantSms = channel === "sms" || channel === "both"
     const wantEmail = channel === "email" || channel === "both"
@@ -238,30 +241,58 @@ Deno.serve(async (req) => {
         if (!token && !Deno.env.get("TELNYX_API_KEY")) {
           warnings.push("RingCentral credentials are missing and no Telnyx fallback is set — no texts were sent.")
         } else {
-          for (let i = 0; i < smsTargets.length; i += 5) {
-            const batch = smsTargets.slice(i, i + 5)
-            await Promise.all(batch.map(async (r) => {
-              const text = renderBody(cleanBody, { name: String(r.name || ""), company })
-              const toNum = e164(r.phone)
-              const base = { direction: "out", to_number: toNum, from_number: from, body: text, customer_id: r.id || null, purpose: "announcement", sent_by: sentByName || null }
+          // One message at a time, ~1.4/sec ceiling. RingCentral throttles
+          // bulk sending hard — the 5-parallel/250ms burst of 2026-10-22 got
+          // ~48 texts out before every remaining send was rejected.
+          const rateLimited = (msg: string) => /429|rate limit|too many/i.test(msg)
+          for (let i = 0; i < smsTargets.length; i++) {
+            const r = smsTargets[i]
+            const text = renderBody(cleanBody, { name: String(r.name || ""), company })
+            const toNum = e164(r.phone)
+            const base = { direction: "out", to_number: toNum, from_number: from, body: text, customer_id: r.id || null, purpose: "announcement", sent_by: sentByName || null }
+            const sendRc = async () => {
+              const d = await rcSend(server, token!, from, toNum, text)
+              await logSms({ ...base, provider: "ringcentral", status: "sent", external_id: d?.id ? String(d.id) : null })
+              counts.sentSms++
+            }
+            let sent = false
+            let rcErr: string | null = null
+            if (token) {
               try {
-                if (token) {
+                await sendRc()
+                sent = true
+              } catch (e) {
+                rcErr = errMsg(e)
+                if (rateLimited(rcErr)) {
+                  await sleep(4000) // throttled — back off, then one patient retry
                   try {
-                    const d = await rcSend(server, token, from, toNum, text)
-                    await logSms({ ...base, provider: "ringcentral", status: "sent", external_id: d?.id ? String(d.id) : null })
-                    counts.sentSms++
-                    return
-                  } catch (_rcErr) { /* fall through to Telnyx */ }
+                    await sendRc()
+                    sent = true
+                  } catch (e2) { rcErr = errMsg(e2) }
                 }
+              }
+            }
+            if (!sent && Deno.env.get("TELNYX_API_KEY")) {
+              try {
                 const d = await telnyxSend(from, toNum, text)
                 await logSms({ ...base, provider: "telnyx", status: "sent", external_id: d?.data?.id ? String(d.data.id) : null })
                 counts.sentSms++
+                sent = true
               } catch (e) {
-                await logSms({ ...base, provider: token ? "ringcentral" : "telnyx", status: "failed", error: e instanceof Error ? e.message : String(e) })
+                // Log BOTH providers' reasons — the fallback's error alone
+                // hides why RingCentral (the primary) refused the send.
+                const err = `${rcErr ? `${rcErr} · ` : ""}Telnyx: ${errMsg(e)}`
+                await logSms({ ...base, provider: "ringcentral", status: "failed", error: err.slice(0, 500) })
                 counts.failedSms++
+                smsFailures.push({ customerId: r.id || null, name: String(r.name || ""), phone: toNum, error: err.slice(0, 300) })
               }
-            }))
-            if (i + 5 < smsTargets.length) await sleep(250) // stay under provider rate limits
+            } else if (!sent) {
+              const err = rcErr || "No SMS provider available"
+              await logSms({ ...base, provider: "ringcentral", status: "failed", error: err.slice(0, 500) })
+              counts.failedSms++
+              smsFailures.push({ customerId: r.id || null, name: String(r.name || ""), phone: toNum, error: err.slice(0, 300) })
+            }
+            if (i + 1 < smsTargets.length) await sleep(700)
           }
         }
       } else {
@@ -284,7 +315,10 @@ Deno.serve(async (req) => {
             try {
               await sendEmail(String(r.email), subjectLine, text, company, r.id || null, sentByName || null)
               counts.sentEmail++
-            } catch (_e) { counts.failedEmail++ /* receipt already logged */ }
+            } catch (e) {
+              counts.failedEmail++ /* receipt already logged */
+              emailFailures.push({ customerId: r.id || null, name: String(r.name || ""), email: String(r.email), error: errMsg(e).slice(0, 300) })
+            }
           }))
           if (i + 5 < emailTargets.length) await sleep(150)
         }
@@ -301,7 +335,7 @@ Deno.serve(async (req) => {
       sent_by_name: String(sentByName || "Staff"),
     }, counts)
 
-    return json({ ok: true, ...counts, warnings })
+    return json({ ok: true, ...counts, smsFailures, emailFailures, warnings })
   } catch (e) {
     return json({ error: e instanceof Error ? e.message : String(e) })
   }
