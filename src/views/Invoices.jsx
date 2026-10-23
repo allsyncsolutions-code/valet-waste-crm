@@ -32,6 +32,7 @@ import {
 import { loadStopPhotos } from '../lib/photosData.js'
 import { currentActorName } from '../lib/activityData.js'
 import { printInvoiceDoc, downloadInvoicePdf } from '../lib/printInvoice.js'
+import EstimatesBoard from './EstimatesBoard.jsx'
 
 const money = (v) => '$' + Number(v || 0).toFixed(2)
 const initialsOf = (name) =>
@@ -425,8 +426,29 @@ export default function Invoices({ app }) {
     }
   }
 
+  // Invoices | Estimates — one billing tab, two document kinds. Estimates are
+  // laid out like invoices but answered (accept/decline) instead of paid.
+  const [board, setBoard] = useState('invoices')
+  const boardToggle = (
+    <div style={{ display: 'flex', gap: 3, background: '#eef1ee', borderRadius: 10, padding: 3, width: 'fit-content', marginBottom: 14 }}>
+      {[['invoices', 'Invoices'], ['estimates', 'Estimates']].map(([v, l]) => (
+        <button key={v} onClick={() => setBoard(v)} style={{ border: 'none', borderRadius: 8, padding: '7px 16px', fontSize: 13, fontWeight: board === v ? 700 : 500, cursor: 'pointer', background: board === v ? '#1f7a4d' : 'transparent', color: board === v ? '#fff' : '#5d6b63' }}>{l}</button>
+      ))}
+    </div>
+  )
+
+  if (board === 'estimates') {
+    return (
+      <div style={{ maxWidth: 1240, margin: '0 auto' }}>
+        {boardToggle}
+        <EstimatesBoard app={app} />
+      </div>
+    )
+  }
+
   return (
     <div style={{ maxWidth: 1240, margin: '0 auto' }}>
+      {boardToggle}
       {/* summary — all cards follow the date filter above the list */}
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 14 }}>
         <SummaryCard label="Outstanding" value={money(outstanding)} sub={`${dateFiltered.filter((i) => i.status === 'sent').length} sent`} accent="#b07a1e" />
