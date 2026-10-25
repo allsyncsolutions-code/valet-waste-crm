@@ -40,6 +40,8 @@ export default function Dashboard({ app }) {
   const [openRequests, setOpenRequests] = useState(null) // null = still loading
   const [triageOpen, setTriageOpen] = useState(false)
   const [pendingNew, setPendingNew] = useState([]) // new properties not yet on a route
+  // Weekly route auto-build notice — dismissible, remembered per browser.
+  const [routeBannerHidden, setRouteBannerHidden] = useState(() => { try { return !!localStorage.getItem('vw_banner_routeauto') } catch (e) { return false } })
 
   async function refresh() {
     const [c, i, s, ov] = await Promise.all([
@@ -115,6 +117,22 @@ export default function Dashboard({ app }) {
   return (
     <div style={{ maxWidth: 1200, margin: '0 auto' }}>
       {err && <div style={errorBox}>{err}</div>}
+
+      {/* Saturday-night route auto-build — so the whole team knows the week
+          stocks itself and hand edits are never overwritten. */}
+      {!routeBannerHidden && (
+        <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12, background: '#e7f1eb', border: '1px solid #cfe7da', borderRadius: 12, padding: '13px 16px' }}>
+          <div style={{ width: 30, height: 30, borderRadius: 8, background: '#d3e8dc', display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 'none', fontSize: 15 }}>🗓</div>
+          <div style={{ flex: 1, fontSize: 13, color: '#1f5c3d', lineHeight: 1.45 }}>
+            <b>Every Saturday at 8pm, next week's routes pull in automatically</b> — each stop carries over to the same weekday next week (paused clients and skip-days respected). Anything you build or edit by hand is never overwritten.
+          </div>
+          <div
+            onClick={() => { try { localStorage.setItem('vw_banner_routeauto', '1') } catch (e) {} setRouteBannerHidden(true) }}
+            title="Dismiss"
+            style={{ cursor: 'pointer', color: '#7c8a82', fontSize: 16, padding: 4, flex: 'none' }}
+          >✕</div>
+        </div>
+      )}
 
       {/* Open client requests — a ticket queue on the dashboard until handled */}
       {!loading && openRequests?.length > 0 && (
