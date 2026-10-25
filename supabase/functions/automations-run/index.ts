@@ -1273,6 +1273,10 @@ Deno.serve(async (req) => {
 
     const ran: Array<{ kind: string, result: string }> = []
     for (const a of autos) {
+      // weekly_only automations (the Saturday-night route builder) run from
+      // their dedicated cron trigger or the tab's "Run now" — never in the
+      // daily morning suite.
+      if (a.config?.weekly_only && !kindFilter) continue
       let result = "Unknown automation kind — nothing to run."
       try {
         if (a.kind === "outstanding_digest") result = await runOutstandingDigest()
