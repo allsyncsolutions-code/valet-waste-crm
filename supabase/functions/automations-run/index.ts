@@ -1240,6 +1240,12 @@ Deno.serve(async (req) => {
     kindFilter = b?.kind ?? null
     force = b?.force === true // only used by autopay for controlled testing
   } catch (_e) { /* run all */ }
+  // ?kind= on the URL works when the body carries no kind — lets a one-shot
+  // trigger run a SINGLE automation (e.g. the route builder) without
+  // re-running the whole daily suite mid-day.
+  if (!kindFilter) {
+    try { kindFilter = new URL(req.url).searchParams.get("kind") } catch (_e) { /* keep null */ }
+  }
 
   try {
     if (action === "scheduled_sends") {
