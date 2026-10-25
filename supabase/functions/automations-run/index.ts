@@ -406,6 +406,96 @@ async function sendPlainCustomerEmail(to: string, subject: string, text: string,
   await logEmail({ ...base, status: "sent" })
 }
 
+// Auto-build the coming week's routes: for each of the next 8 days, for each
+// route code that ran on the same weekday in the last 6 weeks, create the
+// day's route if it doesn't exist yet and copy that source route's stops —
+// the same thing staff do by hand with "Copy last <weekday>", minus paused
+// properties and that day's skip overrides. Existing routes are NEVER
+// touched, so anything built or edited manually stays exactly as-is and this
+// is safe to run every morning. (Stops added after the copy — new clients,
+// one-off pickups — are still a manual step; this only mirrors last week.)
+async function runAutoBuildRoutes(): Promise<string> {
+  const today = etToday()
+  const horizon = addDays(today, 7)
+  const lookback = addDays(today, -42)
+
+  // Source candidates (recent same-weekday routes) + what's already scheduled.
+  const recent = await sbGet(
+    `routes?service_date=gte.${lookback}&service_date=not.is.null&select=id,code,service_date&order=service_date.desc&limit=500`,
+  )
+  const upcoming = await sbGet(
+    `routes?service_date=gte.${today}&service_date=lte.${horizon}&select=id,code,service_date&limit=500`,
+  )
+  const have = new Set(upcoming.map((r: any) => `${r.code}|${r.service_date}`))
+
+  // Copied stops respect pauses and skip overrides for that date.
+  const paused = new Set((await sbGet(`properties?paused=eq.true&select=id&limit=3000`)).map((p: any) => p.id))
+  const skipByDate = new Map<string, Set<string>>()
+  try {
+    const ov = await sbGet(`property_day_overrides?skip_date=gte.${today}&skip_date=lte.${horizon}&select=property_id,skip_date&limit=3000`)
+    for (const o of ov) {
+      if (!skipByDate.has(o.skip_date)) skipByDate.set(o.skip_date, new Set())
+      skipByDate.get(o.skip_date)!.add(o.property_id)
+    }
+  } catch (_e) { /* overrides table unavailable → plain copy */ }
+
+  // Route defaults: the code's usual driver + business line.
+  const defaults = new Map(
+    (await sbGet(`route_defaults?select=code,driver_id,business_line&limit=100`)).map((d: any) => [d.code, d]),
+  )
+
+  const created: string[] = []
+  let stopsAdded = 0
+  for (let d = 0; d <= 7; d++) {
+    const date = addDays(today, d)
+    const dow = new Date(date + "T12:00:00Z").getUTCDay()
+    const sameDow = (r: any) => new Date(r.service_date + "T12:00:00Z").getUTCDay() === dow
+    const codes = [...new Set(recent.filter((r: any) => r.service_date < date && sameDow(r)).map((r: any) => r.code))]
+    for (const code of codes) {
+      if (have.has(`${code}|${date}`)) continue // already scheduled — never touch
+      // Most recent same-weekday run of this code.
+      const src = recent.find((r: any) => r.code === code && r.service_date < date && sameDow(r))
+      if (!src) continue
+      const stops = await sbGet(`route_stops?route_id=eq.${src.id}&select=property_id,service,time_window,lat,lng&order=seq.asc&limit=500`)
+      if (!stops.length) continue
+      const skips = skipByDate.get(date) || new Set<string>()
+      const rows = stops.filter((s: any) => !paused.has(s.property_id) && !skips.has(s.property_id))
+      if (!rows.length) continue
+      const def = defaults.get(code) || {}
+      const route = await sbPost("routes", {
+        code,
+        name: `Route ${code}`,
+        service_date: date,
+        driver_id: def.driver_id || null,
+        business_line: def.business_line || "waste",
+      })
+      await sbPost("route_stops", rows.map((s: any, i: number) => ({
+        route_id: route[0].id,
+        property_id: s.property_id,
+        service: s.service || null,
+        time_window: s.time_window || null,
+        lat: s.lat ?? null,
+        lng: s.lng ?? null,
+        seq: i + 1,
+      })))
+      created.push(`${code} ${date.slice(5)}`)
+      stopsAdded += rows.length
+      have.add(`${code}|${date}`)
+    }
+  }
+
+  if (created.length) {
+    await notifyStaff(
+      `🗓 Auto-built ${created.length} route${created.length === 1 ? "" : "s"} for the coming week (${stopsAdded} stops): ${created.join(", ")}. Adjust anything in Routes & Dispatch. — Trashy Randy`,
+      "staff_alert",
+      `Auto-built ${created.length} route${created.length === 1 ? "" : "s"} for the coming week`,
+    )
+  }
+  return created.length
+    ? `Built ${created.length} route(s), ${stopsAdded} stops: ${created.join(", ")}.`
+    : "Nothing to build — the coming week's routes already exist."
+}
+
 async function runServiceReminders(auto: any): Promise<string> {
   if (!await notifEnabled("client_service_reminder")) return "Day-before pickup reminders are turned off in the Notifications tab."
   const today = etToday()
@@ -1187,6 +1277,7 @@ Deno.serve(async (req) => {
         if (a.kind === "new_request_alerts") result = await runNewRequestAlerts(a)
         if (a.kind === "request_digest") result = await runRequestDigest(a, force && kindFilter === "request_digest")
         if (a.kind === "autopay_charge_monthly") result = await runAutopayCharge(force && kindFilter === "autopay_charge_monthly")
+        if (a.kind === "auto_build_week_routes") result = await runAutoBuildRoutes()
       } catch (e) {
         result = `Error: ${e instanceof Error ? e.message : String(e)}`
       }
