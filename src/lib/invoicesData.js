@@ -68,9 +68,11 @@ function mapInvoice(row) {
     customerPhone: row.customers?.contact_phone || row.customers?.phone || '',
     customerAddress: row.customers?.address || '',
     // Card on file (Run Merchant vault) — powers the staff "Take payment"
-    // modal's charge-saved-card shortcut.
+    // modal's charge-saved-card shortcut and the Billing run board. A card
+    // saved without its billing ZIP can't be charged (surcharge-enabled MID
+    // declines with "Surcharge Not Supported") — flagged as needsZip.
     savedCard: row.customers?.run_vault_id
-      ? { brand: row.customers.run_card_brand || 'card', last4: row.customers.run_card_last4 || '••••' }
+      ? { brand: row.customers.run_card_brand || 'card', last4: row.customers.run_card_last4 || '••••', needsZip: !row.customers.run_card_zip }
       : null,
     number: row.number,
     status: row.status,
@@ -101,7 +103,7 @@ function mapInvoice(row) {
   }
 }
 
-const SELECT = '*, customers(name,email,phone,contact_phone,address,business_line,run_vault_id,run_card_brand,run_card_last4), invoice_line_items(*)'
+const SELECT = '*, customers(name,email,phone,contact_phone,address,business_line,run_vault_id,run_card_brand,run_card_last4,run_card_zip), invoice_line_items(*)'
 
 export async function loadInvoices(line) {
   const { data, error } = await supabase

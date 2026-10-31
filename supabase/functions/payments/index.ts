@@ -857,8 +857,11 @@ Deno.serve(async (req) => {
             // No usable card on file: send the invoice (email, else SMS).
             if (!hasCard && cust.run_vault_id && !cust.run_card_zip) {
               // Vaulted card is missing its billing ZIP (surcharge-enabled MID
-              // declines without it) — don't charge, send instead.
+              // declines without it) — don't charge, send instead. The warn
+              // flag drives the amber "needs ZIP" badge on the Billing run
+              // board so a plain "sent" doesn't hide why it wasn't charged.
               row.detail = "Saved card missing billing ZIP"
+              row.warn = "card_missing_zip"
             }
             if (cust.email) {
               const r = await emailInvoiceInternal(String(inv.id), body.origin)
