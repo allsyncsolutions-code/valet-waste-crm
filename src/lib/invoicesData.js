@@ -92,6 +92,7 @@ function mapInvoice(row) {
     runTransId: row.run_trans_id || null,
     sentAt: row.sent_at,
     paidAt: row.paid_at,
+    viewedAt: row.viewed_at || null, // first open of the pay link (Billing run tab)
     paymentMethod: row.payment_method || null,
     checkNumber: row.check_number || '',
     paymentNote: row.payment_note || '',

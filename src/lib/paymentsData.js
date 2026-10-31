@@ -51,3 +51,17 @@ export const cancelScheduledSend = (id) =>
 // by the staff "Take payment" modal (the stored zip is sent server-side).
 export const chargeInvoice = (p) =>
   call({ action: 'charge_invoice', invoice_id: p.invoiceId, account_token: p.accountToken, expiration: p.expiration, cvn: p.cvn, name: p.name, account_zip: p.zip, address: p.address, save_card: !!p.saveCard, use_saved: !!p.useSaved })
+
+// ---- Billing run (batch) ------------------------------------------------------
+// Staff-only batch run over a list of open invoice ids, processed ONE AT A TIME
+// server-side. Card on file → charge + receipt email; otherwise → send the
+// invoice (email, or SMS when no email). Chunked: each call processes a slice
+// and returns next_cursor until done. Throws on hard errors; per-invoice
+// failures come back in results.
+export const runBilling = (invoiceIds, cursor = 0) =>
+  call({ action: 'billing_run', invoice_ids: invoiceIds, cursor, limit: 6, origin: window.location.origin })
+
+// Stamp invoices.viewed_at (first open of the pay link). Anon-ok, fire-and-
+// forget — the pay pages call this and ignore failures.
+export const markInvoiceViewed = (invoiceId) =>
+  call({ action: 'invoice_viewed', invoice_id: invoiceId })

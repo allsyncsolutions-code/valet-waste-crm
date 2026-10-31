@@ -449,6 +449,146 @@ async function isStaff(req: Request): Promise<boolean> {
   return ["admin", "staff"].includes(prof?.[0]?.role)
 }
 
+// ---- shared invoice-send helpers ----------------------------------------------
+// Mint (or reuse) the portal pay link for an invoice and mark it sent. Shared
+// by the email_invoice action, the billing run's SMS path, and the data layer.
+async function mintPayLink(inv: Record<string, unknown>, cust: Record<string, unknown>, origin?: string): Promise<string> {
+  if (!cust?.portal_slug) throw new Error("This customer has no portal — add a portal slug first.")
+  const base = String(origin || PORTAL_ORIGIN).replace(/\/$/, "")
+  let url = inv.payment_url as string | null
+  if (!url) {
+    url = `${base}/?portal=${enc(String(cust.portal_slug))}&pay_invoice=${enc(String(inv.id))}`
+    const patch: Record<string, unknown> = { payment_url: url }
+    if (inv.status === "draft") {
+      patch.status = "sent"
+      patch.sent_at = new Date().toISOString()
+    }
+    await sbPatch(`invoices?id=eq.${inv.id}`, patch)
+  }
+  return url
+}
+
+// The full HTML invoice email (line items, photos, Pay Now) used by both the
+// email_invoice action and the billing run. Throws with a readable message.
+async function emailInvoiceInternal(invoiceId: string, origin?: string): Promise<{ ok: boolean, url?: string, to?: string, error?: string, status?: number }> {
+  const inv = (await sbGet(
+    `invoices?id=eq.${enc(invoiceId)}&select=id,number,customer_id,status,payment_url,subtotal,discount,total,due_date,issue_date,notes,bill_to_name,bill_to_email,bill_to_phone`,
+  ))[0]
+  if (!inv) return { ok: false, error: "Invoice not found.", status: 404 }
+  if (inv.status === "void") return { ok: false, error: "This invoice is void.", status: 400 }
+  if (inv.status === "paid") return { ok: false, error: "This invoice is already paid.", status: 400 }
+  if (!await notifEnabled("client_invoice_email")) return { ok: false, error: "Invoice emails are turned off in the Notifications tab.", status: 400 }
+  const cust = (await sbGet(`customers?id=eq.${inv.customer_id}&select=name,email,portal_slug`))[0]
+  if (!cust?.email) return { ok: false, error: "This customer has no email on file.", status: 400 }
+
+  const url = await mintPayLink(inv, cust, origin)
+
+  const items = await sbGet(`invoice_line_items?invoice_id=eq.${inv.id}&select=title,description,quantity,unit_price,amount,stop_id&order=position`)
+  const photosByStop = await invoiceStopPhotos(String(inv.id))
+  const notesByStop = await invoiceStopNotes(String(inv.id)).catch(() => new Map<string, string>())
+  // Manually attached photos (admin "Add photos"): ones tied to a line's
+  // stop merge into that line's thumbnails; the rest render in the
+  // trailing "Service photos" grid.
+  const lineStopIds = new Set(items.filter((i: any) => i.stop_id).map((i: any) => String(i.stop_id)))
+  const attachedPhotos: Array<{ url: string, taken_on?: string | null, note?: string | null, isImage: boolean, name: string }> = []
+  try {
+    const invPhotos = await sbGet(`invoice_photos?invoice_id=eq.${enc(String(inv.id))}&select=stop_id,path,taken_on,note&order=created_at.asc`)
+    for (const p of invPhotos || []) {
+      const purl = `${SUPABASE_URL}/storage/v1/object/public/stop-photos/${enc(String(p.path))}`
+      if (p.stop_id && lineStopIds.has(String(p.stop_id))) {
+        if (!photosByStop.has(String(p.stop_id))) photosByStop.set(String(p.stop_id), [])
+        photosByStop.get(String(p.stop_id))!.push(purl)
+      } else {
+        // Invoice-level attach (incl. one-time invoices with no stop):
+        // images ride the photo grid; other files render as download links.
+        const isImage = /\.(jpe?g|png|gif|webp)$/i.test(String(p.path || ""))
+        attachedPhotos.push({ url: purl, taken_on: p.taken_on, note: p.note, isImage, name: p.note || String(p.path || "attachment").split("/").pop() })
+      }
+    }
+  } catch (_e) { /* attachments never block the email */ }
+  const s: any = await getSettings()
+  const company = s.company_name || "Valet Waste FL"
+  const money = (v: unknown) => "$" + Number(v || 0).toFixed(2)
+  const subject = `${company} — Invoice ${inv.number} (${money(inv.total)})`
+  await sendInvoiceEmail(
+    cust.email,
+    subject,
+    invoiceEmailHtml(cust, s, inv, items, url, photosByStop, attachedPhotos, notesByStop),
+    invoiceEmailText(cust, s, inv, items, url),
+    company,
+    { customer_id: inv.customer_id, related_type: "invoice", related_id: String(inv.number || inv.id) },
+  )
+  return { ok: true, url, to: cust.email }
+}
+
+// Post-charge receipt for the billing run — the customer already has a card on
+// file, so instead of an invoice they get a "your card was charged" receipt
+// (Randy's ask: receipt, not invoice). Best-effort: a failed receipt never
+// fails the charge.
+async function sendReceiptEmail(cust: Record<string, unknown>, inv: Record<string, unknown>, total: number, fee: number, transId: string) {
+  try {
+    const key = Deno.env.get("SENDGRID_API_KEY")
+    if (!key || !cust?.email) return
+    const from = Deno.env.get("SENDGRID_FROM") || "valetwastefl@allsynccrm.com"
+    const s: any = await getSettings()
+    const company = s.company_name || "Valet Waste FL"
+    const money = (v: number) => "$" + Number(v || 0).toFixed(2)
+    const charged = Math.round((total + fee) * 100) / 100
+    const last4 = cust.run_card_last4 ? ` ••${cust.run_card_last4}` : ""
+    const brand = cust.run_card_brand ? String(cust.run_card_brand).toUpperCase() : "Card"
+    const subject = `${company} — Payment receipt for invoice ${inv.number}`
+    const text = [
+      `Hi ${cust.name || "there"},`,
+      ``,
+      `This confirms your ${brand}${last4} was charged ${money(charged)} for invoice ${inv.number}.`,
+      fee > 0 ? `That includes a ${money(fee)} card processing surcharge.` : "",
+      `Service period and line items are available anytime in your portal.`,
+      ``,
+      `Thank you!`,
+      [s.company_name, s.company_phone, s.company_email].filter(Boolean).join(" · "),
+    ].filter((l) => l !== "").join("\n")
+    const html = `<!DOCTYPE html><html><body style="margin:0;padding:24px 12px;background:#f2f5f3;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <div style="max-width:520px;margin:0 auto;background:#fff;border-radius:14px;overflow:hidden;border:1px solid #e0e7e2">
+    <div style="background:#1f7a4d;color:#fff;padding:22px 26px">
+      <div style="font-size:18px;font-weight:700">${company}</div>
+      <div style="font-size:13px;opacity:.85;margin-top:2px">Payment receipt · Invoice ${inv.number}</div>
+    </div>
+    <div style="padding:26px">
+      <p style="margin:0 0 16px;font-size:15px;color:#1a2420">Hi ${cust.name || "there"}, this confirms your <b>${brand}${last4}</b> was charged <b>${money(charged)}</b> for invoice ${inv.number}.</p>
+      <table style="width:100%;border-collapse:collapse">
+        <tr><td style="padding:8px 10px;font-size:14px;color:#5d6b63;border-bottom:1px solid #e6ece8">Invoice total</td><td style="padding:8px 10px;font-size:14px;color:#1a2420;text-align:right;border-bottom:1px solid #e6ece8">${money(total)}</td></tr>
+        ${fee > 0 ? `<tr><td style="padding:8px 10px;font-size:14px;color:#5d6b63;border-bottom:1px solid #e6ece8">Card processing surcharge</td><td style="padding:8px 10px;font-size:14px;color:#1a2420;text-align:right;border-bottom:1px solid #e6ece8">${money(fee)}</td></tr>` : ""}
+        <tr><td style="padding:10px;font-size:15px;font-weight:700;color:#1a2420">Charged to your card</td><td style="padding:10px;font-size:15px;font-weight:700;color:#1f7a4d;text-align:right">${money(charged)}</td></tr>
+      </table>
+      ${transId ? `<p style="margin:16px 0 0;font-size:12px;color:#7c8a82">Transaction ${transId}</p>` : ""}
+      <p style="margin:16px 0 0;font-size:13px;color:#5d6b63">Line items and your full service history are available anytime in your client portal.</p>
+    </div>
+    <div style="padding:16px 26px;background:#f7faf8;border-top:1px solid #e6ece8;font-size:12px;color:#7c8a82">
+      ${[s.company_phone, s.company_email, s.company_address].filter(Boolean).map((v) => `<div>${v}</div>`).join("")}
+    </div>
+  </div>
+</body></html>`
+    const r = await fetch("https://api.sendgrid.com/v3/mail/send", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        personalizations: [{ to: [{ email: cust.email }] }],
+        from: { email: from, name: company },
+        subject,
+        content: [{ type: "text/plain", value: text }, { type: "text/html", value: html }],
+      }),
+    })
+    await logEmail({
+      to_email: cust.email, from_email: from, subject, body_text: text, body_html: html,
+      status: r.ok ? "sent" : "failed",
+      ...(r.ok ? {} : { error: `SendGrid ${r.status}: ${(await r.text()).slice(0, 500)}` }),
+      purpose: "receipt", related_type: "invoice", related_id: String(inv.number || inv.id), customer_id: inv.customer_id,
+    })
+  } catch (e) {
+    console.error("receipt email failed", e)
+  }
+}
+
 // ---- HTTP entry --------------------------------------------------------------
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS })
@@ -624,65 +764,137 @@ Deno.serve(async (req) => {
 
     if (action === "email_invoice") {
       if (!body.invoice_id) return json({ error: "Missing invoice_id." }, 400)
-      const inv = (await sbGet(
-        `invoices?id=eq.${enc(String(body.invoice_id))}&select=id,number,customer_id,status,payment_url,subtotal,discount,total,due_date,issue_date,notes,bill_to_name,bill_to_email,bill_to_phone`,
-      ))[0]
-      if (!inv) return json({ error: "Invoice not found." }, 404)
-      if (inv.status === "void") return json({ error: "This invoice is void." }, 400)
-      if (!await notifEnabled("client_invoice_email")) return json({ error: "Invoice emails are turned off in the Notifications tab." }, 400)
-      const cust = (await sbGet(`customers?id=eq.${inv.customer_id}&select=name,email,portal_slug`))[0]
-      if (!cust?.email) return json({ error: "This customer has no email on file." }, 400)
-      if (!cust?.portal_slug) return json({ error: "This customer has no portal — add a portal slug first." }, 400)
+      const r = await emailInvoiceInternal(String(body.invoice_id), body.origin)
+      if (!r.ok) return json({ error: r.error }, r.status || 400)
+      return json({ ok: true, url: r.url, to: r.to })
+    }
 
-      // Reuse the stored pay link, or mint one (marks the invoice sent).
-      const origin = String(body.origin || PORTAL_ORIGIN).replace(/\/$/, "")
-      let url = inv.payment_url
-      if (!url) {
-        url = `${origin}/?portal=${enc(cust.portal_slug)}&pay_invoice=${enc(String(inv.id))}`
-        const patch: Record<string, unknown> = { payment_url: url }
-        if (inv.status === "draft") {
-          patch.status = "sent"
-          patch.sent_at = new Date().toISOString()
+    if (action === "invoice_viewed") {
+      // Stamped by the customer-facing pay pages the first time an invoice's
+      // pay link is opened. Anon-ok (the pay pages are public), write is
+      // scoped to a single timestamp and refuses paid/void invoices.
+      if (!body.invoice_id) return json({ error: "Missing invoice_id." }, 400)
+      const inv = (await sbGet(`invoices?id=eq.${enc(String(body.invoice_id))}&select=id,status,viewed_at`))[0]
+      if (inv && !inv.viewed_at && inv.status !== "void") {
+        await sbPatch(`invoices?id=eq.${inv.id}`, { viewed_at: new Date().toISOString() })
+      }
+      return json({ ok: true })
+    }
+
+    if (action === "billing_run") {
+      // Staff batch run (Billing run tab): walk the given open invoices ONE AT
+      // A TIME, server-side. Card on file + billing zip → charge it and email
+      // a receipt; otherwise send the invoice (email, or SMS when there's no
+      // email). Declines/failures are recorded and the run moves on — the
+      // caller gets a per-invoice result list and a cursor for the next chunk
+      // (edge functions have a wall-clock limit, so long runs page through).
+      if (!(await isStaff(req))) return json({ error: "Staff only." }, 403)
+      const ids = Array.isArray(body.invoice_ids) ? body.invoice_ids.map(String) : []
+      if (!ids.length) return json({ error: "No invoices selected." }, 400)
+      const cursor = Math.max(0, Number(body.cursor) || 0)
+      const limit = Math.min(10, Math.max(1, Number(body.limit) || 6))
+      const batch = ids.slice(cursor, cursor + limit)
+      const results: Array<Record<string, unknown>> = []
+      let settings: RunSettings | null = null
+
+      for (const invId of batch) {
+        const inv = (await sbGet(
+          `invoices?id=eq.${enc(invId)}&select=id,number,customer_id,status,total,payment_url`,
+        ))[0]
+        if (!inv) { results.push({ invoice_id: invId, outcome: "skipped", detail: "Invoice no longer exists." }); continue }
+        if (inv.status === "paid" || inv.status === "void") {
+          results.push({ invoice_id: invId, number: inv.number, outcome: "skipped", detail: `Already ${inv.status}.` })
+          continue
         }
-        await sbPatch(`invoices?id=eq.${inv.id}`, patch)
+        const cust = (await sbGet(
+          `customers?id=eq.${inv.customer_id}&select=id,name,email,phone,contact_phone,portal_slug,run_vault_id,run_vault_holder_id,run_card_zip,run_card_brand,run_card_last4`,
+        ))[0] || {}
+        const row: Record<string, unknown> = { invoice_id: invId, number: inv.number, customer_name: cust.name || "", total: Number(inv.total || 0) }
+
+        try {
+          const cents = Math.round(Number(inv.total || 0) * 100)
+          const hasCard = !!(cust.run_vault_id && cust.run_card_zip)
+          if (hasCard && cents >= 50) {
+            // Card on file: mark sent (no invoice email — the customer gets a
+            // receipt AFTER the charge), then charge, one at a time.
+            if (inv.status === "draft") {
+              await sbPatch(`invoices?id=eq.${inv.id}`, { status: "sent", sent_at: new Date().toISOString() })
+            }
+            settings = settings || await getSettings()
+            const { token, mid, env } = await getAccessToken(settings)
+            const res = await runCharge(env, token, {
+              mid,
+              amount: cents,
+              vault_id: cust.run_vault_id,
+              vault_holder_id: cust.run_vault_holder_id || undefined,
+              account_zip: cust.run_card_zip,
+              capture: "Y",
+              currency: "USD",
+              cof: "M", // merchant-initiated, card on file
+              cof_sched: "N", // ad-hoc staff batch, not the scheduled monthly run
+              invoice_id: String(inv.id),
+              order_id: String(inv.id),
+              name: cust.name || undefined,
+              email: cust.email || undefined,
+            })
+            if (res.result === "A") {
+              const fee = Number(res.fee_amount) || 0
+              await sbPatch(`invoices?id=eq.${inv.id}`, {
+                status: "paid",
+                paid_at: new Date().toISOString(),
+                run_paid_at: new Date().toISOString(),
+                run_trans_id: String(res.trans_id),
+                surcharge_amount: fee,
+                payment_method: "card",
+              })
+              await sendReceiptEmail(cust, inv, Number(inv.total || 0), fee, String(res.trans_id || ""))
+              Object.assign(row, { outcome: "charged", charged: Number(inv.total || 0), fee })
+            } else {
+              // Declined — invoice stays 'sent' for retry/manual follow-up.
+              Object.assign(row, { outcome: "failed", detail: res.resp_text || res.result || "Declined" })
+            }
+          } else {
+            // No usable card on file: send the invoice (email, else SMS).
+            if (!hasCard && cust.run_vault_id && !cust.run_card_zip) {
+              // Vaulted card is missing its billing ZIP (surcharge-enabled MID
+              // declines without it) — don't charge, send instead.
+              row.detail = "Saved card missing billing ZIP"
+            }
+            if (cust.email) {
+              const r = await emailInvoiceInternal(String(inv.id), body.origin)
+              if (r.ok) Object.assign(row, { outcome: "sent", channel: "email", to: r.to })
+              else Object.assign(row, { outcome: "failed", detail: r.error })
+            } else if (cust.contact_phone || cust.phone) {
+              const s: any = settings || await getSettings()
+              settings = s
+              const url = await mintPayLink(inv, cust, body.origin)
+              const tpl = s.sms_invoice_template || "Hi {customerName}, invoice {invoiceNumber} for {total} is ready. Pay here: {payLink} — {companyName}"
+              const text = tpl
+                .replaceAll("{customerName}", cust.name || "there")
+                .replaceAll("{invoiceNumber}", String(inv.number || ""))
+                .replaceAll("{total}", "$" + Number(inv.total || 0).toFixed(2))
+                .replaceAll("{payLink}", url)
+                .replaceAll("{companyName}", s.company_name || "Valet Waste FL")
+              const sr = await fetch(`${SUPABASE_URL}/functions/v1/sms`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "send", to: cust.contact_phone || cust.phone, body: text, purpose: "invoice", sentBy: "Billing run" }),
+              })
+              const sd = await sr.json().catch(() => ({}))
+              if (sd?.ok) Object.assign(row, { outcome: "sent", channel: "sms" })
+              else Object.assign(row, { outcome: "failed", detail: sd?.message || sd?.error || "SMS failed" })
+            } else {
+              Object.assign(row, { outcome: "failed", detail: "No email or phone on file" })
+            }
+          }
+        } catch (e) {
+          Object.assign(row, { outcome: "failed", detail: e instanceof Error ? e.message : String(e) })
+        }
+        results.push(row)
       }
 
-      const items = await sbGet(`invoice_line_items?invoice_id=eq.${inv.id}&select=title,description,quantity,unit_price,amount,stop_id&order=position`)
-      const photosByStop = await invoiceStopPhotos(String(inv.id))
-      const notesByStop = await invoiceStopNotes(String(inv.id)).catch(() => new Map<string, string>())
-      // Manually attached photos (admin "Add photos"): ones tied to a line's
-      // stop merge into that line's thumbnails; the rest render in the
-      // trailing "Service photos" grid.
-      const lineStopIds = new Set(items.filter((i: any) => i.stop_id).map((i: any) => String(i.stop_id)))
-      const attachedPhotos: Array<{ url: string, taken_on?: string | null, note?: string | null, isImage: boolean, name: string }> = []
-      try {
-        const invPhotos = await sbGet(`invoice_photos?invoice_id=eq.${enc(String(inv.id))}&select=stop_id,path,taken_on,note&order=created_at.asc`)
-        for (const p of invPhotos || []) {
-          const url = `${SUPABASE_URL}/storage/v1/object/public/stop-photos/${enc(String(p.path))}`
-          if (p.stop_id && lineStopIds.has(String(p.stop_id))) {
-            if (!photosByStop.has(String(p.stop_id))) photosByStop.set(String(p.stop_id), [])
-            photosByStop.get(String(p.stop_id))!.push(url)
-          } else {
-            // Invoice-level attach (incl. one-time invoices with no stop):
-            // images ride the photo grid; other files render as download links.
-            const isImage = /\.(jpe?g|png|gif|webp)$/i.test(String(p.path || ""))
-            attachedPhotos.push({ url, taken_on: p.taken_on, note: p.note, isImage, name: p.note || String(p.path || "attachment").split("/").pop() })
-          }
-        }
-      } catch (_e) { /* attachments never block the email */ }
-      const s = await getSettings()
-      const company = s.company_name || "Valet Waste FL"
-      const money = (v: unknown) => "$" + Number(v || 0).toFixed(2)
-      const subject = `${company} — Invoice ${inv.number} (${money(inv.total)})`
-      await sendInvoiceEmail(
-        cust.email,
-        subject,
-        invoiceEmailHtml(cust, s, inv, items, url, photosByStop, attachedPhotos, notesByStop),
-        invoiceEmailText(cust, s, inv, items, url),
-        company,
-        { customer_id: inv.customer_id, related_type: "invoice", related_id: String(inv.number || inv.id) },
-      )
-      return json({ ok: true, url, to: cust.email })
+      const next = cursor + batch.length
+      return json({ results, next_cursor: next, done: next >= ids.length, total: ids.length })
     }
 
     if (action === "schedule_send") {
@@ -841,7 +1053,7 @@ Deno.serve(async (req) => {
           run_card_brand: res.card_type || null,
           run_card_last4: String(res.card_number || "").slice(-4) || null,
           run_card_exp: String(body.expiration || "") || null,
-          run_card_zip: zip || cust.run_card_zip || null,
+          run_card_zip: String(chargeBody.account_zip || cust.run_card_zip || "") || null,
           autopay_consent: true,
           autopay_consented_at: new Date().toISOString(),
         })
