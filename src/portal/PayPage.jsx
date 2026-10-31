@@ -7,6 +7,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { supabase } from '../lib/supabaseClient.js'
 import { loadRunner, tokenizeCard, initRunnerForm, ACH_ENABLED } from '../lib/runnerJs.js'
+import { markInvoiceViewed } from '../lib/paymentsData.js'
 import { RichText } from '../components/RichText.jsx'
 import { TipPicker } from '../components/TipPicker.jsx'
 import { printInvoiceDoc } from '../lib/printInvoice.js'
@@ -46,7 +47,12 @@ export default function PayPage({ slug, invoiceId }) {
 
   useEffect(() => {
     portalApi({ action: 'pay_info', slug, invoice_id: invoiceId })
-      .then(setInfo)
+      .then((info) => {
+        setInfo(info)
+        // First-open tracking for the staff Billing run tab — best-effort,
+        // never blocks the pay page.
+        if (info?.invoice?.id) markInvoiceViewed(info.invoice.id).catch(() => {})
+      })
       .catch((e) => setLoadErr(e.message || String(e)))
   }, [slug, invoiceId])
 

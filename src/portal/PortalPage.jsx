@@ -9,6 +9,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '../lib/supabaseClient.js'
 import { loadRunner, tokenizeCard, initRunnerForm, ACH_ENABLED } from '../lib/runnerJs.js'
+import { markInvoiceViewed } from '../lib/paymentsData.js'
 import { TipPicker } from '../components/TipPicker.jsx'
 import EstimateDoc from '../components/EstimateDoc.jsx'
 import { printInvoiceDoc } from '../lib/printInvoice.js'
@@ -1041,6 +1042,13 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
   const [formKey, setFormKey] = useState(0) // bump = remount the Runner form
   const runnerRef = useRef(null)
   const formRef = useRef(null)
+
+  // First-open tracking for the staff Billing run tab — best-effort. Fires for
+  // the pay-link landing AND the Invoices tab's "Pay now" (same screen).
+  useEffect(() => {
+    if (inv?.id && inv.status !== 'void') markInvoiceViewed(inv.id).catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inv?.id])
 
   useEffect(() => {
     if (preview || !payment.available || !payment.publicKey || !formRef.current) return
