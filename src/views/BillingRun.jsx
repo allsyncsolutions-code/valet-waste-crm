@@ -39,6 +39,16 @@ const fmtViewed = (ts) => {
 
 const chip = (bg, color) => ({ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 10.5, fontWeight: 700, padding: '3px 8px', borderRadius: 6, background: bg, color, whiteSpace: 'nowrap' })
 const inp = { border: '1px solid #dde2dd', borderRadius: 7, padding: '5px 8px', fontSize: 12.5, outline: 'none', width: '100%', background: '#fff' }
+// Drafts only accept stop lines in the month they were created (stop-billing
+// filters on created_at >= month start), so "still accumulating" is only true
+// for THIS month's drafts — last month's leftover drafts are done and just
+// need to be sent/charged.
+const isCurrentMonth = (ts) => {
+  try { return String(ts).slice(0, 7) === new Date().toISOString().slice(0, 7) } catch { return false }
+}
+const monthName = (ts) => {
+  try { return new Date(String(ts).length === 10 ? ts + 'T12:00:00' : ts).toLocaleDateString(undefined, { month: 'long' }) } catch { return 'prior month' }
+}
 
 export default function BillingRun({ invoices, loading, app, onChanged, onOpenInvoice }) {
   const isMobile = app?.isMobile
@@ -308,7 +318,7 @@ export default function BillingRun({ invoices, loading, app, onChanged, onOpenIn
                 <span style={{ flex: 'none', color: '#9aa69e', fontSize: 11, width: 12 }}>{expanded ? '▾' : '▸'}</span>
                 <div style={{ minWidth: 0, flex: isMobile ? '1 1 100%' : 1.6 }}>
                   <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{inv.customerName || 'Unknown'}</div>
-                  <div style={{ fontFamily: MONO, fontSize: 10.5, color: '#9aa69e' }}>{inv.number}{inv.status === 'draft' ? ' · draft (still accumulating stops)' : ' · sent'}</div>
+                  <div style={{ fontFamily: MONO, fontSize: 10.5, color: '#9aa69e' }}>{inv.number}{inv.status === 'draft' ? (isCurrentMonth(inv.createdAt) ? ' · draft — accumulating stops' : ` · draft — ${monthName(inv.createdAt)} ready to send`) : ' · sent'}</div>
                 </div>
                 {!isMobile && (
                   <div style={{ flex: 1, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
