@@ -59,11 +59,13 @@ export default function BillingRun({ invoices, loading, app, onChanged, onOpenIn
   }, [open, filter, search])
 
   const withCard = open.filter((i) => i.savedCard)
+  const needsZip = open.filter((i) => i.savedCard?.needsZip)
   const totals = {
     count: open.length,
     amount: open.reduce((s, i) => s + Number(i.total || 0), 0),
     cardCount: withCard.length,
     cardAmount: withCard.reduce((s, i) => s + Number(i.total || 0), 0),
+    needsZipCount: needsZip.length,
     viewedCount: open.filter((i) => i.viewedAt).length,
   }
 
@@ -71,10 +73,12 @@ export default function BillingRun({ invoices, loading, app, onChanged, onOpenIn
     const ids = filtered.map((i) => i.id)
     if (!ids.length) return
     const cardN = filtered.filter((i) => i.savedCard).length
+    const zipN = filtered.filter((i) => i.savedCard?.needsZip).length
     const sendN = ids.length - cardN
     if (!window.confirm(
       `Run billing on ${ids.length} invoice${ids.length === 1 ? '' : 's'} (${money(totalsOf(filtered))})?\n\n` +
-      `• ${cardN} with a card on file → charge + email receipt\n` +
+      `• ${cardN - zipN} with a chargeable card → charge + email receipt\n` +
+      (zipN ? `• ${zipN} card${zipN === 1 ? '' : 's'} missing billing ZIP → invoice sent instead (can't charge)\n` : '') +
       `• ${sendN} with no card → send invoice (email/SMS)\n\n` +
       `Charges run one at a time. Declines are skipped and listed at the end.`
     )) return
@@ -125,7 +129,7 @@ export default function BillingRun({ invoices, loading, app, onChanged, onOpenIn
       {/* summary */}
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 14, alignItems: 'stretch' }}>
         <SummaryCard label="Ready to run" value={money(totals.amount)} sub={`${totals.count} open invoice${totals.count === 1 ? '' : 's'}`} accent="#b07a1e" />
-        <SummaryCard label="Card on file" value={money(totals.cardAmount)} sub={`${totals.cardCount} will be charged`} accent={GREEN} />
+        <SummaryCard label="Card on file" value={money(totals.cardAmount)} sub={`${totals.cardCount - totals.needsZipCount} chargeable${totals.needsZipCount ? ` · ${totals.needsZipCount} need ZIP ⚠` : ''}`} accent={GREEN} />
         <SummaryCard label="To send" value={money(totals.amount - totals.cardAmount)} sub={`${totals.count - totals.cardCount} invoice emails/texts`} accent="#5d6b63" />
         <SummaryCard label="Viewed" value={String(totals.viewedCount)} sub="pay link opened" accent="#6b4fa0" />
         <div style={{ flex: 1 }} />
@@ -198,7 +202,9 @@ export default function BillingRun({ invoices, loading, app, onChanged, onOpenIn
               {!isMobile && (
                 <div style={{ flex: 1, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                   {inv.savedCard
-                    ? <span style={chip('#e7f1eb', GREEN)} title="Saved card will be charged">💳 {(inv.savedCard.brand || 'card').toUpperCase()} ••{inv.savedCard.last4}</span>
+                    ? inv.savedCard.needsZip
+                      ? <span style={chip('#fdf2e0', '#b07a1e')} title="This saved card has no billing ZIP — the run will send the invoice instead of charging. Ask the client to re-save their card in the portal.">⚠ {(inv.savedCard.brand || 'card').toUpperCase()} ••{inv.savedCard.last4} · needs ZIP</span>
+                      : <span style={chip('#e7f1eb', GREEN)} title="Saved card will be charged">💳 {(inv.savedCard.brand || 'card').toUpperCase()} ••{inv.savedCard.last4}</span>
                     : <span style={chip('#eef0ed', '#7c8a82')}>no card</span>}
                   {inv.viewedAt
                     ? <span style={chip('#efe9f7', '#6b4fa0')} title={`Pay link first opened ${fmtViewed(inv.viewedAt)}`}>👁 Viewed {fmtViewed(inv.viewedAt)}</span>
@@ -208,7 +214,9 @@ export default function BillingRun({ invoices, loading, app, onChanged, onOpenIn
               {isMobile && (
                 <div style={{ flex: '1 1 100%', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                   {inv.savedCard
-                    ? <span style={chip('#e7f1eb', GREEN)}>💳 ••{inv.savedCard.last4}</span>
+                    ? inv.savedCard.needsZip
+                      ? <span style={chip('#fdf2e0', '#b07a1e')}>⚠ ••{inv.savedCard.last4} · needs ZIP</span>
+                      : <span style={chip('#e7f1eb', GREEN)}>💳 ••{inv.savedCard.last4}</span>
                     : <span style={chip('#eef0ed', '#7c8a82')}>no card</span>}
                   {inv.viewedAt ? <span style={chip('#efe9f7', '#6b4fa0')}>👁 {fmtViewed(inv.viewedAt)}</span> : null}
                 </div>
@@ -236,7 +244,12 @@ function totalsOf(rows) {
 
 function ResultBadge({ r }) {
   if (r.outcome === 'charged') return <span style={chip('#e7f1eb', GREEN)} title={r.fee ? `Includes ${money(r.fee)} card surcharge` : ''}>✓ charged{money(r.charged)}</span>
-  if (r.outcome === 'sent') return <span style={chip('#e8eef7', '#2c5aa0')}>✓ sent {r.channel || ''}</span>
+  if (r.outcome === 'sent') {
+    if (r.warn === 'card_missing_zip') {
+      return <span style={chip('#fdf2e0', '#b07a1e')} title="Saved card has no billing ZIP, so it wasn't charged — invoice was sent instead. Client needs to re-save their card.">⚠ needs ZIP — sent instead</span>
+    }
+    return <span style={chip('#e8eef7', '#2c5aa0')}>✓ sent {r.channel || ''}</span>
+  }
   if (r.outcome === 'skipped') return <span style={chip('#eef0ed', '#7c8a82')}>– {r.detail || 'skipped'}</span>
   return <span style={chip('#fdecea', '#9a2c1e')} title={r.detail || ''}>✗ {r.detail || 'failed'}</span>
 }
