@@ -82,6 +82,15 @@ export default function Activity({ app }) {
 
   const WHO = [['all', 'Everyone'], ['randy', 'Trashy Randy'], ['you', 'You']]
 
+  // Rows that reference a client or invoice deep-link there instead of being
+  // inert. Property/route/stop entries have no single target view.
+  const jumpFor = (e) => {
+    if (!app) return null
+    if (e.entityType === 'invoice' && e.entityId && app.openInvoice) return { run: () => app.openInvoice(e.entityId), label: 'Open invoice' }
+    if (e.entityType === 'customer' && e.entityId && app.openClient) return { run: () => app.openClient(e.entityId), label: 'Open client record' }
+    return null
+  }
+
   return (
     <div style={{ maxWidth: 820, margin: '0 auto' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14, flexWrap: 'wrap' }}>
@@ -117,11 +126,19 @@ export default function Activity({ app }) {
             {g.items.map((e, i) => {
               const meta = TYPE_META[e.type] || fallback
               const isRandy = e.actor === 'Trashy Randy'
+              const jump = jumpFor(e)
               return (
                 <div key={e.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 15px', borderTop: i ? '1px solid #f1f3f0' : 'none' }}>
                   <div style={{ width: 30, height: 30, flex: 'none', borderRadius: 8, background: meta.bg, color: meta.color, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, fontWeight: 600 }}>{meta.glyph}</div>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13.5, color: '#1a2420' }}>{e.summary}</div>
+                    <div
+                      onClick={jump ? jump.run : undefined}
+                      title={jump ? jump.label : undefined}
+                      style={{ fontSize: 13.5, color: '#1a2420', cursor: jump ? 'pointer' : 'default' }}
+                    >
+                      {e.summary}
+                      {jump && <span style={{ marginLeft: 6, fontSize: 11, color: '#155e9c', fontWeight: 600 }}>↗</span>}
+                    </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginTop: 2 }}>
                       <span style={{ fontSize: 11, fontWeight: 600, color: isRandy ? '#7a5cc0' : '#5d6b63' }}>{isRandy ? '✦ Trashy Randy' : e.actor}</span>
                     </div>

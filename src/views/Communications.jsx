@@ -30,8 +30,9 @@ const snippet = (r) => {
 }
 const recipient = (r) => (r.channel === 'email' ? r.to_email : r.direction === 'out' ? r.to_number : r.from_number)
 
-function Detail({ row, onClose }) {
+function Detail({ row, onClose, app }) {
   const isEmail = row.channel === 'email'
+  const openClient = () => { if (row.customer_id && app?.openClient) { onClose(); app.openClient(row.customer_id) } }
   return (
     <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(15,25,20,.45)', zIndex: 300, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
       <div onClick={(e) => e.stopPropagation()} style={{ background: '#fff', borderRadius: 14, width: 640, maxWidth: '100%', maxHeight: '88vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -41,7 +42,16 @@ function Detail({ row, onClose }) {
               {isEmail ? (row.subject || '(no subject)') : `${row.direction === 'out' ? 'Text to' : 'Text from'} ${recipient(row)}`}
             </div>
             <div style={{ fontSize: 12, color: '#7c8a82', marginTop: 2 }}>
-              {row.customerName ? `${row.customerName} · ` : ''}{recipient(row)} · {fmtTime(row.created_at)}
+              {row.customerName ? (
+                <span
+                  onClick={openClient}
+                  title={row.customer_id ? 'Open client record' : undefined}
+                  style={row.customer_id ? { color: '#1f7a4d', fontWeight: 600, cursor: 'pointer' } : undefined}
+                >
+                  {row.customerName}
+                </span>
+              ) : null}
+              {row.customerName ? ' · ' : ''}{recipient(row)} · {fmtTime(row.created_at)}
               {row.purpose ? ` · ${PURPOSE_LABEL[row.purpose] || row.purpose}` : ''}
               {row.sent_by ? ` · by ${row.sent_by}` : ''}
             </div>
@@ -68,7 +78,7 @@ function Detail({ row, onClose }) {
   )
 }
 
-export default function Communications() {
+export default function Communications({ app }) {
   const [rows, setRows] = useState(null)
   const [err, setErr] = useState('')
   const [channel, setChannel] = useState('all')
@@ -171,7 +181,15 @@ export default function Communications() {
               </div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 13.5, fontWeight: 600, color: '#1a2420', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {r.customerName || recipient(r)}
+                  {r.customerName ? (
+                    <span
+                      onClick={(e) => { e.stopPropagation(); if (r.customer_id && app?.openClient) app.openClient(r.customer_id) }}
+                      title={r.customer_id ? 'Open client record' : undefined}
+                      style={r.customer_id ? { color: '#155e9c', cursor: 'pointer' } : undefined}
+                    >
+                      {r.customerName}
+                    </span>
+                  ) : recipient(r)}
                   <span style={{ fontWeight: 400, color: '#7c8a82', fontSize: 12 }}> · {recipient(r)}</span>
                 </div>
                 <div style={{ fontSize: 12.5, color: '#5d6b63', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: 1 }}>
@@ -191,7 +209,7 @@ export default function Communications() {
         </button>
       )}
 
-      {sel && <Detail row={sel} onClose={() => setSel(null)} />}
+      {sel && <Detail row={sel} onClose={() => setSel(null)} app={app} />}
     </div>
   )
 }
