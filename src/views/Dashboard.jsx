@@ -240,7 +240,7 @@ export default function Dashboard({ app }) {
               {recentInvoices.map((inv) => {
                 const meta = STATUS_META[inv.status] || STATUS_META.draft
                 return (
-                  <div key={inv.id} onClick={() => go('invoices')} style={{ ...row, cursor: 'pointer' }}>
+                  <div key={inv.id} onClick={() => app.openInvoice(inv.id)} style={{ ...row, cursor: 'pointer' }}>
                     <div style={avatar}>{initialsOf(inv.customerName)}</div>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{inv.customerName || 'Unknown'}</div>
