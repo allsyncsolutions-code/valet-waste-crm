@@ -449,8 +449,22 @@ export default function Invoices({ app }) {
     )
   }
 
-  if (board === 'estimates') {
-    return (
+  // Deep-link from another view (client record → invoice click): select THAT
+  // invoice and neutralize anything that could hide it (search, status/date
+  // filters, a different billing board). Must sit before the conditional
+  // board returns below (hooks order) — hence the eslint disable.
+  useEffect(() => {
+    const f = app.invoiceFocus
+    if (!f) return
+    setBoard('invoices')
+    setSearch('')
+    setFilter('all')
+    setDatePreset('all')
+    setSelId(f.id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [app.invoiceFocus])
+
+  if (board === 'estimates') {    return (
       <div style={{ maxWidth: 1240, margin: '0 auto' }}>
         {boardToggle}
         <EstimatesBoard app={app} />
@@ -982,7 +996,15 @@ function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, on
             </>
           ) : (
             <>
-              <div style={{ fontWeight: 700, fontSize: 14 }}>{inv.customerName || 'Unknown customer'}</div>
+              <div style={{ fontWeight: 700, fontSize: 14, display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+                <span>{inv.customerName || 'Unknown customer'}</span>
+                <span
+                  className="print-hide"
+                  onClick={() => app.openClient?.(inv.customerId)}
+                  title="Open this client's record in the Clients tab"
+                  style={{ fontSize: 11, fontWeight: 600, color: '#1f7a4d', cursor: 'pointer' }}
+                >client record →</span>
+              </div>
               {inv.customerEmail && <div style={{ fontSize: 12.5, color: '#5d6b63', marginTop: 2 }}>{inv.customerEmail}</div>}
               {inv.customerPhone && <div style={{ fontSize: 12.5, color: '#5d6b63', marginTop: 2 }}>{inv.customerPhone}</div>}
               {inv.customerAddress && <div style={{ fontSize: 12.5, color: '#5d6b63', marginTop: 2 }}>{inv.customerAddress}</div>}

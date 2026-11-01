@@ -107,6 +107,14 @@ export default function App({ user, onSignOut }) {
     setInvoicePrefill({ customerId, amount: amount ?? null, description: description || '', tick: Date.now() })
     go('invoices')
   }
+  // Cross-view: clicking an invoice in a client's record jumps to Invoices
+  // with THAT invoice selected (not the top of the list).
+  const [invoiceFocus, setInvoiceFocus] = useState(null) // { id, tick }
+  function openInvoice(invoiceId) {
+    if (!invoiceId) return
+    setInvoiceFocus({ id: invoiceId, tick: Date.now() })
+    go('invoices')
+  }
 
   // AI dock
   const [aiOpen, setAiOpen] = useState(!isMobile)
@@ -320,7 +328,7 @@ export default function App({ user, onSignOut }) {
   }
 
   // bag passed to views
-  const app = { activeLine, activeLineObj, go, openAssistant, askAi, runAi, isMobile, isTablet, user, newPickupTick, openClient, clientFocus, routesMode, setRoutesMode, openInvoiceFor, invoicePrefill }
+  const app = { activeLine, activeLineObj, go, openAssistant, askAi, runAi, isMobile, isTablet, user, newPickupTick, openClient, clientFocus, routesMode, setRoutesMode, openInvoiceFor, invoicePrefill, openInvoice, invoiceFocus }
 
   const views = {
     dashboard: <Dashboard app={app} />,
