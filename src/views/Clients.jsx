@@ -933,9 +933,9 @@ export default function Clients({ app }) {
                   {clientInvoices.slice(0, 8).map((inv) => {
                     const st = inv.status || 'draft'
                     const chip = st === 'paid' ? { color: '#1f7a4d', bg: '#e7f1eb' } : st === 'sent' ? { color: '#155e9c', bg: '#e8f0fa' } : st === 'void' ? { color: '#9aa69e', bg: '#f1f3f0' } : { color: '#8a6414', bg: '#fdf8ec' }
-                    const matched = inv.matchReason ? `On a duplicate record (${inv.matchName || 'another client'}) — matched by ${inv.matchReason}. Clean up with Edit & Merge.` : 'Open the Invoices page'
+                    const matched = inv.matchReason ? `On a duplicate record (${inv.matchName || 'another client'}) — matched by ${inv.matchReason}. Clean up with Edit & Merge.` : 'Open this invoice on the Invoices page'
                     return (
-                      <div key={inv.id} onClick={() => app.go('invoices')} title={matched} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 2px', borderBottom: '1px solid #f1f3f0', cursor: 'pointer' }}>
+                      <div key={inv.id} onClick={() => app.openInvoice(inv.id)} title={matched} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 2px', borderBottom: '1px solid #f1f3f0', cursor: 'pointer' }}>
                         <span style={{ fontFamily: MONO, fontSize: 12, color: '#5d6b63', flex: 'none' }}>{inv.number || '—'}</span>
                         <span style={{ fontSize: 12.5, color: '#7c8a82', flex: 'none' }}>{fmtDay(inv.issue_date || String(inv.created_at).slice(0, 10))}</span>
                         {inv.matchReason && (
