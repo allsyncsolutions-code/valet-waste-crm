@@ -292,12 +292,20 @@ export default function Clients({ app }) {
     [customers, app.activeLine],
   )
   const q = search.toLowerCase().trim()
+  const qDigits = q.replace(/\D/g, '') // phone lookups: ignore formatting
   const list = useMemo(() => {
     let l = lineCustomers
     if (billingFilter !== 'all') l = l.filter((c) => (c.billingType || 'subscription') === billingFilter)
-    if (q) l = l.filter((c) => (c.name + ' ' + c.address).toLowerCase().includes(q) || (addrIdx[c.id] || '').includes(q))
+    if (q) l = l.filter((c) => {
+      const hay = `${c.name || ''} ${c.address || ''} ${c.contactName || ''} ${c.contactPhone || ''} ${c.phone || ''} ${c.email || ''} ${addrIdx[c.id] || ''}`.toLowerCase()
+      if (hay.includes(q)) return true
+      // Digits-only query (7+) also matches against a de-formatted haystack so
+      // "9045551234" finds "(904) 555-1234" and vice versa.
+      if (qDigits.length >= 7 && hay.replace(/\D/g, '').includes(qDigits)) return true
+      return false
+    })
     return l
-  }, [lineCustomers, q, addrIdx, billingFilter])
+  }, [lineCustomers, q, qDigits, addrIdx, billingFilter])
   const cur = lineCustomers.find((c) => c.id === selId) || null
 
   // Switching business line: drop any selection from the previous line.
@@ -749,7 +757,7 @@ export default function Clients({ app }) {
       <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: 8 }}>
         <div style={{ display: 'flex', gap: 8, margin: '6px 6px 8px' }}>
           <div style={{ position: 'relative', flex: 1 }}>
-            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search clients or addresses…" style={searchInput} />
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search name, contact, phone, or address…" style={searchInput} />
             <div style={searchIcon}>⌕</div>
           </div>
           <button onClick={() => { setForm(BLANK); setEditingId(null); setShowForm(true) }} style={{ flex: 'none', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 9, padding: '0 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' }}>+ Add client</button>

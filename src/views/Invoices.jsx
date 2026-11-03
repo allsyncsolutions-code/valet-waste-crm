@@ -1237,7 +1237,13 @@ function CustomerSelect({ customers, value, onChange, onAddNew, disabled }) {
   }
 
   const q = query.trim().toLowerCase()
-  const filtered = q ? customers.filter((c) => (c.name || '').toLowerCase().includes(q)) : customers
+  const qDigits = q.replace(/\D/g, '')
+  const filtered = q ? customers.filter((c) => {
+    const hay = `${c.name || ''} ${c.contactName || ''} ${c.contactPhone || ''} ${c.phone || ''} ${c.email || ''}`.toLowerCase()
+    if (hay.includes(q)) return true
+    if (qDigits.length >= 7 && hay.replace(/\D/g, '').includes(qDigits)) return true
+    return false
+  }) : customers
   // Typed a name nobody in the system matches → offer to add them. Exact
   // (case-insensitive) matches mean they're already in the system.
   const exact = q && customers.some((c) => (c.name || '').toLowerCase() === q)

@@ -77,10 +77,11 @@ export async function loadComms({ channel = 'all', direction = 'all', status = '
 }
 
 export async function searchCustomers(term) {
+  const like = `%${term}%`
   const { data, error } = await supabase
     .from('customers')
     .select('id, name, email, phone')
-    .ilike('name', `%${term}%`)
+    .or(`name.ilike.${like},contact_name.ilike.${like},contact_phone.ilike.${like},phone.ilike.${like},email.ilike.${like}`)
     .order('name')
     .limit(8)
   if (error) throw error

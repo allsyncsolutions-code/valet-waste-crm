@@ -22,7 +22,7 @@ async function searchClients(q) {
   const { data: byCustomer, error } = await supabase
     .from('customers')
     .select('id, name, contact_name, email, phone, address, portal_slug, autopay_pm_id, autopay_card_brand, autopay_card_last4')
-    .or(`name.ilike.${like},contact_name.ilike.${like},email.ilike.${like},phone.ilike.${like},address.ilike.${like}`)
+    .or(`name.ilike.${like},contact_name.ilike.${like},contact_phone.ilike.${like},email.ilike.${like},phone.ilike.${like},address.ilike.${like}`)
     .order('name')
     .limit(12)
   if (error) throw error
