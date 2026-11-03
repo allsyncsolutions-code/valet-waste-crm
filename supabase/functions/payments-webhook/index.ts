@@ -92,6 +92,29 @@ async function invoiceLabel(invoiceId: string): Promise<string> {
   }
 }
 
+// ---- decline decoding (compact form for SMS; full note lives on the invoice) ----
+// Codes we can name confidently (TSYS/Genesis docs + codes seen on our account).
+// Everything else shows the raw "text (code NNN)" — never an invented meaning.
+const DECLINE_CODES: Record<string, string> = {
+  "500": "bank declined with no specific reason",
+  "505": "insufficient funds",
+  "510": "CVN mismatch",
+  "541": "expired card",
+  "591": "issuer unavailable — retry later",
+  "595": "surcharge not supported — check billing ZIP",
+}
+// Likely causes for a generic 500, in short-text form.
+const GENERIC_500_SHORT =
+  "likely: bank fraud block, card not open for recurring/online charges, card closed/not activated, ZIP on file mismatch, or a limit — customer should call the number on the back of the card"
+
+function declineSummary(p: Record<string, unknown>): string {
+  const code = p.response_code != null ? String(p.response_code) : ""
+  const text = String(p.response_text || p.resp_text || "Declined")
+  if (code === "500") return `${text} (code 500: ${DECLINE_CODES["500"]}; ${GENERIC_500_SHORT})`
+  if (code && DECLINE_CODES[code]) return `${text} (code ${code}: ${DECLINE_CODES[code]})`
+  return code ? `${text} (code ${code})` : text
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: { "Access-Control-Allow-Origin": "*" } })
   const ok = () => new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } })
@@ -151,9 +174,17 @@ Deno.serve(async (req) => {
       }
     } else if (type === "transaction.decline" && invoiceId) {
       // Declines don't change invoice status (it stays 'sent' for retry/manual),
-      // but the team should know a payment attempt bounced.
+      // but the team should know a payment attempt bounced — and why. Persist
+      // the reason on the invoice too, so it survives reloads.
+      try {
+        await sbPatch(`invoices?id=eq.${invoiceId}`, {
+          decline_code: p.response_code != null ? String(p.response_code) : null,
+          decline_note: declineSummary(p),
+          declined_at: new Date().toISOString(),
+        })
+      } catch (_e) { /* persistence is best-effort; the text still goes out */ }
       const label = await invoiceLabel(String(invoiceId))
-      await textAdmins(`⚠️ Payment DECLINED for ${label}${p.resp_text ? ` — ${p.resp_text}` : ""} — Trashy Randy`)
+      await textAdmins(`⚠️ Payment DECLINED for ${label} — ${declineSummary(p)} — Trashy Randy`)
     } else if ((type === "transaction.refund" || type === "transaction.partialrefund") && invoiceId) {
       // A full refund reopens the invoice; partial refunds leave it paid.
       if (type === "transaction.refund") {

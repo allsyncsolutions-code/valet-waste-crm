@@ -99,6 +99,9 @@ function mapInvoice(row) {
     paymentMethod: row.payment_method || null,
     checkNumber: row.check_number || '',
     paymentNote: row.payment_note || '',
+    declineCode: row.decline_code || '',
+    declineNote: row.decline_note || '',
+    declinedAt: row.declined_at || null,
     createdAt: row.created_at,
     items,
   }
@@ -381,6 +384,10 @@ export async function markPaid(id, number, opts = {}) {
   const extra = { paid_at: new Date().toISOString(), payment_method: method }
   if (method === 'check') extra.check_number = (opts.checkNumber || '').trim() || null
   extra.payment_note = (opts.note || '').trim() || null
+  // A paid invoice has no open decline hanging over it.
+  extra.decline_code = null
+  extra.decline_note = null
+  extra.declined_at = null
   await setInvoiceStatus(id, 'paid', extra)
   const how = [paymentMethodLabel(method), method === 'check' && extra.check_number ? `#${extra.check_number}` : ''].filter(Boolean).join(' ')
   logActivity({ type: 'invoice_paid', summary: `Marked invoice ${number || ''} paid${how ? ` — ${how}` : ''}`.replace('  ', ' ').trim(), entityType: 'invoice', entityId: id })

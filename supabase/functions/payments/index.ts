@@ -264,6 +264,35 @@ async function runVaultCreate(env: string, token: string, body: Record<string, u
   return d
 }
 
+// ---- decline explanations -------------------------------------------------------
+// Run/TSYS response codes we can name confidently — from TSYS/Genesis docs and
+// codes observed on our own account (595 = the Oct surcharge/ZIP case). Codes
+// not in the map fall back to the raw "text (code NNN)" so we never invent a
+// meaning.
+const DECLINE_CODES: Record<string, string> = {
+  "500": "Decline — the bank declined without giving a specific reason",
+  "505": "Insufficient funds",
+  "510": "CVN mismatch — the card security code we have is wrong",
+  "541": "Expired card",
+  "591": "Issuer unavailable — worth one retry later",
+  "595": "Surcharge not supported — usually the billing ZIP on file is missing or wrong",
+}
+
+// What staff can tell a customer when the bank gives no detail (code 500).
+// Only the cardholder hears the real reason from the bank.
+const GENERIC_DECLINE_REASONS =
+  "Likely causes: a bank fraud/risk block (common on first card-on-file charges), the card restricted for online or recurring payments, the card not activated or the account closed, the billing ZIP on file with us not matching the bank's, a daily or per-transaction limit, or the bank returning insufficient funds generically. " +
+  "The customer should call the number on the back of the card — the bank only tells the cardholder the specific reason. Don't keep retrying; repeated attempts can trigger more fraud blocks."
+
+function explainDecline(res: Record<string, unknown>): { summary: string, note: string } {
+  const code = res.response_code != null ? String(res.response_code) : ""
+  const text = String(res.resp_text || "Declined")
+  const known = code ? DECLINE_CODES[code] : undefined
+  const summary = known ? `${DECLINE_CODES[code]} (code ${code})` : `${text}${code ? ` (code ${code})` : ""}`
+  const note = code === "500" || (!known && !code) ? `${summary}. ${GENERIC_DECLINE_REASONS}` : `${summary}.`
+  return { summary, note }
+}
+
 // ---- invoice email (SendGrid) -------------------------------------------------
 // Plain-text fallback for the invoice email (same content as the HTML below).
 function invoiceEmailText(c: Record<string, unknown>, s: Record<string, unknown>, inv: Record<string, unknown>, items: Array<Record<string, unknown>>, url: string) {
@@ -846,12 +875,22 @@ Deno.serve(async (req) => {
                 run_trans_id: String(res.trans_id),
                 surcharge_amount: fee,
                 payment_method: "card",
+                decline_code: null,
+                decline_note: null,
+                declined_at: null,
               })
               await sendReceiptEmail(cust, inv, Number(inv.total || 0), fee, String(res.trans_id || ""))
               Object.assign(row, { outcome: "charged", charged: Number(inv.total || 0), fee })
             } else {
               // Declined — invoice stays 'sent' for retry/manual follow-up.
-              Object.assign(row, { outcome: "failed", detail: res.resp_text || res.result || "Declined" })
+              // Record the why on the invoice so it survives the board reload.
+              const why = explainDecline(res)
+              await sbPatch(`invoices?id=eq.${inv.id}`, {
+                decline_code: res.response_code != null ? String(res.response_code) : null,
+                decline_note: why.note,
+                declined_at: new Date().toISOString(),
+              })
+              Object.assign(row, { outcome: "failed", detail: why.summary })
             }
           } else {
             // No usable card on file: send the invoice (email, else SMS).
@@ -1029,7 +1068,15 @@ Deno.serve(async (req) => {
         }
       }
       if (res.result !== "A") {
-        return json({ ok: false, declined: true, result: res.result, resp_text: res.resp_text || "Declined", trans_id: res.trans_id || null })
+        // Persist the why on the invoice (survives reloads) and hand the
+        // caller the explained summary for the modal.
+        const why = explainDecline(res)
+        await sbPatch(`invoices?id=eq.${inv.id}`, {
+          decline_code: res.response_code != null ? String(res.response_code) : null,
+          decline_note: why.note,
+          declined_at: new Date().toISOString(),
+        }).catch(() => { /* decline persistence is best-effort */ })
+        return json({ ok: false, declined: true, result: res.result, resp_text: why.summary, trans_id: res.trans_id || null })
       }
 
       // The processor applies the surcharge on top of `amount` and reports it
@@ -1044,6 +1091,9 @@ Deno.serve(async (req) => {
         tip_amount: tip,
         surcharge_amount: fee,
         payment_method: isAch ? "ach" : "card",
+        decline_code: null,
+        decline_note: null,
+        declined_at: null,
       }
       await sbPatch(`invoices?id=eq.${inv.id}`, patch)
 
