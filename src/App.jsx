@@ -20,6 +20,9 @@ import JobCalendar from './views/JobCalendar.jsx'
 import EmployeePay from './views/EmployeePay.jsx'
 import MyDay from './views/MyDay.jsx'
 import TimeSheets from './views/TimeSheets.jsx'
+import Annotations from './views/Annotations.jsx'
+import { IssueReportButton } from './components/IssueReport.jsx'
+import './issue-report.css'
 import Portal from './views/Portal.jsx'
 import WebForms from './views/WebForms.jsx'
 import Reports from './views/Reports.jsx'
@@ -53,6 +56,7 @@ const NAV_FIELD = [
   { id: 'team', glyph: '⚇', label: 'Team' },
   { id: 'portal', glyph: '◫', label: 'Client Portal' },
   { id: 'webforms', glyph: '⇪', label: 'Web Forms' },
+  { id: 'annotations', glyph: '🚩', label: 'Annotations' },
   { id: 'settings', glyph: '⚙', label: 'Settings' },
 ]
 const BOTTOM_NAV = [
@@ -250,6 +254,7 @@ export default function App({ user, onSignOut }) {
     notifications: ['Notifications', 'Every message the system sends — flip each type on or off, and see which clients opted out'],
     announcements: ['Announcements', 'Blast a text or email to every client matching a filter set'],
     employees: ['Employees', 'Lawn jobs, per-job pay, overrides, and timesheets (Sun–Sat)'],
+    annotations: ['Annotations', 'Report a problem or idea from any screen — Annotate pins it, the team tracks it here'],
   }
   const [viewTitle, viewSubtitle] = VIEW_META[activeView] || VIEW_META.dashboard
 
@@ -349,6 +354,7 @@ export default function App({ user, onSignOut }) {
     announcements: <Announcements app={app} />,
     communications: <Communications app={app} />,
     employees: <EmployeePay app={app} />,
+    annotations: <Annotations app={app} />,
   }
 
   const showInlineDock = aiOpen && !isMobile && !isTablet
@@ -499,6 +505,7 @@ export default function App({ user, onSignOut }) {
                 <span style={{ fontSize: 15, lineHeight: 1 }}>+</span> New pickup
               </button>
             )}
+            {!isMobile && !isTech && <IssueReportButton screen={activeView} user={user} />}
           </div>
         </header>
 
