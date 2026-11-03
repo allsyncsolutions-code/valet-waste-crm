@@ -173,10 +173,13 @@ export default function Invoices({ app }) {
   const list = useMemo(() => {
     let rows = filter === 'all' ? dateFiltered : dateFiltered.filter((i) => i.status === filter)
     const q = search.trim().toLowerCase()
-    if (q) rows = rows.filter((i) =>
-      (i.customerName || '').toLowerCase().includes(q) ||
-      (i.number || '').toLowerCase().includes(q)
-    )
+    const qDigits = q.replace(/\D/g, '') // phone lookups: ignore formatting
+    if (q) rows = rows.filter((i) => {
+      const hay = `${i.customerName || ''} ${i.customerContact || ''} ${i.customerPhone || ''} ${i.customerEmail || ''} ${i.number || ''}`.toLowerCase()
+      if (hay.includes(q)) return true
+      if (qDigits.length >= 7 && hay.replace(/\D/g, '').includes(qDigits)) return true
+      return false
+    })
     return rows
   }, [dateFiltered, filter, search])
   const cur = invoices.find((i) => i.id === selId) || null
@@ -536,7 +539,7 @@ export default function Invoices({ app }) {
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search by client or invoice #…"
+              placeholder="Search client, contact, phone, or invoice #…"
               style={{ ...inp, fontSize: 13, padding: '8px 30px 8px 11px' }}
             />
             {search && (

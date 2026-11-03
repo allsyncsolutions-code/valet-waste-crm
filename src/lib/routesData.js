@@ -111,6 +111,8 @@ function mapStop(row) {
     isNew: isNewProperty(row.properties?.created_at),
     customerId: row.properties?.customer_id || null,
     clientName: row.properties?.customers?.name || null,
+    clientContact: row.properties?.customers?.contact_name || null,
+    clientPhone: row.properties?.customers?.contact_phone || row.properties?.customers?.phone || null, // POC number wins
     tags: tagsOf(row.properties?.customers),
     pickupDays: row.properties?.pickup_days || [],
     pickupFrequency: row.properties?.pickup_frequency || null,
@@ -174,7 +176,7 @@ export async function loadRouteSlice(code = 'B', date = null, line = null) {
 
   const { data: stopRows, error: sErr } = await supabase
     .from('route_stops')
-    .select('id, property_id, seq, status, service, time_window, lat, lng, skip_reason, skipped_by, properties(name, address, service, lat, lng, needs_review, created_at, customer_id, pickup_days, pickup_frequency, customers(name, customer_tags(tag:tags(id,name,color))))')
+    .select('id, property_id, seq, status, service, time_window, lat, lng, skip_reason, skipped_by, properties(name, address, service, lat, lng, needs_review, created_at, customer_id, pickup_days, pickup_frequency, customers(name, phone, contact_name, contact_phone, customer_tags(tag:tags(id,name,color))))')
     .eq('route_id', route.id)
     .order('seq', { ascending: true })
   if (sErr) throw sErr

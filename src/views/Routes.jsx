@@ -976,11 +976,19 @@ export default function RoutesView({ app }) {
   const doneCount = stops.filter((s) => s.status === 'done').length
 
   // Stop-list search: filter what's displayed (reordering still works on the
-  // full list, so seq numbers stay true to the real route order).
+  // full list, so seq numbers stay true to the real route order). Matches the
+  // business, address, contact name, and either phone number; digit-only
+  // queries ignore formatting so "9045551234" finds "(904) 555-1234".
   const visibleStops = useMemo(() => {
     const q = stopQuery.trim().toLowerCase()
     if (!q) return stops
-    return stops.filter((st) => `${st.name} ${st.address} ${st.clientName || ''} ${st.service}`.toLowerCase().includes(q))
+    const qDigits = q.replace(/\D/g, '')
+    return stops.filter((st) => {
+      const hay = `${st.name} ${st.address} ${st.clientName || ''} ${st.clientContact || ''} ${st.clientPhone || ''} ${st.service}`.toLowerCase()
+      if (hay.includes(q)) return true
+      if (qDigits.length >= 7 && hay.replace(/\D/g, '').includes(qDigits)) return true
+      return false
+    })
   }, [stops, stopQuery])
 
   return (
@@ -1171,7 +1179,7 @@ export default function RoutesView({ app }) {
           </div>
           {/* search within this route — no more scrolling to find a stop */}
           <div style={{ position: 'relative', padding: '0 14px 8px' }}>
-            <input value={stopQuery} onChange={(e) => setStopQuery(e.target.value)} placeholder="Search stops — name, address, client…" style={{ width: '100%', boxSizing: 'border-box', border: '1px solid #dde2dd', background: '#f7f9f7', borderRadius: 9, padding: '8px 11px 8px 30px', fontSize: 13, color: '#1a2420', outline: 'none' }} />
+            <input value={stopQuery} onChange={(e) => setStopQuery(e.target.value)} placeholder="Search stops — name, contact, phone, address…" style={{ width: '100%', boxSizing: 'border-box', border: '1px solid #dde2dd', background: '#f7f9f7', borderRadius: 9, padding: '8px 11px 8px 30px', fontSize: 13, color: '#1a2420', outline: 'none' }} />
             <div style={{ position: 'absolute', left: 24, top: 8, color: '#9aa69e', fontSize: 13 }}>⌕</div>
             {stopQuery && <div onClick={() => setStopQuery('')} style={{ position: 'absolute', right: 24, top: 8, color: '#9aa69e', fontSize: 13, cursor: 'pointer' }}>✕</div>}
           </div>

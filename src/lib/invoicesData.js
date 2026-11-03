@@ -64,6 +64,7 @@ function mapInvoice(row) {
     id: row.id,
     customerId: row.customer_id,
     customerName: row.customers?.name || '',
+    customerContact: row.customers?.contact_name || '',
     customerEmail: row.customers?.email || '',
     customerPhone: row.customers?.contact_phone || row.customers?.phone || '',
     customerAddress: row.customers?.address || '',
@@ -103,7 +104,7 @@ function mapInvoice(row) {
   }
 }
 
-const SELECT = '*, customers(name,email,phone,contact_phone,address,business_line,run_vault_id,run_card_brand,run_card_last4,run_card_zip), invoice_line_items(*)'
+const SELECT = '*, customers(name,email,phone,contact_name,contact_phone,address,business_line,run_vault_id,run_card_brand,run_card_last4,run_card_zip), invoice_line_items(*)'
 
 export async function loadInvoices(line) {
   const { data, error } = await supabase
