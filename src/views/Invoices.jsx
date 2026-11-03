@@ -1066,6 +1066,14 @@ function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, on
           </div>
         )}
 
+        {/* last card attempt declined — the "why" recorded by payments/webhook */}
+        {inv.status !== 'paid' && inv.status !== 'void' && inv.declineNote && (
+          <div className="print-hide" style={{ marginTop: 10, background: '#fdecea', border: '1px solid #f3b7b0', borderRadius: 9, padding: '8px 12px', fontSize: 12, color: '#9a2c1e' }}>
+            <b>Card declined{inv.declinedAt ? ` ${new Date(inv.declinedAt).toLocaleDateString()}` : ''}{inv.declineCode ? ` (code ${inv.declineCode})` : ''}</b>
+            <div style={{ marginTop: 2 }}>{inv.declineNote}</div>
+          </div>
+        )}
+
         {/* manually attached items not tied to a line's stop: images in a grid,
             other files (PDFs, receipts…) as download chips */}
         {loosePhotos.length > 0 && (
