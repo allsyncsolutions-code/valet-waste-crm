@@ -451,6 +451,11 @@ async function sendInvoiceEmail(to: string, subject: string, html: string, text:
       personalizations: [{ to: [{ email: to }] }],
       from: { email: from, name: fromName },
       subject,
+      // Deliverability: keep the Pay Now href pointing straight at the portal.
+      // SendGrid's default click tracking would rewrite it to a sendgrid.net
+      // URL while the email displays the real valetwastefla.com link — that
+      // visible/actual URL mismatch is a classic spam/phishing flag.
+      tracking_settings: { click_tracking: { enable: false }, open_tracking: { enable: false } },
       content: [
         { type: "text/plain", value: text },
         { type: "text/html", value: html },
@@ -604,6 +609,7 @@ async function sendReceiptEmail(cust: Record<string, unknown>, inv: Record<strin
         personalizations: [{ to: [{ email: cust.email }] }],
         from: { email: from, name: company },
         subject,
+        tracking_settings: { click_tracking: { enable: false }, open_tracking: { enable: false } },
         content: [{ type: "text/plain", value: text }, { type: "text/html", value: html }],
       }),
     })
