@@ -57,7 +57,7 @@ Deno.serve(async (req) => {
   const screenshotUrl = body.screenshot_url ? String(body.screenshot_url) : null;
   const videoUrl = body.video_url ? String(body.video_url) : null;
 
-  const base = (body.origin || Deno.env.get("APP_URL") || "https://app.valetwastefla.com").replace(/\/+$/, "");
+  const base = (body.origin || Deno.env.get("APP_URL") || "https://valet-waste-crm.vercel.app").replace(/\/+$/, "");
   const link = `${base}/`;
 
   const SENDGRID_API_KEY = Deno.env.get("SENDGRID_API_KEY")

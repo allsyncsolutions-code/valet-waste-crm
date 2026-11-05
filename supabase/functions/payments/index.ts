@@ -453,7 +453,7 @@ async function sendInvoiceEmail(to: string, subject: string, html: string, text:
       subject,
       // Deliverability: keep the Pay Now href pointing straight at the portal.
       // SendGrid's default click tracking would rewrite it to a sendgrid.net
-      // URL while the email displays the real valetwastefla.com link — that
+      // URL while the email displays the real portal link — that
       // visible/actual URL mismatch is a classic spam/phishing flag.
       tracking_settings: { click_tracking: { enable: false }, open_tracking: { enable: false } },
       content: [
