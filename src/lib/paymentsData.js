@@ -5,7 +5,18 @@ import { supabase } from './supabaseClient.js'
 
 async function call(body) {
   const { data, error } = await supabase.functions.invoke('payments', { body })
-  if (error) throw error
+  if (error) {
+    // Edge functions answer 4xx/500 with a JSON { error: "…" } body. supabase-js
+    // surfaces every non-2xx as the generic "Edge function returned a non-2xx
+    // status code" — dig the real message out of the response so staff see WHAT
+    // failed (e.g. "This saved card has no billing ZIP on file…").
+    let msg = error.message || String(error)
+    try {
+      const j = await error.context?.json?.()
+      if (j && j.error) msg = j.error
+    } catch (_e) { /* keep msg */ }
+    throw new Error(msg)
+  }
   if (data && data.error) throw new Error(data.error)
   return data
 }

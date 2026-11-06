@@ -428,6 +428,17 @@ export default function RoutesView({ app }) {
     }
   }, [showNewStop])
 
+  async function finishAddStop(res) {
+    if (res.stopId) pushPlanUndo({ kind: 'added', stopIds: [res.stopId], routeId: res.route?.id, code: routeCode, date: routeSel })
+    setShowNewStop(false)
+    setDupPrompt(null)
+    setNewStop(BLANK_STOP)
+    await refresh(routeSel)
+    if (!res.geocoded) {
+      setErr("Added to the route, but I couldn't locate that address on the map — double-check the address if it should appear as a pin.")
+    }
+  }
+
   async function submitNewStop(e) {
     e.preventDefault()
     if (savingStop) return
@@ -452,17 +463,41 @@ export default function RoutesView({ app }) {
         name: newStop.name, address: addr, service: newStop.service, customerId: custId, price: hasPrice ? price : null,
         jobTitle: newStop.title, jobDescription: newStop.description, jobPrice: hasPrice ? price : null,
       })
-      if (res.stopId) pushPlanUndo({ kind: 'added', stopIds: [res.stopId], routeId: res.route?.id, code: routeCode, date: routeSel })
-      setShowNewStop(false)
-      setNewStop(BLANK_STOP)
-      await refresh(routeSel)
-      if (!res.geocoded) {
-        setErr("Added to the route, but I couldn't locate that address on the map — double-check the address if it should appear as a pin.")
+      await finishAddStop(res)
+    } catch (e2) {
+      // The address already exists on this client. Ask whether this is an
+      // on-demand pickup for that existing address (see the prompt modal).
+      if (e2 && e2.code === 'DUPLICATE_ADDRESS') {
+        setDupPrompt({ property: e2.property })
+      } else {
+        setErr(e2.message || String(e2))
       }
+    }
+    setSavingStop(false)
+  }
+
+  // ---- duplicate-address prompt (on-demand pickup on an existing address) ----
+  const [dupPrompt, setDupPrompt] = useState(null) // { property } from addOneOffStop's DUPLICATE_ADDRESS error
+  const [dupBusy, setDupBusy] = useState(false)
+
+  async function confirmDupYes() {
+    if (dupBusy || !dupPrompt) return
+    const addr = newStop.address.trim()
+    const price = parseFloat(newStop.price)
+    const hasPrice = !isNaN(price) && price > 0
+    setDupBusy(true)
+    setErr(null)
+    try {
+      const res = await addOneOffStop(routeCode, routeSel, {
+        name: newStop.name, address: addr, service: newStop.service, customerId: newStop.customerId, price: hasPrice ? price : null,
+        jobTitle: newStop.title, jobDescription: newStop.description, jobPrice: hasPrice ? price : null,
+        reusePropertyId: dupPrompt.property.id,
+      })
+      await finishAddStop(res)
     } catch (e2) {
       setErr(e2.message || String(e2))
     }
-    setSavingStop(false)
+    setDupBusy(false)
   }
 
   // ---- mass-add modal ----
@@ -1531,6 +1566,27 @@ export default function RoutesView({ app }) {
               <button type="submit" disabled={savingStop} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 10, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: savingStop ? 0.7 : 1 }}>{savingStop ? 'Adding…' : 'Add to route'}</button>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* duplicate-address prompt: is this an on-demand pickup for the
+          existing address? Yes attaches the stop to the existing property
+          instead of creating a second copy of it. */}
+      {dupPrompt && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(15,30,20,.42)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 501, padding: 16 }}>
+          <div style={{ background: '#fff', borderRadius: 14, padding: 22, width: 420, maxWidth: '100%', boxShadow: '0 24px 60px rgba(15,30,20,.28)' }}>
+            <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 10 }}>Duplicate address</div>
+            <p style={{ margin: '0 0 10px', fontSize: 14, color: '#3d4a43', lineHeight: 1.5 }}>
+              <b>{newStop.address.trim()}</b> already exists for this client as <b>{dupPrompt.property.name}</b>.
+            </p>
+            <p style={{ margin: '0 0 16px', fontSize: 14, color: '#3d4a43', lineHeight: 1.5 }}>
+              Is this an on-demand pickup being added to this address?
+            </p>
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <button type="button" onClick={() => setDupPrompt(null)} disabled={dupBusy} style={ghostBtn}>No</button>
+              <button type="button" onClick={confirmDupYes} disabled={dupBusy} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 10, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: dupBusy ? 0.7 : 1 }}>{dupBusy ? 'Adding…' : 'Yes, add the pickup'}</button>
+            </div>
+          </div>
         </div>
       )}
 
