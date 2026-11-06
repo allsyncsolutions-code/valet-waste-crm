@@ -958,7 +958,7 @@ export async function ensureRoute(code, date) {
 // create a recurring schedule — it only lands on this one date's route.
 // jobTitle/jobDescription/jobPrice ride on the stop itself (mig 0043) and are
 // what the driver's check-in/out "add to invoice" popup bills from.
-export async function addOneOffStop(code, date, { name, address, service, customerId, price, jobTitle, jobDescription, jobPrice } = {}) {
+export async function addOneOffStop(code, date, { name, address, service, customerId, price, jobTitle, jobDescription, jobPrice, reusePropertyId } = {}) {
   const addr = String(address || '').trim()
   if (!addr) throw new Error('An address is required.')
   if (!date) throw new Error('A date is required.')
@@ -967,19 +967,60 @@ export async function addOneOffStop(code, date, { name, address, service, custom
   let loc = null
   try { loc = await geocodeAddress(addr) } catch (e) { loc = null }
 
-  const { data: prop, error: pErr } = await supabase
-    .from('properties')
-    .insert({
-      name: (name && name.trim()) || addr,
-      address: addr,
-      service: service || null,
-      customer_id: customerId || null,
-      price: price != null ? price : null,
-      lat: loc ? loc.lat : null,
-      lng: loc ? loc.lng : null,
-    })
-    .select('id, name, service, lat, lng').single()
-  if (pErr) throw pErr
+  let prop
+  if (reusePropertyId) {
+    // The user confirmed the duplicate-address prompt: skip creating a new
+    // property and attach the one-off stop to the existing one instead.
+    const { data: existing, error: exErr } = await supabase
+      .from('properties').select('id, name, service, lat, lng').eq('id', reusePropertyId).single()
+    if (exErr || !existing) throw new Error('That existing address was not found — try again.')
+    prop = existing
+  } else {
+    const { data, error: pErr } = await supabase
+      .from('properties')
+      .insert({
+        name: (name && name.trim()) || addr,
+        address: addr,
+        service: service || null,
+        customer_id: customerId || null,
+        price: price != null ? price : null,
+        lat: loc ? loc.lat : null,
+        lng: loc ? loc.lng : null,
+      })
+      .select('id, name, service, lat, lng').single()
+    if (pErr) {
+      // The properties_reject_same_client_dupe trigger blocks an identical
+      // address on the same client. Surface it as a typed error so the caller
+      // can offer "add an on-demand pickup to the existing address instead?"
+      if (/duplicate address/i.test(pErr.message || '') && customerId) {
+        const { data: rowsRaw } = await supabase
+          .from('properties').select('id, name, address, service, lat, lng').eq('customer_id', customerId)
+        // Same normalization the DB trigger uses (rpc; fall back to the
+        // client-side normalizer if the SQL function isn't callable).
+        const viaServer = async (a) => {
+          const { data, error } = await supabase.rpc('norm_address', { a })
+          return error ? null : data
+        }
+        const rows = rowsRaw || []
+        const want = await viaServer(addr)
+        let match = null
+        if (want != null) {
+          const norms = await Promise.all(rows.map((r) => viaServer(r.address)))
+          match = rows.find((_, i) => norms[i] === want)
+        } else {
+          match = rows.find((r) => r.address && normAddress(r.address) === normAddress(addr))
+        }
+        if (match) {
+          const e = new Error(`Duplicate address: "${addr}" already exists on this client.`)
+          e.code = 'DUPLICATE_ADDRESS'
+          e.property = match
+          throw e
+        }
+      }
+      throw pErr
+    }
+    prop = data
+  }
 
   const route = await ensureRoute(code, date)
   const { data: existing, error: eErr } = await supabase
