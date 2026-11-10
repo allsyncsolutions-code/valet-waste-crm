@@ -21,11 +21,14 @@ const money = (v) => '$' + Number(v || 0).toLocaleString(undefined, { minimumFra
 const BRANDS = { 1: 'Visa', 2: 'Mastercard', 3: 'Discover', 4: 'Amex' }
 
 const fmtDate = (ts) => {
-  try { return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) } catch { return '' }
+  try { return new Date(norm(ts)).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) } catch { return '' }
 }
 const fmtTime = (ts) => {
-  try { return new Date(ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) } catch { return '' }
+  try { return new Date(norm(ts)).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) } catch { return '' }
 }
+// Run's timestamps carry 4–6 fractional-second digits; JS Date only parses
+// exactly 3 (Safari rejects the rest outright) — strip them before parsing.
+const norm = (ts) => (typeof ts === 'string' ? ts.replace(/\.\d+Z$/, 'Z') : ts)
 
 // ---- date-range presets (local time) ----------------------------------------
 const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
@@ -60,11 +63,12 @@ export default function Payments({ app }) {
     return p.range()
   }, [preset, custom])
 
+  const kind = tab === 'funding' ? 'deposits' : 'transactions'
   const load = async () => {
     setLoading(true)
     setErr('')
     try {
-      const d = await runReporting(tab === 'funding' ? 'deposits' : 'transactions', range[0], range[1])
+      const d = await runReporting(kind, range[0], range[1])
       setData(d)
     } catch (e) {
       setErr((e && e.message) || String(e))
@@ -75,8 +79,12 @@ export default function Payments({ app }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { load() }, [tab, preset, custom.from, custom.to])
 
-  const items = (data && data.items) || []
-  const summary = (data && data.summary) || {}
+  // While a new sub-tab/range loads, the previous response may still be in
+  // state — never render it under the wrong table (that's how transactions
+  // briefly showed up as "Invalid Date" funding rows).
+  const showData = data && data.kind === kind ? data : null
+  const items = (showData && showData.items) || []
+  const summary = (showData && showData.summary) || {}
   const isTx = tab === 'transactions'
 
   return (
@@ -124,9 +132,9 @@ export default function Payments({ app }) {
       </div>
 
       {err && <div style={{ ...card, borderColor: '#f0c9c5', color: RED, fontSize: 13, marginBottom: 14 }}>{err}</div>}
-      {loading && !data && <div style={{ ...card, color: '#7c8a82', fontSize: 13 }}>Loading from Run Merchant…</div>}
+      {loading && !showData && <div style={{ ...card, color: '#7c8a82', fontSize: 13 }}>Loading from Run Merchant…</div>}
 
-      {data && !err && (
+      {showData && !err && (
         <>
           {/* Summary cards */}
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(4, 1fr)', gap: 10, marginBottom: 14 }}>
