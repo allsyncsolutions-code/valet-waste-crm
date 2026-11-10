@@ -6,7 +6,7 @@
 // client portal for people who want the whole hub.
 import { useEffect, useRef, useState } from 'react'
 import { supabase } from '../lib/supabaseClient.js'
-import { loadRunner, tokenizeCard, initRunnerForm, ACH_ENABLED } from '../lib/runnerJs.js'
+import { loadRunner, tokenizeCard, tokenizeError, initRunnerForm, ACH_ENABLED } from '../lib/runnerJs.js'
 import { markInvoiceViewed } from '../lib/paymentsData.js'
 import { RichText } from '../components/RichText.jsx'
 import { TipPicker } from '../components/TipPicker.jsx'
@@ -96,6 +96,11 @@ export default function PayPage({ slug, invoiceId }) {
     setErr('')
     try {
       const t = await tokenizeCard(runnerRef.current)
+      const tokErr = tokenizeError(t)
+      if (tokErr) {
+        console.warn('[pay] tokenize error:', tokErr)
+        throw new Error(`The card details couldn't be verified: ${tokErr}. Please re-check the number and try again.`)
+      }
       if (!t || (!t.account_token && !t.token)) {
         console.warn('[pay] empty tokenize response:', t)
         throw new Error(isAch

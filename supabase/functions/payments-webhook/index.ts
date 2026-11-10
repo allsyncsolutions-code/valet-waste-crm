@@ -159,7 +159,7 @@ Deno.serve(async (req) => {
     // Approvals can arrive as transaction.entered with result A, or as a
     // dedicated approval event. Declines/refunds update accordingly.
     if (type === "transaction.entered" && result === "A" && invoiceId) {
-      const inv = (await sbGet(`invoices?id=eq.${invoiceId}&select=id,status`))[0]
+      const inv = (await sbGet(`invoices?id=eq.${invoiceId}&select=id,status,tip_amount`))[0]
       if (inv && inv.status !== "paid") {
         await sbPatch(`invoices?id=eq.${invoiceId}`, {
           status: "paid",
@@ -168,9 +168,11 @@ Deno.serve(async (req) => {
           run_trans_id: String(transId || ""),
           payment_method: "card",
         })
-        // Only text on the transition — dedupe/replays stay quiet.
+        // Only text on the transition — dedupe/replays stay quiet. Tips ride
+        // along so the team sees the full amount collected at a glance.
         const label = await invoiceLabel(String(invoiceId))
-        await textAdmins(`💵 PAID: ${label}${p.resp_text ? ` (${p.resp_text})` : ""} — Trashy Randy`)
+        const tip = Number(inv.tip_amount || 0)
+        await textAdmins(`💵 PAID: ${label}${tip > 0 ? ` (+$${tip.toFixed(2)} tip 🎁)` : ""}${p.resp_text ? ` (${p.resp_text})` : ""} — Trashy Randy`)
       }
     } else if (type === "transaction.decline" && invoiceId) {
       // Declines don't change invoice status (it stays 'sent' for retry/manual),

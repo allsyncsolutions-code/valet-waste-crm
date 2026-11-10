@@ -51,6 +51,7 @@ const td = { fontSize: 12.5, padding: '9px 10px', borderBottom: '1px solid #f2f4
 export default function Payments({ app }) {
   const isMobile = app?.isMobile
   const [tab, setTab] = useState('transactions') // transactions | funding
+  const [resultFilter, setResultFilter] = useState('all') // all | approved | declined (transactions tab)
   const [preset, setPreset] = useState('this_month')
   const [custom, setCustom] = useState({ from: '', to: '' })
   const [data, setData] = useState(null)
@@ -86,6 +87,10 @@ export default function Payments({ app }) {
   const items = (showData && showData.items) || []
   const summary = (showData && showData.summary) || {}
   const isTx = tab === 'transactions'
+  // Approved/Declined card click filters the transactions list.
+  const shown = isTx && resultFilter !== 'all'
+    ? items.filter((t) => (resultFilter === 'approved' ? t.result === 'A' : t.result === 'C'))
+    : items
 
   return (
     <div style={{ maxWidth: 1100, margin: '0 auto', padding: isMobile ? '12px 10px 40px' : '18px 22px 60px' }}>
@@ -124,7 +129,7 @@ export default function Payments({ app }) {
       {/* Sub-tabs */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 14 }}>
         {[{ id: 'transactions', label: 'Transactions' }, { id: 'funding', label: 'Funding (bank batches)' }].map((t) => (
-          <button key={t.id} onClick={() => setTab(t.id)} style={{
+          <button key={t.id} onClick={() => { setTab(t.id); setResultFilter('all') }} style={{
             border: 'none', cursor: 'pointer', padding: '8px 16px', borderRadius: 8, fontSize: 13, fontWeight: 700,
             background: tab === t.id ? '#15201b' : '#f1f4f0', color: tab === t.id ? '#fff' : '#3c4a43',
           }}>{t.label}</button>
@@ -140,8 +145,8 @@ export default function Payments({ app }) {
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(4, 1fr)', gap: 10, marginBottom: 14 }}>
             {isTx ? (
               <>
-                <div style={card}><div style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', color: '#7c8a82' }}>Approved</div><div style={{ fontSize: 20, fontWeight: 800, color: GREEN }}>{money(summary.approved_total)}</div><div style={{ fontSize: 11.5, color: '#7c8a82' }}>{summary.approved_count || 0} charge{summary.approved_count === 1 ? '' : 's'}</div></div>
-                <div style={card}><div style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', color: '#7c8a82' }}>Declined</div><div style={{ fontSize: 20, fontWeight: 800, color: Number(summary.declined_count) ? RED : '#3c4a43' }}>{summary.declined_count || 0}</div><div style={{ fontSize: 11.5, color: '#7c8a82' }}>attempt{summary.declined_count === 1 ? '' : 's'}</div></div>
+                <div onClick={() => setResultFilter(resultFilter === 'approved' ? 'all' : 'approved')} title="Click to list approved charges" style={{ ...card, cursor: 'pointer', borderColor: resultFilter === 'approved' ? GREEN : '#e3e7e2', boxShadow: resultFilter === 'approved' ? `0 0 0 1px ${GREEN} inset` : 'none' }}><div style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', color: '#7c8a82' }}>Approved</div><div style={{ fontSize: 20, fontWeight: 800, color: GREEN }}>{money(summary.approved_total)}</div><div style={{ fontSize: 11.5, color: '#7c8a82' }}>{summary.approved_count || 0} charge{summary.approved_count === 1 ? '' : 's'} — click to list</div></div>
+                <div onClick={() => setResultFilter(resultFilter === 'declined' ? 'all' : 'declined')} title="Click to list declined attempts" style={{ ...card, cursor: 'pointer', borderColor: resultFilter === 'declined' ? RED : '#e3e7e2', boxShadow: resultFilter === 'declined' ? `0 0 0 1px ${RED} inset` : 'none' }}><div style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', color: '#7c8a82' }}>Declined</div><div style={{ fontSize: 20, fontWeight: 800, color: Number(summary.declined_count) ? RED : '#3c4a43' }}>{summary.declined_count || 0}</div><div style={{ fontSize: 11.5, color: '#7c8a82' }}>attempt{summary.declined_count === 1 ? '' : 's'} — click to list</div></div>
                 <div style={card}><div style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', color: '#7c8a82' }}>Surcharges</div><div style={{ fontSize: 20, fontWeight: 800 }}>{money(summary.fees_total)}</div><div style={{ fontSize: 11.5, color: '#7c8a82' }}>passed to cards</div></div>
                 <div style={card}><div style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', color: '#7c8a82' }}>Total activity</div><div style={{ fontSize: 20, fontWeight: 800 }}>{summary.count || 0}</div><div style={{ fontSize: 11.5, color: '#7c8a82' }}>transaction{summary.count === 1 ? '' : 's'}</div></div>
               </>
@@ -155,6 +160,12 @@ export default function Payments({ app }) {
           </div>
 
           {/* Table */}
+          {isTx && resultFilter !== 'all' && (
+            <div style={{ marginBottom: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={chip(resultFilter === 'approved' ? '#e2f2e9' : '#fbe9e7', resultFilter === 'approved' ? GREEN : RED)}>Showing: {resultFilter === 'approved' ? 'Approved' : 'Declined'} · {shown.length}</span>
+              <button onClick={() => setResultFilter('all')} style={{ ...chip('#f1f4f0', '#3c4a43'), border: 'none', cursor: 'pointer' }}>✕ Clear</button>
+            </div>
+          )}
           <div style={{ ...card, padding: 0, overflow: 'hidden' }}>
             <div style={{ overflowX: 'auto' }}>
               {isTx ? (
@@ -163,8 +174,8 @@ export default function Payments({ app }) {
                     <th style={th}>Date</th><th style={th}>Customer</th><th style={th}>Invoice</th><th style={th}>Card</th><th style={th}>Amount</th><th style={th}>Result</th>
                   </tr></thead>
                   <tbody>
-                    {items.length === 0 && <tr><td style={{ ...td, color: '#7c8a82' }} colSpan={6}>No transactions in this range.</td></tr>}
-                    {items.map((t) => {
+                    {shown.length === 0 && <tr><td style={{ ...td, color: '#7c8a82' }} colSpan={6}>{items.length ? 'Nothing matches this filter — clear it above.' : 'No transactions in this range.'}</td></tr>}
+                    {shown.map((t) => {
                       const ok = t.result === 'A'
                       return (
                         <tr key={t.trans_id}>
@@ -176,7 +187,7 @@ export default function Payments({ app }) {
                               : <span style={{ color: '#b6bfb8', fontSize: 11.5 }}>—</span>}
                           </td>
                           <td style={td}>{BRANDS[t.card_brand_id] || 'Card'} ··{String(t.card_number || '').slice(-4)}</td>
-                          <td style={{ ...td, fontWeight: 700 }}>{money(t.amount)}</td>
+                          <td style={{ ...td, fontWeight: 700, color: Number(t.amount) < 0 ? RED : undefined }}>{money(t.amount)}</td>
                           <td style={td}>
                             <span style={chip(ok ? '#e2f2e9' : '#fbe9e7', ok ? GREEN : RED)}>{ok ? 'Approved' : 'Declined'}</span>
                             {!ok && t.resp_text && <div style={{ fontSize: 11, color: RED, marginTop: 3 }}>{t.resp_text}</div>}
@@ -194,16 +205,20 @@ export default function Payments({ app }) {
                   </tr></thead>
                   <tbody>
                     {items.length === 0 && <tr><td style={{ ...td, color: '#7c8a82' }} colSpan={6}>No funding batches in this range. Batches appear 1–2 business days after the card charges settle.</td></tr>}
-                    {items.map((d) => (
+                    {items.map((d) => {
+                      const fees = Number(d.fees || 0) + Number(d.service_charges || 0) + Number(d.interchange_fees || 0)
+                      const red = (v) => (Number(v) < 0 ? { color: RED, fontWeight: 700 } : {})
+                      return (
                       <tr key={d.funding_master_id}>
                         <td style={{ ...td, fontWeight: 600 }}>{fmtDate(d.funding_date)}</td>
                         <td style={{ ...td, color: '#7c8a82', fontSize: 11.5 }}>{d.funding_master_id}</td>
-                        <td style={td}>{money(d.net_sales)}</td>
-                        <td style={td}>{money(Number(d.fees || 0) + Number(d.service_charges || 0) + Number(d.interchange_fees || 0))}</td>
-                        <td style={td}>{Number(d.adjustments || 0) !== 0 ? money(d.adjustments) : '—'}</td>
-                        <td style={{ ...td, fontWeight: 700, color: GREEN }}>{money(d.funding_amount)}</td>
+                        <td style={{ ...td, ...red(d.net_sales) }}>{money(d.net_sales)}</td>
+                        <td style={{ ...td, ...red(fees) }}>{money(fees)}</td>
+                        <td style={{ ...td, ...red(d.adjustments) }}>{Number(d.adjustments || 0) !== 0 ? money(d.adjustments) : '—'}</td>
+                        <td style={{ ...td, fontWeight: 700, color: Number(d.funding_amount) < 0 ? RED : GREEN }}>{money(d.funding_amount)}</td>
                       </tr>
-                    ))}
+                      )
+                    })}
                   </tbody>
                 </table>
               )}
