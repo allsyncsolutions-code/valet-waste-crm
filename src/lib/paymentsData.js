@@ -76,3 +76,10 @@ export const runBilling = (invoiceIds, cursor = 0) =>
 // forget — the pay pages call this and ignore failures.
 export const markInvoiceViewed = (invoiceId) =>
   call({ action: 'invoice_viewed', invoice_id: invoiceId })
+
+// ---- Reporting API (Payments tab) ---------------------------------------------
+// Read-only Run Reporting data: kind 'transactions' (every card run, joined to
+// our invoice #/customer when the order_id matches) or 'deposits' (bank
+// funding batches). from/to are YYYY-MM-DD (inclusive); omit both for all time.
+export const runReporting = (kind, from, to) =>
+  call({ action: 'reporting', kind, from: from || null, to: to || null })

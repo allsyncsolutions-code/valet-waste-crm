@@ -152,6 +152,28 @@ async function getSettings(): Promise<RunSettings & { id: number }> {
   return rows[0] || {}
 }
 
+// ---- Run Reporting API (read-only transactions + funding/deposits) ----------
+// Separate OAuth client from the Payments API — generated in the Run Merchant
+// portal under Settings → Reporting API, stored as env secrets. Tokens live
+// 1h; cache in memory (per isolate) and refresh 5 min before expiry.
+const REPORTING_HOST = "https://apps.runpayments.io/ords/sprint"
+let reportingToken: { token: string; exp: number } | null = null
+async function getReportingToken(): Promise<string> {
+  const cid = Deno.env.get("RUN_REPORTING_CLIENT_ID")
+  const sec = Deno.env.get("RUN_REPORTING_CLIENT_SECRET")
+  if (!cid || !sec) throw new Error("Run Reporting API is not configured (missing RUN_REPORTING_CLIENT_ID / RUN_REPORTING_CLIENT_SECRET secrets).")
+  if (reportingToken && Date.now() < reportingToken.exp) return reportingToken.token
+  const r = await fetch(`${REPORTING_HOST}/oauth/token`, {
+    method: "POST",
+    headers: { Authorization: `Basic ${btoa(`${cid}:${sec}`)}`, "Content-Type": "application/x-www-form-urlencoded" },
+    body: "grant_type=client_credentials",
+  })
+  const d = await r.json().catch(() => ({}))
+  if (!r.ok || !d.access_token) throw new Error(`Run Reporting auth failed: ${d.error_description || d.error || r.status}`)
+  reportingToken = { token: d.access_token, exp: Date.now() + (Number(d.expires_in) || 3600) * 1000 - 5 * 60000 }
+  return reportingToken.token
+}
+
 function runHost(env?: string | null) {
   return RUN_HOSTS[(env === "uat" ? "uat" : "production") as keyof typeof RUN_HOSTS]
 }
@@ -704,6 +726,58 @@ Deno.serve(async (req) => {
           method: i.payment_method,
         }))
       return json({ mid, env, gateway, surcharges })
+    }
+
+    // Read-only Reporting API data for the CRM Payments tab: `transactions`
+    // (every card run through Run, with our invoice #/customer joined on when
+    // the order_id is one of our invoice UUIDs) and `deposits` (the funding
+    // batches that hit the bank). Date-range filtered here — the Reporting API
+    // only supports exact-match `q` filters, but our volume is a few hundred
+    // rows so pulling the full set and filtering server-side is cheap.
+    if (action === "reporting") {
+      if (!(await isStaff(req))) return json({ error: "Staff only." }, 403)
+      const kind = body.kind === "deposits" ? "deposits" : "transactions"
+      const dateRe = /^\d{4}-\d{2}-\d{2}$/
+      const from = typeof body.from === "string" && dateRe.test(body.from) ? body.from : null
+      const to = typeof body.to === "string" && dateRe.test(body.to) ? body.to : null
+      const token = await getReportingToken()
+      const items: Array<Record<string, unknown>> = []
+      let offset = 0
+      for (;;) {
+        const r = await fetch(`${REPORTING_HOST}/api/3p/v1/${kind}?limit=1000&offset=${offset}`, { headers: { Authorization: `Bearer ${token}` } })
+        if (!r.ok) throw new Error(`Run Reporting ${kind}: ${r.status} ${(await r.text()).slice(0, 300)}`)
+        const d = await r.json()
+        const batch = Array.isArray(d.items) ? d.items : []
+        items.push(...batch)
+        if (!d.hasMore || !batch.length) break
+        offset += batch.length
+      }
+      const dateOf = (row: Record<string, unknown>) => String((kind === "deposits" ? row.funding_date : row.trans_date) || "").slice(0, 10)
+      const filtered = (from || to)
+        ? items.filter((row) => { const d = dateOf(row); if (!d) return false; if (from && d < from) return false; if (to && d > to) return false; return true })
+        : items
+      // Join our invoice number + customer name onto transactions whose
+      // order_id is one of our invoice UUIDs.
+      let invById = new Map<string, { number: string; customer: string | null }>()
+      if (kind === "transactions" && filtered.length) {
+        const uuids = [...new Set(filtered.map((t) => String(t.order_id || "")).filter((v) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v)))]
+        if (uuids.length) {
+          const invs = await sbGet(`invoices?id=in.(${uuids.map(enc).join(",")})&select=id,number,customer_id`).catch(() => [])
+          const custIds = [...new Set((invs || []).map((i: Record<string, unknown>) => i.customer_id).filter(Boolean))] as string[]
+          const custs = custIds.length ? await sbGet(`customers?id=in.(${custIds.map(enc).join(",")})&select=id,name`).catch(() => []) : []
+          const custName = new Map((custs || []).map((c: Record<string, unknown>) => [c.id as string, c.name as string]))
+          invById = new Map((invs || []).map((i: Record<string, unknown>) => [i.id as string, { number: i.number as string, customer: (custName.get(i.customer_id as string) || null) as string | null }]))
+        }
+      }
+      const out = filtered.map((t) => {
+        const link = invById.get(String(t.order_id || ""))
+        return { ...t, invoice_number: link?.number || null, customer_name: link?.customer || null }
+      })
+      const sum = (rows: Array<Record<string, unknown>>, k: string) => rows.reduce((s, t) => s + Number(t[k] || 0), 0)
+      const summary = kind === "deposits"
+        ? { count: out.length, funding_total: sum(out, "funding_amount"), net_sales_total: sum(out, "net_sales"), fees_total: sum(out, "fees") + sum(out, "service_charges") + sum(out, "interchange_fees") }
+        : { count: out.length, approved_count: out.filter((t) => t.result === "A").length, approved_total: sum(out.filter((t) => t.result === "A"), "amount"), declined_count: out.filter((t) => t.result === "C").length, fees_total: sum(out, "fee_amount") }
+      return json({ kind, from, to, items: out, summary })
     }
 
     if (action === "save_credentials") {

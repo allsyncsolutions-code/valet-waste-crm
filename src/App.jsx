@@ -8,6 +8,7 @@ import Clients from './views/Clients.jsx'
 import Settings from './views/Settings.jsx'
 import Schedule from './views/Schedule.jsx'
 import Invoices from './views/Invoices.jsx'
+import Payments from './views/Payments.jsx'
 import Dashboard from './views/Dashboard.jsx'
 import Drivers from './views/Drivers.jsx'
 import Team from './views/Team.jsx'
@@ -44,6 +45,7 @@ const NAV_MAIN = [
   { id: 'routes', glyph: '◔', label: 'Routes & Dispatch' },
   { id: 'schedule', glyph: '▤', label: 'Schedules' },
   { id: 'invoices', glyph: '$', label: 'Invoicing' },
+  { id: 'payments', glyph: '↧', label: 'Payments' },
   { id: 'reports', glyph: '∑', label: 'Reports' },
 ]
 const NAV_FIELD = [
@@ -241,6 +243,7 @@ export default function App({ user, onSignOut }) {
     routes: ['Routes & Dispatch', 'Plan routes + live field board — check-ins, photos, skips'],
     schedule: isJunk ? ['Job Calendar', 'One-time junk jobs — click a day to schedule'] : ['Recurring Schedules', 'Set pickup cadence — nth weekday, alternating weeks'],
     invoices: ['Invoicing', 'Per-stop line items · monthly batch billing'],
+    payments: ['Payments', 'Every Run Merchant charge and bank funding batch — filter by month, quarter, or year'],
     reports: ['Reports', 'Where your customers come from — lead source breakdown'],
     clients: ['Clients', 'Add and manage your customers'],
     drivers: ['Drivers & Field', 'Check-in / check-out, photos and GPS'],
@@ -340,6 +343,7 @@ export default function App({ user, onSignOut }) {
     routes: <RoutesView app={app} />,
     schedule: isJunk ? <JobCalendar app={app} line="junk" accent={activeLineObj.color} /> : <Schedule app={app} />,
     invoices: <Invoices app={app} />,
+    payments: <Payments app={app} />,
     reports: <Reports app={app} />,
     clients: <Clients app={app} />,
     drivers: <Drivers app={app} />,
