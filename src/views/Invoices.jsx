@@ -600,6 +600,9 @@ export default function Invoices({ app }) {
                     {inv.tipAmount > 0 && <span style={{ color: '#1f7a4d', fontSize: 11 }}> +{money(inv.tipAmount)}🎁</span>}
                   </div>
                   <span title={inv.paymentMethod ? `Paid via ${paymentMethodLabel(inv.paymentMethod)}${inv.paymentMethod === 'check' && inv.checkNumber ? ` #${inv.checkNumber}` : ''}` : undefined} style={{ fontFamily: MONO, fontSize: 9.5, color: meta.color, background: meta.bg, padding: '1px 6px', borderRadius: 5 }}>{chip}</span>
+                  {inv.status !== 'paid' && inv.status !== 'void' && inv.declineNote && (
+                    <span title={`${inv.declineNote} — needs follow-up`} style={{ fontFamily: MONO, fontSize: 9.5, color: '#c0492f', background: '#fdecea', padding: '1px 6px', borderRadius: 5, marginLeft: 4 }}>⚠ Declined</span>
+                  )}
                 </div>
               </div>
             )

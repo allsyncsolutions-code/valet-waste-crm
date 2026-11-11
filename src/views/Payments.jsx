@@ -177,13 +177,16 @@ export default function Payments({ app }) {
                     {shown.length === 0 && <tr><td style={{ ...td, color: '#7c8a82' }} colSpan={6}>{items.length ? 'Nothing matches this filter — clear it above.' : 'No transactions in this range.'}</td></tr>}
                     {shown.map((t) => {
                       const ok = t.result === 'A'
+                      // Row click jumps straight to the invoice (edit/resend/
+                      // void there) whenever this charge matches one of ours.
+                      const openInv = t.invoice_number ? () => app.openInvoice(t.order_id) : null
                       return (
-                        <tr key={t.trans_id}>
+                        <tr key={t.trans_id} onClick={openInv || undefined} title={openInv ? 'Click to open this invoice' : undefined} style={openInv ? { cursor: 'pointer' } : undefined}>
                           <td style={td}><div style={{ fontWeight: 600 }}>{fmtDate(t.trans_date)}</div><div style={{ fontSize: 11, color: '#7c8a82' }}>{fmtTime(t.trans_date)}</div></td>
                           <td style={td}>{t.customer_name || t.name || '—'}</td>
                           <td style={td}>
                             {t.invoice_number
-                              ? <button onClick={() => app.openInvoice(t.order_id)} style={{ border: 'none', background: 'none', padding: 0, color: GREEN, fontWeight: 700, fontSize: 12.5, cursor: 'pointer', textDecoration: 'underline' }}>{t.invoice_number}</button>
+                              ? <button onClick={(e) => { e.stopPropagation(); app.openInvoice(t.order_id) }} style={{ border: 'none', background: 'none', padding: 0, color: GREEN, fontWeight: 700, fontSize: 12.5, cursor: 'pointer', textDecoration: 'underline' }}>{t.invoice_number} →</button>
                               : <span style={{ color: '#b6bfb8', fontSize: 11.5 }}>—</span>}
                           </td>
                           <td style={td}>{BRANDS[t.card_brand_id] || 'Card'} ··{String(t.card_number || '').slice(-4)}</td>
