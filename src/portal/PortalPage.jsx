@@ -8,7 +8,7 @@
 // portal fn's admin_data action, and all client actions are disabled.
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '../lib/supabaseClient.js'
-import { loadRunner, tokenizeCard, initRunnerForm, ACH_ENABLED } from '../lib/runnerJs.js'
+import { loadRunner, tokenizeCard, tokenizeError, initRunnerForm, ACH_ENABLED } from '../lib/runnerJs.js'
 import { markInvoiceViewed } from '../lib/paymentsData.js'
 import { TipPicker } from '../components/TipPicker.jsx'
 import EstimateDoc from '../components/EstimateDoc.jsx'
@@ -858,6 +858,11 @@ function PaymentsTab({ data, token, preview, onChanged, setNotice }) {
     setErr('')
     try {
       const res = await tokenizeCard(runnerRef.current)
+      const saveTokErr = tokenizeError(res)
+      if (saveTokErr) {
+        console.warn('[save-card] tokenize error:', saveTokErr)
+        throw new Error(`The card details couldn't be verified: ${saveTokErr}. Please re-check the number and try again.`)
+      }
       if (!res || (!res.account_token && !res.token)) {
         console.warn('[save-card] empty tokenize response:', res)
         throw new Error("We couldn't read the card details. Please re-enter your card information and try again.")
@@ -1083,6 +1088,11 @@ function PayInvoiceTab({ data, token, preview, onChanged, setNotice, onDone }) {
     setErr('')
     try {
       const t = await tokenizeCard(runnerRef.current)
+      const tokErr = tokenizeError(t)
+      if (tokErr) {
+        console.warn('[portal-pay] tokenize error:', tokErr)
+        throw new Error(`The card details couldn't be verified: ${tokErr}. Please re-check the number and try again.`)
+      }
       if (!t || (!t.account_token && !t.token)) {
         console.warn('[portal-pay] empty tokenize response:', t)
         throw new Error(isAch

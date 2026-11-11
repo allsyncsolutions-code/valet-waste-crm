@@ -5,7 +5,7 @@ import { loadCustomers, createClient } from '../lib/customersData.js'
 import { supabase } from '../lib/supabaseClient.js'
 import { paymentsStatus, chargeInvoice, scheduleInvoiceSend, listScheduledSends, cancelScheduledSend } from '../lib/paymentsData.js'
 import { loadSettings } from '../lib/settingsData.js'
-import { loadRunner, tokenizeCard } from '../lib/runnerJs.js'
+import { loadRunner, tokenizeCard, tokenizeError } from '../lib/runnerJs.js'
 import { RichText, RichTextEditor } from '../components/RichText.jsx'
 import {
   loadInvoices,
@@ -46,7 +46,7 @@ const STATUS_META = {
   paid: { label: 'Paid', color: '#1f7a4d', bg: '#e7f1eb' },
   void: { label: 'Void', color: '#9a2c1e', bg: '#fdecea' },
 }
-const FILTERS = [['all', 'All'], ['draft', 'Draft'], ['sent', 'Sent'], ['paid', 'Paid']]
+const FILTERS = [['all', 'All'], ['draft', 'Draft'], ['sent', 'Sent'], ['paid', 'Paid'], ['tipped', '🎁 Tipped']]
 // Today as a LOCAL date — toISOString() would return the UTC date (a day
 // ahead after 8 PM Eastern).
 const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` }
@@ -171,7 +171,9 @@ export default function Invoices({ app }) {
   }, [invoices, range])
 
   const list = useMemo(() => {
-    let rows = filter === 'all' ? dateFiltered : dateFiltered.filter((i) => i.status === filter)
+    let rows = filter === 'all' ? dateFiltered
+      : filter === 'tipped' ? dateFiltered.filter((i) => i.status === 'paid' && i.tipAmount > 0)
+      : dateFiltered.filter((i) => i.status === filter)
     const q = search.trim().toLowerCase()
     const qDigits = q.replace(/\D/g, '') // phone lookups: ignore formatting
     if (q) rows = rows.filter((i) => {
@@ -480,10 +482,10 @@ export default function Invoices({ app }) {
       {boardToggle}
       {/* summary — all cards follow the date filter above the list */}
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 14 }}>
-        <SummaryCard label="Outstanding" value={money(outstanding)} sub={`${dateFiltered.filter((i) => i.status === 'sent').length} sent`} accent="#b07a1e" />
-        <SummaryCard label="Collected" value={money(paidTotal)} sub={`${dateFiltered.filter((i) => i.status === 'paid').length} paid`} accent="#1f7a4d" />
-        <SummaryCard label="Tips collected 🎁" value={money(tipsTotal)} sub={tippedCount ? `${tippedCount} tipped` : 'no tips yet'} accent="#6b4fa0" />
-        <SummaryCard label="Drafts" value={String(draftCount)} sub="not sent yet" accent="#7c8a82" />
+        <SummaryCard label="Outstanding" value={money(outstanding)} sub={`${dateFiltered.filter((i) => i.status === 'sent').length} sent — click to list`} accent="#b07a1e" onClick={() => setFilter(filter === 'sent' ? 'all' : 'sent')} active={filter === 'sent'} />
+        <SummaryCard label="Collected" value={money(paidTotal)} sub={`${dateFiltered.filter((i) => i.status === 'paid').length} paid — click to list`} accent="#1f7a4d" onClick={() => setFilter(filter === 'paid' ? 'all' : 'paid')} active={filter === 'paid'} />
+        <SummaryCard label="Tips collected 🎁" value={money(tipsTotal)} sub={tippedCount ? `${tippedCount} tipped — click to list` : 'no tips yet'} accent="#6b4fa0" onClick={() => setFilter(filter === 'tipped' ? 'all' : 'tipped')} active={filter === 'tipped'} />
+        <SummaryCard label="Drafts" value={String(draftCount)} sub="not sent yet — click to list" accent="#7c8a82" onClick={() => setFilter(filter === 'draft' ? 'all' : 'draft')} active={filter === 'draft'} />
         <div style={{ flex: 1 }} />
         <button onClick={openCreate} style={{ alignSelf: 'center', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 10, padding: '11px 17px', fontSize: 13.5, fontWeight: 600, cursor: 'pointer' }}>+ New invoice</button>
       </div>
@@ -549,7 +551,7 @@ export default function Invoices({ app }) {
           <div style={{ display: 'flex', gap: 5, padding: '4px 4px 8px', flexWrap: 'wrap', alignItems: 'center' }}>
             {FILTERS.map(([id, label]) => {
               const on = filter === id
-              const n = id === 'all' ? dateFiltered.length : dateFiltered.filter((i) => i.status === id).length
+              const n = id === 'all' ? dateFiltered.length : id === 'tipped' ? dateFiltered.filter((i) => i.status === 'paid' && i.tipAmount > 0).length : dateFiltered.filter((i) => i.status === id).length
               return (
                 <button key={id} onClick={() => setFilter(id)} style={{ background: on ? '#1f7a4d' : '#f3f5f2', color: on ? '#fff' : '#5d6b63', border: 'none', borderRadius: 8, padding: '6px 11px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>{label} {n ? `· ${n}` : ''}</button>
               )
@@ -1297,9 +1299,19 @@ function CustomerSelect({ customers, value, onChange, onAddNew, disabled }) {
   )
 }
 
-function SummaryCard({ label, value, sub, accent }) {
+function SummaryCard({ label, value, sub, accent, onClick, active }) {
+  const clickable = !!onClick
   return (
-    <div style={{ background: '#fff', border: '1px solid #e6eae6', borderRadius: 12, padding: '12px 16px', minWidth: 150 }}>
+    <div
+      onClick={onClick}
+      title={clickable ? 'Click to filter the list' : undefined}
+      style={{
+        background: active ? '#f3faf5' : '#fff',
+        border: `1px solid ${active ? '#1f7a4d' : '#e6eae6'}`,
+        borderRadius: 12, padding: '12px 16px', minWidth: 150,
+        cursor: clickable ? 'pointer' : 'default',
+        boxShadow: active ? '0 0 0 1px #1f7a4d inset' : 'none',
+      }}>
       <div style={{ fontSize: 11, color: '#7c8a82' }}>{label}</div>
       <div style={{ fontFamily: MONO, fontSize: 21, fontWeight: 600, color: accent, marginTop: 2 }}>{value}</div>
       <div style={{ fontSize: 10.5, color: '#9aa69e' }}>{sub}</div>
@@ -1407,6 +1419,14 @@ function TakePaymentModal({ inv, cfg, onClose, onPaid }) {
     setErr('')
     try {
       const t = await tokenizeCard(runnerRef.current)
+      const tokErr = tokenizeError(t)
+      if (tokErr) {
+        console.warn('[take-payment] tokenize error:', tokErr)
+        resetCardForm()
+        setErr(`The card details couldn't be verified: ${tokErr}. Please re-check the number and try again.`)
+        setBusy(false)
+        return
+      }
       if (!t || (!t.account_token && !t.token)) {
         console.warn('[take-payment] empty tokenize response:', t)
         resetCardForm()

@@ -8,7 +8,7 @@
 // queue) and texts admins.
 import { useEffect, useRef, useState } from 'react'
 import { supabase } from '../lib/supabaseClient.js'
-import { loadRunner, tokenizeCard } from '../lib/runnerJs.js'
+import { loadRunner, tokenizeCard, tokenizeError } from '../lib/runnerJs.js'
 
 const GREEN = '#1f7a4d'
 const DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
@@ -174,6 +174,13 @@ export default function SignupPage({ slug } = {}) {
     setBusy(true)
     try {
       const t = await tokenizeCard(runnerRef.current)
+      const tokErr = tokenizeError(t)
+      if (tokErr) {
+        console.warn('[signup] tokenize error:', tokErr)
+        resetCardForm()
+        setErr(`The card details couldn't be verified: ${tokErr}. Please re-check the number and try again.`)
+        return
+      }
       if (!t || (!t.account_token && !t.token)) {
         resetCardForm()
         setErr("We couldn't read the card details. Please re-enter your card information and try again.")

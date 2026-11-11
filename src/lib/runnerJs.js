@@ -56,6 +56,15 @@ export async function tokenizeCard(runner, { settleMs = 800, retryMs = 1200 } = 
   return res
 }
 
+// The Runner/CardConnect tokenizer answers failures as a response object with
+// an `error` field (e.g. "Card number not valid") — NOT an empty response.
+// Callers used to treat both the same and showed a useless generic "couldn't
+// read the card" message. Extract the real reason when there is one.
+export function tokenizeError(res) {
+  if (res && typeof res === 'object' && res.error) return String(res.error)
+  return null
+}
+
 // ACH (bank account) payment method availability.
 //
 // BLOCKED 2026-10-04: the ValetWaste MID (496647545888) is configured card-only

@@ -12,6 +12,8 @@
 //     14 days (open + handled) so nothing sits unnoticed.
 //   • autopay_charge_monthly — on the 1st, charge consenting clients' saved
 //     cards for prior-month open invoices + 5th-week-free credit.
+//   • chargeback_check — Run has no chargeback webhook, so this polls the
+//     Reporting API and alerts staff about new disputes (deduped).
 //
 // Deploy with JWT verification OFF (custom auth below):
 //   supabase functions deploy automations-run --no-verify-jwt
@@ -818,6 +820,71 @@ async function textAdminsRandy(body: string) {
   await notifyStaff(body, "autopay", "Autopay results")
 }
 
+// ---- chargeback_check -------------------------------------------------------
+// Run has NO chargeback webhook event (transaction webhooks cover
+// entered/decline/refund/void only), so the only way to learn about disputes
+// is to ask. This polls the Reporting API chargebacks endpoint (idempotent:
+// deduped on run_webhook_events PK) and texts/emails staff about new ones.
+const REPORTING_HOST = "https://apps.runpayments.io/ords/sprint"
+let rptToken: { token: string; exp: number } | null = null
+async function getReportingToken(): Promise<string> {
+  const cid = Deno.env.get("RUN_REPORTING_CLIENT_ID")
+  const sec = Deno.env.get("RUN_REPORTING_CLIENT_SECRET")
+  if (!cid || !sec) return "" // not configured — poll silently skips
+  if (rptToken && Date.now() < rptToken.exp) return rptToken.token
+  const r = await fetch(`${REPORTING_HOST}/oauth/token`, {
+    method: "POST",
+    headers: { Authorization: `Basic ${btoa(`${cid}:${sec}`)}`, "Content-Type": "application/x-www-form-urlencoded" },
+    body: "grant_type=client_credentials",
+  })
+  const d = await r.json().catch(() => ({}))
+  if (!r.ok || !d.access_token) throw new Error(`Run Reporting auth failed: ${d.error || r.status}`)
+  rptToken = { token: d.access_token, exp: Date.now() + (Number(d.expires_in) || 3600) * 1000 - 5 * 60000 }
+  return rptToken.token
+}
+
+async function runChargebackCheck(): Promise<string> {
+  const token = await getReportingToken()
+  if (!token) return "Skipped — Run Reporting API not configured."
+  const items: Array<Record<string, unknown>> = []
+  let offset = 0
+  for (;;) {
+    const r = await fetch(`${REPORTING_HOST}/api/3p/v1/chargebacks?limit=1000&offset=${offset}`, { headers: { Authorization: `Bearer ${token}` } })
+    if (!r.ok) throw new Error(`Run Reporting chargebacks: ${r.status} ${(await r.text()).slice(0, 200)}`)
+    const d = await r.json()
+    const batch = Array.isArray(d.items) ? d.items : []
+    items.push(...batch)
+    if (!d.hasMore || !batch.length) break
+    offset += batch.length
+  }
+  let alerted = 0
+  for (const cb of items) {
+    const cbId = cb.id != null ? String(cb.id) : String(cb.case_number || "")
+    if (!cbId) continue
+    // Dedupe on run_webhook_events PK (webhook_id = cb-<id>) so replays and
+    // re-runs never double-alert; the row doubles as an audit trail.
+    const seen = await sbGet(`run_webhook_events?webhook_id=eq.${encodeURIComponent(`cb-${cbId}`)}&select=webhook_id&limit=1`).catch(() => [])
+    if (seen && seen.length) continue
+    await sbPost("run_webhook_events", {
+      webhook_id: `cb-${cbId}`,
+      event_type: "chargeback.alerted",
+      trans_id: cb.case_number != null ? String(cb.case_number) : null,
+      payload: cb,
+    }).catch(() => { /* a racing duplicate — alert below is still fine */ })
+    const amt = Number(cb.cback_amount || cb.trans_amount || 0)
+    const card = cb.card_number ? ` card ··${String(cb.card_number).slice(-4)}` : ""
+    const reason = cb.cback_reason ? ` — ${cb.cback_reason}` : ""
+    const when = String(cb.cback_date || "").slice(0, 10) || "date n/a"
+    await notifyStaff(
+      `🚨 CHARGEBACK: $${amt.toFixed(2)}${card}${reason} (case ${cb.case_number || cbId} · ${when}) — Trashy Randy`,
+      "payments",
+      "Chargeback alert",
+    )
+    alerted++
+  }
+  return alerted ? `Alerted staff to ${alerted} new chargeback(s) (${items.length} on record).` : `No new chargebacks (${items.length} on record).`
+}
+
 async function runAutopayCharge(force = false): Promise<string> {
   const nyDate = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date())
   if (nyDate.slice(8) !== "01" && !force) return `Skipped — autopay charges run on the 1st (today is ${nyDate}).`
@@ -1267,6 +1334,11 @@ Deno.serve(async (req) => {
       const result = await runRequestDigest(row || {}, true)
       return json({ ok: true, result })
     }
+    if (action === "check_chargebacks") {
+      // One-off chargeback poll right now (no automation row needed).
+      const result = await runChargebackCheck()
+      return json({ ok: true, result })
+    }
     let autos = await sbGet(`automations?status=eq.enabled&select=id,kind,name,config`)
     if (kindFilter) autos = autos.filter((a: any) => a.kind === kindFilter)
     if (!autos.length) return json({ ok: true, ran: [], note: kindFilter ? `No enabled automation '${kindFilter}'.` : "No enabled automations." })
@@ -1288,6 +1360,7 @@ Deno.serve(async (req) => {
         if (a.kind === "request_digest") result = await runRequestDigest(a, force && kindFilter === "request_digest")
         if (a.kind === "autopay_charge_monthly") result = await runAutopayCharge(force && kindFilter === "autopay_charge_monthly")
         if (a.kind === "auto_build_week_routes") result = await runAutoBuildRoutes()
+        if (a.kind === "chargeback_check") result = await runChargebackCheck()
       } catch (e) {
         result = `Error: ${e instanceof Error ? e.message : String(e)}`
       }
