@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { MONO } from '../data.js'
 import { loadAutomations, setAutomationStatus, deleteAutomation, runAutomationsNow, saveAutomationConfig, testNewRequestAlerts } from '../lib/automationsData.js'
+import WorkflowStudio from './Workflows.jsx'
+import '../automation-builder.css'
 
 const fmt = (ts) => { try { return new Date(ts).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) } catch { return ts } }
 
@@ -21,6 +23,7 @@ const overlay = { position: 'fixed', inset: 0, background: 'rgba(15,30,20,.45)',
 const modal = { maxWidth: '100%', background: '#fff', borderRadius: 14, padding: 22, boxShadow: '0 20px 60px rgba(0,0,0,.25)' }
 
 export default function Automations({ app }) {
+  const [tab, setTab] = useState('catalog') // catalog | workflows
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState('')
@@ -66,6 +69,23 @@ export default function Automations({ app }) {
 
   return (
     <div style={{ maxWidth: 900, margin: '0 auto' }}>
+      <div style={{ display: 'flex', gap: 7, marginBottom: 14 }}>
+        {[['catalog', "Randy's automations"], ['workflows', 'Workflow builder']].map(([id, lbl]) => (
+          <button key={id} onClick={() => setTab(id)} style={{
+            padding: '7px 14px', borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: 'pointer', border: 'none',
+            background: tab === id ? '#1f7a4d' : '#eef1ee', color: tab === id ? '#fff' : '#5d6b63',
+          }}>{lbl}</button>
+        ))}
+      </div>
+
+      {tab === 'workflows' ? (
+        <>
+          <div style={{ fontSize: 13, color: '#5d6b63', marginBottom: 14 }}>
+            Build your own automations: when something happens — an invoice goes unpaid, a card declines, a chargeback lands — do this. Publish to turn one on; drafts never fire.
+          </div>
+          <WorkflowStudio app={app} />
+        </>
+      ) : (<>
       <div style={{ fontSize: 13, color: '#5d6b63', marginBottom: 14 }}>
         Scheduled jobs Trashy Randy runs for you, plus automations he's suggested from your requests. Approve a suggestion to put it on the schedule — nothing suggested runs until a staff member enables it.
       </div>
@@ -133,6 +153,7 @@ export default function Automations({ app }) {
       {alertCfgOpen && (
         <RequestAlertsModal onClose={() => setAlertCfgOpen(false)} onSaved={refresh} />
       )}
+      </>)}
     </div>
   )
 }
