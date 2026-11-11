@@ -36,6 +36,23 @@ async function sbInsert(path: string, body: unknown) {
   })
 }
 
+// Permanent history line for a declined charge. The decline_* columns on the
+// invoice are cleared the moment it gets paid — this activity_log row is the
+// record that it was ever declined, and why. Best-effort: never let logging
+// break the webhook.
+async function logDecline(invoiceId: string, summary: string) {
+  try {
+    await sbInsert("activity_log", {
+      type: "card_declined",
+      actor: "System",
+      summary,
+      entity_type: "invoice",
+      entity_id: invoiceId,
+      meta: null,
+    })
+  } catch (_e) { /* logging is best-effort */ }
+}
+
 // Global kill switch for a notification type (Notifications tab, mig 0065).
 // Reads the app_settings.notification_toggles JSONB map; a missing key = ON.
 async function notifEnabled(key: string): Promise<boolean> {
@@ -190,6 +207,7 @@ Deno.serve(async (req) => {
         })
       } catch (_e) { /* persistence is best-effort; the text still goes out */ }
       const label = await invoiceLabel(String(invoiceId))
+      await logDecline(String(invoiceId), `Card declined — ${label} — ${declineSummary(p)}`)
       await textAdmins(`⚠️ Payment DECLINED for ${label} — ${declineSummary(p)} — Trashy Randy`)
     } else if ((type === "transaction.refund" || type === "transaction.partialrefund") && invoiceId) {
       // A full refund reopens the invoice; partial refunds leave it paid.
