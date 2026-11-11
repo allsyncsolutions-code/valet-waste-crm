@@ -79,6 +79,22 @@ async function sbPost(path: string, body: unknown) {
   })
   return r
 }
+// Permanent history line for a declined charge. The decline_* columns on the
+// invoice are cleared the moment it gets paid — this activity_log row is the
+// record that it was ever declined, and why. Best-effort: never block the
+// charge flow on logging.
+async function logDecline(invoiceId: string, invoiceNumber: string | null, summary: string, code: string | null) {
+  try {
+    await sbPost("activity_log", {
+      type: "card_declined",
+      actor: "System",
+      summary: `Card declined on ${invoiceNumber || "invoice"} — ${summary}`,
+      entity_type: "invoice",
+      entity_id: invoiceId,
+      meta: code ? { code } : null,
+    })
+  } catch (_e) { /* logging is best-effort */ }
+}
 const enc = encodeURIComponent
 
 // Best-effort email receipt for the Communications page (mig 0066) — records
@@ -970,6 +986,7 @@ Deno.serve(async (req) => {
                 decline_note: why.note,
                 declined_at: new Date().toISOString(),
               })
+              await logDecline(String(inv.id), inv.number || null, why.summary, res.response_code != null ? String(res.response_code) : null)
               Object.assign(row, { outcome: "failed", detail: why.summary })
             }
           } else {
@@ -1156,6 +1173,7 @@ Deno.serve(async (req) => {
           decline_note: why.note,
           declined_at: new Date().toISOString(),
         }).catch(() => { /* decline persistence is best-effort */ })
+        await logDecline(String(inv.id), inv.number || null, why.summary, res.response_code != null ? String(res.response_code) : null)
         return json({ ok: false, declined: true, result: res.result, resp_text: why.summary, trans_id: res.trans_id || null })
       }
 
