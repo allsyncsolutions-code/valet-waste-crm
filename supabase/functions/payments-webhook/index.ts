@@ -167,6 +167,10 @@ Deno.serve(async (req) => {
           run_paid_at: new Date().toISOString(),
           run_trans_id: String(transId || ""),
           payment_method: "card",
+          // It may have been declined earlier — payment resolves the follow-up.
+          decline_code: null,
+          decline_note: null,
+          declined_at: null,
         })
         // Only text on the transition — dedupe/replays stay quiet. Tips ride
         // along so the team sees the full amount collected at a glance.
