@@ -1277,6 +1277,247 @@ async function runRequestDigest(auto: any, force = false): Promise<string> {
 }
 
 // ---- HTTP entry -------------------------------------------------------------
+// ---- workflow rules engine (the studio's execution half; mig 0073/0074) ----
+// Poll-trigger matcher + step executor for automation_rules rows. Fired by
+// the automations-workflows-5min cron (action:'workflows'). Exactly-once:
+// every send claims a slot in the automation_sends ledger first; the unique
+// index makes a claimed slot never re-send.
+const WF_WS = "00000000-0000-0000-0000-000000000001"
+const WF_LOOKBACK_MIN = 15 // event-style triggers: catch anything missed between ticks
+const encWf = encodeURIComponent
+
+async function wfCompany(): Promise<{ name: string; phone: string }> {
+  const s = await sbGet(`app_settings?id=eq.1&select=company_name,company_phone`).catch(() => [] as any[])
+  return { name: s?.[0]?.company_name || "Valet Waste FL", phone: s?.[0]?.company_phone || "" }
+}
+function wfFill(template: string, ctx: Record<string, string>): string {
+  return String(template || "").replace(/\[([a-z0-9_]+)\]/g, (m, k) => (ctx[k] != null ? ctx[k] : m))
+}
+const wfMoney = (v: unknown) => "$" + Number(v || 0).toFixed(2)
+const wfFirstName = (name: unknown) => (String(name || "").trim().split(/\s+/)[0] || "there")
+
+// Claim a send slot. true = newly claimed (caller sends); false = already
+// sent by an earlier tick. 409 = unique-index conflict.
+async function wfClaim(ruleId: string, subjectType: string, subjectId: string | null, slot: string, channel: string, recipient: string): Promise<boolean> {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/automation_sends`, {
+    method: "POST",
+    headers: { ...restHeaders, Prefer: "return=minimal" },
+    body: JSON.stringify({ workspace_id: WF_WS, automation_key: `rule:${ruleId}`, subject_type: subjectType, subject_id: subjectId, slot, channel, recipient: recipient || "", status: "sent" }),
+  })
+  if (r.status === 201) return true
+  if (r.status === 409) return false
+  throw new Error(`automation_sends claim: ${r.status} ${(await r.text()).slice(0, 120)}`)
+}
+
+async function wfText(to: string, body: string, purpose: string) {
+  const r = await fetch(`${SUPABASE_URL}/functions/v1/sms`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "send", to, body, purpose, sentBy: "Trashy Randy" }),
+  })
+  const d = await r.json().catch(() => ({} as any))
+  if (!d?.ok) throw new Error(d?.error || `sms ${r.status}`)
+}
+
+type WfSubject = {
+  id: string | null            // uuid when the source row has one (invoices/quotes)
+  type: string                 // 'invoice' | 'quote' | 'chargeback'
+  slotSuffix: string           // repeatable events (declines) differentiate here
+  ctx: Record<string, string>
+  cust: Record<string, any> | null
+  phone: string
+  email: string
+  label: string
+}
+
+const WF_CUST_SELECT = "customers(name,phone,contact_phone,email,portal_slug,notify_on_service,notify_sms,notify_email)"
+const WF_INV_SELECT = `id,number,total,sent_at,created_at,paid_at,decline_note,declined_at,customer_id,${WF_CUST_SELECT}`
+const WF_QUOTE_SELECT = `id,number,total,sent_at,responded_at,customer_id,${WF_CUST_SELECT}`
+
+function wfInvoiceSubject(inv: any): WfSubject {
+  const c = inv.customers || {}
+  const payUrl = c.portal_slug ? `${PORTAL_ORIGIN}/?portal=${encWf(c.portal_slug)}&pay_invoice=${inv.id}` : PORTAL_ORIGIN
+  return {
+    id: String(inv.id), type: "invoice",
+    slotSuffix: inv.declined_at ? `:${inv.declined_at}` : "",
+    ctx: {
+      customer_first_name: wfFirstName(c.name), customer_full_name: c.name || "there",
+      customer_phone: c.contact_phone || c.phone || "",
+      invoice_number: String(inv.number || ""), invoice_amount: wfMoney(inv.total),
+      payment_link: payUrl, receipt_link: payUrl,
+      decline_reason: inv.decline_note || "",
+    },
+    cust: c, phone: c.contact_phone || c.phone || "", email: c.email || "",
+    label: `invoice #${inv.number} (${wfMoney(inv.total)})${c.name ? ` · ${c.name}` : ""}`,
+  }
+}
+function wfQuoteSubject(q: any): WfSubject {
+  const c = q.customers || {}
+  const url = c.portal_slug ? `${PORTAL_ORIGIN}/?portal=${encWf(c.portal_slug)}&estimate=${q.id}` : PORTAL_ORIGIN
+  return {
+    id: String(q.id), type: "quote", slotSuffix: "",
+    ctx: {
+      customer_first_name: wfFirstName(c.name), customer_full_name: c.name || "there",
+      customer_phone: c.contact_phone || c.phone || "",
+      estimate_number: String(q.number || ""), estimate_amount: wfMoney(q.total), estimate_link: url,
+    },
+    cust: c, phone: c.contact_phone || c.phone || "", email: c.email || "",
+    label: `estimate ${q.number} (${wfMoney(q.total)})${c.name ? ` · ${c.name}` : ""}`,
+  }
+}
+function wfChargebackSubject(cb: any): WfSubject {
+  const amt = Number(cb.cback_amount || cb.trans_amount || 0)
+  const id = cb.id != null ? String(cb.id) : String(cb.case_number || "")
+  const who = cb.customer_name || cb.name || ""
+  return {
+    id: null, type: "chargeback", slotSuffix: `:cb:${id}`,
+    ctx: {
+      customer_full_name: who, customer_first_name: wfFirstName(who),
+      invoice_amount: wfMoney(amt),
+      invoice_number: cb.invoice_id ? String(cb.invoice_id) : cb.order_id ? String(cb.order_id) : "",
+      decline_reason: cb.cback_reason ? String(cb.cback_reason) : "",
+    },
+    cust: null,
+    phone: cb.customer_phone ? String(cb.customer_phone) : "",
+    email: cb.customer_email ? String(cb.customer_email) : "",
+    label: `chargeback ${wfMoney(amt)} (case ${cb.case_number || id})${who ? ` · ${who}` : ""}`,
+  }
+}
+
+async function wfChargebacks(): Promise<Array<Record<string, unknown>>> {
+  const token = await getReportingToken()
+  if (!token) return []
+  const items: Array<Record<string, unknown>> = []
+  let offset = 0
+  for (;;) {
+    const r = await fetch(`${REPORTING_HOST}/api/3p/v1/chargebacks?limit=1000&offset=${offset}`, { headers: { Authorization: `Bearer ${token}` } })
+    if (!r.ok) throw new Error(`Run Reporting chargebacks: ${r.status}`)
+    const d = await r.json()
+    const batch = Array.isArray(d.items) ? d.items : []
+    items.push(...batch)
+    if (!d.hasMore || !batch.length) break
+    offset += batch.length
+  }
+  return items
+}
+
+async function wfMatchSubjects(trigger: Record<string, any>): Promise<WfSubject[]> {
+  const t = String(trigger.type || "")
+  if (t === "invoice_unpaid_for") {
+    const days = Number(trigger.days) || 7
+    const cutoff = new Date(Date.now() - days * 86400000).toISOString()
+    const rows = await sbGet(`invoices?status=eq.sent&select=${WF_INV_SELECT}&order=created_at.desc&limit=500`)
+    return rows.filter((i: any) => String(i.sent_at || i.created_at || "") <= cutoff).map(wfInvoiceSubject)
+  }
+  if (t === "invoice_declined") {
+    const rows = await sbGet(`invoices?decline_note=not.is.null&status=not.in.(paid,void)&select=${WF_INV_SELECT}&order=declined_at.desc&limit=200`)
+    return rows.map(wfInvoiceSubject)
+  }
+  if (t === "payment_received") {
+    const since = encWf(new Date(Date.now() - WF_LOOKBACK_MIN * 60000).toISOString())
+    const rows = await sbGet(`invoices?status=eq.paid&paid_at=gte.${since}&select=${WF_INV_SELECT}&limit=200`)
+    return rows.map(wfInvoiceSubject)
+  }
+  if (t === "estimate_sent") {
+    const since = encWf(new Date(Date.now() - WF_LOOKBACK_MIN * 60000).toISOString())
+    const rows = await sbGet(`quotes?status=eq.sent&sent_at=gte.${since}&select=${WF_QUOTE_SELECT}&limit=200`)
+    return rows.map(wfQuoteSubject)
+  }
+  if (t === "estimate_accepted") {
+    const since = encWf(new Date(Date.now() - WF_LOOKBACK_MIN * 60000).toISOString())
+    const rows = await sbGet(`quotes?status=eq.approved&responded_at=gte.${since}&select=${WF_QUOTE_SELECT}&limit=200`)
+    return rows.map(wfQuoteSubject)
+  }
+  if (t === "estimate_unanswered_for") {
+    const days = Number(trigger.days) || 3
+    const cutoff = encWf(new Date(Date.now() - days * 86400000).toISOString())
+    const rows = await sbGet(`quotes?status=eq.sent&sent_at=lte.${cutoff}&responded_at=is.null&select=${WF_QUOTE_SELECT}&limit=200`)
+    return rows.map(wfQuoteSubject)
+  }
+  if (t === "chargeback_detected") {
+    return (await wfChargebacks()).map(wfChargebackSubject)
+  }
+  return []
+}
+
+function wfDefaultMessage(triggerType: string, sub: WfSubject): string {
+  switch (triggerType) {
+    case "invoice_declined": return `Card declined on ${sub.label} — ${sub.ctx.decline_reason || "declined"}. Follow up: ${sub.ctx.payment_link}`
+    case "chargeback_detected": return `CHARGEBACK: ${sub.label}. Review in Run Merchant and the Payments tab.`
+    case "payment_received": return `Payment received: ${sub.label}`
+    case "invoice_unpaid_for": return `Invoice still unpaid: ${sub.label} — ${sub.ctx.payment_link}`
+    case "estimate_sent": return `Estimate sent: ${sub.label} — ${sub.ctx.estimate_link}`
+    case "estimate_accepted": return `Estimate accepted: ${sub.label}`
+    case "estimate_unanswered_for": return `Estimate unanswered: ${sub.label} — ${sub.ctx.estimate_link}`
+    default: return `Workflow fired: ${sub.label}`
+  }
+}
+
+async function wfExecStep(rule: any, step: Record<string, any>, idx: number, sub: WfSubject, company: { name: string; phone: string }, triggerType: string): Promise<string> {
+  const slot = `s${idx}${sub.slotSuffix}`
+  const base = { ...sub.ctx, company_name: company.name, company_phone: company.phone }
+  if (step.type === "text_customer") {
+    if (!sub.phone) return "no-phone"
+    if (sub.cust && (sub.cust.notify_on_service === false || sub.cust.notify_sms === false)) return "opted-out"
+    if (!await wfClaim(rule.id, sub.type, sub.id, slot, "sms", sub.phone)) return "dup"
+    await wfText(sub.phone, wfFill(String(step.message_template || ""), base) || wfDefaultMessage(triggerType, sub), `workflow:${rule.name}`)
+    return "texted"
+  }
+  if (step.type === "email_customer") {
+    if (!sub.email) return "no-email"
+    if (sub.cust && sub.cust.notify_email === false) return "opted-out"
+    if (!await wfClaim(rule.id, sub.type, sub.id, slot, "email", sub.email)) return "dup"
+    await sendPlainCustomerEmail(sub.email, wfFill(String(step.subject || `${company.name} — an update on your service`), base),
+      wfFill(String(step.body_template || ""), base) || wfDefaultMessage(triggerType, sub), company.name,
+      { purpose: "workflow", customer_id: sub.cust?.id || null })
+    return "emailed"
+  }
+  if (step.type === "notify_team" || step.type === "notify_members") {
+    const ch = step.channels || {}
+    const useText = ch.sms !== false // text on by default
+    const useEmail = ch.email === true
+    if (!useText && !useEmail) return "no-channel"
+    const all = await sbGet(`profiles?select=id,full_name,phone,email,role&or=(phone.not.is.null,email.not.is.null)`)
+    let who = all.filter((s: any) => ["admin", "staff"].includes(s.role || ""))
+    if (step.type === "notify_team") who = who.filter((s: any) => s.role === "admin")
+    else if (step.audience === "managers") who = who.filter((s: any) => s.role === "admin")
+    else if (step.audience === "selected") who = who.filter((s: any) => (step.member_ids || []).map(String).includes(String(s.id)))
+    if (!await wfClaim(rule.id, sub.type, sub.id, slot, "staff-notify", "")) return "dup"
+    const body = wfFill(String(step.message_template || ""), base) || wfDefaultMessage(triggerType, sub)
+    let sent = 0
+    for (const s of who) {
+      if (useText && s.phone) { try { await wfText(s.phone, `${body} — ${company.name}`, `workflow:${rule.name}`); sent++ } catch (_e) { /* best effort */ } }
+      if (useEmail && s.email) { try { await sendStaffEmail(s.email, `Workflow: ${rule.name}`, body); sent++ } catch (_e) { /* best effort */ } }
+    }
+    return `notified-${sent}`
+  }
+  return "unknown-action"
+}
+
+async function runWorkflowRules(): Promise<string> {
+  const rules = await sbGet(`automation_rules?enabled=eq.true&select=id,name,trigger,result,actions`).catch(() => [] as any[])
+  if (!rules.length) return "No published workflows."
+  const company = await wfCompany()
+  const summary: string[] = []
+  for (const rule of rules) {
+    try {
+      const subjects = await wfMatchSubjects(rule.trigger || {})
+      const steps = [rule.result, ...(rule.actions || [])].filter(Boolean)
+      let fired = 0
+      for (const sub of subjects) {
+        for (let i = 0; i < steps.length; i++) {
+          const out = await wfExecStep(rule, steps[i], i, sub, company, String(rule.trigger?.type || ""))
+          if (!["dup", "no-phone", "no-email", "opted-out", "no-channel"].includes(out)) fired++
+        }
+      }
+      summary.push(`${rule.name}: ${subjects.length} subject(s), ${fired} send(s)`)
+    } catch (e) {
+      summary.push(`${rule.name}: error ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+  return summary.join(" · ") || "Nothing to do."
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS })
   const json = (b: unknown, status = 200) =>
@@ -1337,6 +1578,11 @@ Deno.serve(async (req) => {
     if (action === "check_chargebacks") {
       // One-off chargeback poll right now (no automation row needed).
       const result = await runChargebackCheck()
+      return json({ ok: true, result })
+    }
+    if (action === "workflows") {
+      // Workflow studio engine — fired by the every-5-minute cron.
+      const result = await runWorkflowRules()
       return json({ ok: true, result })
     }
     let autos = await sbGet(`automations?status=eq.enabled&select=id,kind,name,config`)
