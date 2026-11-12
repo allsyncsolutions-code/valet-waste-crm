@@ -146,7 +146,6 @@ const ruleTriggerLabel = (t) => {
   if (t.type === 'chargeback_detected') return 'A chargeback is detected'
   if (t.type === 'payment_received') return 'A payment is received'
   if (t.type === 'estimate_sent') return 'An estimate is sent'
-  if (t.type === 'estimate_viewed') return 'A customer views an estimate'
   if (t.type === 'estimate_accepted') return 'An estimate is accepted'
   if (t.type === 'estimate_unanswered_for') return `Estimate unanswered ${t.days} days`
   return t.type
@@ -173,7 +172,6 @@ const WORKFLOW_TRIGGERS = [
   ['chargeback_detected', 'A chargeback hits our account'],
   ['payment_received', 'A payment is received'],
   ['estimate_sent', 'An estimate is sent'],
-  ['estimate_viewed', 'A customer views an estimate'],
   ['estimate_accepted', 'An estimate is accepted'],
   ['estimate_unanswered_for', 'An estimate goes unanswered'],
 ]
@@ -190,7 +188,7 @@ const AUDIENCES = [
 ]
 const TRIGGER_ICON = {
   invoice_unpaid_for: Ic.money, invoice_declined: Ic.warn, chargeback_detected: Ic.warn,
-  payment_received: Ic.money, estimate_sent: Ic.mail, estimate_viewed: Ic.bell,
+  payment_received: Ic.money, estimate_sent: Ic.mail,
   estimate_accepted: Ic.check, estimate_unanswered_for: Ic.estimates,
 }
 const ACTION_ICON = {
