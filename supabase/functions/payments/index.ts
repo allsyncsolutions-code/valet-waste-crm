@@ -1110,7 +1110,7 @@ Deno.serve(async (req) => {
         if (!body.account_token) return json({ error: "Missing tokenized bank account." }, 400)
         Object.assign(chargeBody, {
           account_token: String(body.account_token),
-          com_ind: "ecomm",
+          com_ind: "E", // e-commerce (single letter — the gateway 400s on "ecomm")
           payment_description: `Invoice ${inv.number}`,
           entry_class: "WEB",
           ach_discretionary_data: "S", // single transaction (required for WEB)
