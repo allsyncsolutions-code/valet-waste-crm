@@ -26,6 +26,17 @@ const primaryBtn = { background: '#1f7a4d', color: '#fff', border: 'none', borde
 const ghostBtn = { background: '#fff', border: '1px solid #cfe0d5', color: '#1f7a4d', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }
 const dangerBtn = { background: '#fff', border: '1px solid #eccfc7', color: '#c0492f', borderRadius: 9, padding: '10px 15px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }
 const FILTERS = [['all', 'All'], ['sent', 'Awaiting'], ['approved', 'Accepted'], ['declined', 'Declined'], ['void', 'Void']]
+// Same combined-board treatment as Invoices: both lines in one list, each
+// row tagged, filter chips to narrow.
+const LINES = {
+  waste: { label: 'Waste', color: '#1f7a4d', bg: '#e7f1eb', border: '#cfe0d5' },
+  junk: { label: 'Junk', color: '#2f6db0', bg: '#e9eef6', border: '#cdddee' },
+}
+const LINE_CHIPS = [['all', 'All'], ['waste', 'Waste'], ['junk', 'Junk']]
+function LinePill({ line }) {
+  const m = LINES[line] || LINES.waste
+  return <span title={`${m.label} line`} style={{ fontFamily: MONO, fontSize: 9.5, fontWeight: 600, color: m.color, background: m.bg, border: `1px solid ${m.border}`, padding: '1px 6px', borderRadius: 5 }}>{m.label}</span>
+}
 const blankItem = () => ({ title: '', description: '', quantity: 1, unitPrice: '' })
 const blankForm = () => ({ customerId: '', title: '', notes: '', items: [blankItem()] })
 
@@ -38,6 +49,7 @@ export default function EstimatesBoard({ app }) {
   const [notice, setNotice] = useState('')
   const [search, setSearch] = useState('')
   const [filter, setFilter] = useState('all')
+  const [lineFilter, setLineFilter] = useState('all') // all | waste | junk — view filter on the combined board
   const [selId, setSelId] = useState(null)
   const [busy, setBusy] = useState(false)
 
@@ -48,7 +60,7 @@ export default function EstimatesBoard({ app }) {
   const [formErr, setFormErr] = useState('')
 
   async function refresh() {
-    const rows = await loadEstimates(app.activeLine)
+    const rows = await loadEstimates() // both lines — combined board, filters client-side
     setEstimates(rows)
     setSelId((cur) => (cur && rows.some((r) => r.id === cur) ? cur : rows[0]?.id || null))
   }
@@ -79,10 +91,11 @@ export default function EstimatesBoard({ app }) {
 
   const q = (search || '').trim().toLowerCase()
   const list = useMemo(() => (estimates || []).filter((e) => {
+    if (lineFilter !== 'all' && e.businessLine !== lineFilter) return false
     if (filter !== 'all' && e.status !== filter) return false
     if (!q) return true
     return (e.customerName || '').toLowerCase().includes(q) || (e.number || '').toLowerCase().includes(q)
-  }), [estimates, filter, q])
+  }), [estimates, lineFilter, filter, q])
 
   const sel = (estimates || []).find((e) => e.id === selId) || null
 
@@ -142,10 +155,11 @@ export default function EstimatesBoard({ app }) {
   })
 
   const counts = useMemo(() => {
-    const c = { all: estimates?.length || 0, sent: 0, approved: 0, declined: 0, void: 0 }
-    for (const e of estimates || []) c[e.status] = (c[e.status] || 0) + 1
+    const rows = (estimates || []).filter((e) => lineFilter === 'all' || e.businessLine === lineFilter)
+    const c = { all: rows.length, sent: 0, approved: 0, declined: 0, void: 0 }
+    for (const e of rows) c[e.status] = (c[e.status] || 0) + 1
     return c
-  }, [estimates])
+  }, [estimates, lineFilter])
 
   return (
     <div>
@@ -174,6 +188,15 @@ export default function EstimatesBoard({ app }) {
             {search && <button onClick={() => setSearch('')} style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: '#9aa69e', fontSize: 16, cursor: 'pointer', padding: 0, lineHeight: 1 }}>×</button>}
           </div>
           <div style={{ display: 'flex', gap: 5, padding: '4px 4px 8px', flexWrap: 'wrap' }}>
+            {LINE_CHIPS.map(([id, label]) => {
+              const on = lineFilter === id
+              const m = LINES[id]
+              const n = id === 'all' ? (estimates || []).length : (estimates || []).filter((e) => e.businessLine === id).length
+              return (
+                <button key={id} onClick={() => setLineFilter(id)} title={id === 'all' ? 'Both lines' : `${label} line only`} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: on ? (m ? m.bg : '#1f7a4d') : '#f3f5f2', color: on ? (m ? m.color : '#fff') : '#5d6b63', border: `1px solid ${on && m ? m.border : 'transparent'}`, borderRadius: 8, padding: '6px 11px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>{label} {n ? `· ${n}` : ''}</button>
+              )
+            })}
+            <span style={{ width: 6 }} />
             {FILTERS.map(([id, label]) => {
               const on = filter === id
               const n = id === 'all' ? counts.all : counts[id] || 0
@@ -195,8 +218,8 @@ export default function EstimatesBoard({ app }) {
                 <div style={{ width: 36, height: 36, borderRadius: 9, background: '#e7f1eb', color: '#1f7a4d', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontWeight: 600, fontSize: 11, flex: 'none' }}>{initialsOf(est.customerName)}</div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{est.customerName || 'Unknown'}</div>
-                  <div style={{ fontFamily: MONO, fontSize: 10.5, color: '#9aa69e' }}>
-                    {est.number}{est.responseNote ? ' · 🗒 note' : ''}
+                  <div style={{ fontFamily: MONO, fontSize: 10.5, color: '#9aa69e', display: 'flex', alignItems: 'center', gap: 5 }}>
+                    {est.number}<LinePill line={est.businessLine} />{est.responseNote ? ' · 🗒 note' : ''}
                   </div>
                 </div>
                 <div style={{ textAlign: 'right', flex: 'none' }}>

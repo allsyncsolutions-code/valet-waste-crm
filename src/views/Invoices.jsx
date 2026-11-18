@@ -52,7 +52,19 @@ const FILTERS = [['all', 'All'], ['draft', 'Draft'], ['sent', 'Sent'], ['paid', 
 const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` }
 const blankLine = () => ({ title: '', description: '', quantity: 1, unitPrice: '' })
 const blankForm = () => ({ customerId: '', issueDate: today(), dueDate: '', notes: '', discount: '', billToName: '', billToEmail: '', billToPhone: '', items: [blankLine()] })
-const blankClient = () => ({ name: '', contactName: '', email: '', phone: '', address: '' })
+
+// Junk/Waste line tags — the Invoicing boards are combined (one list for both
+// lines) and each row carries its line instead of the whole page switching.
+const LINES = {
+  waste: { label: 'Waste', color: '#1f7a4d', bg: '#e7f1eb', border: '#cfe0d5' },
+  junk: { label: 'Junk', color: '#2f6db0', bg: '#e9eef6', border: '#cdddee' },
+}
+const LINE_CHIPS = [['all', 'All'], ['waste', 'Waste'], ['junk', 'Junk']]
+function LinePill({ line, style = {} }) {
+  const m = LINES[line] || LINES.waste
+  return <span title={`${m.label} line`} style={{ fontFamily: MONO, fontSize: 9.5, fontWeight: 600, color: m.color, background: m.bg, border: `1px solid ${m.border}`, padding: '1px 6px', borderRadius: 5, ...style }}>{m.label}</span>
+}
+const blankClient = () => ({ name: '', contactName: '', email: '', phone: '', address: '', businessLine: '' })
 
 export default function Invoices({ app }) {
   const isMobile = app.isMobile
@@ -62,6 +74,7 @@ export default function Invoices({ app }) {
   const [err, setErr] = useState(null)
   const [notice, setNotice] = useState(null)
   const [filter, setFilter] = useState('all')
+  const [lineFilter, setLineFilter] = useState('all') // all | waste | junk — view filter on the combined board
   const [search, setSearch] = useState('')
   const [datePreset, setDatePreset] = useState('all') // all | thisMonth | lastMonth | thisYear | custom
   const [dateFrom, setDateFrom] = useState('')
@@ -108,7 +121,7 @@ export default function Invoices({ app }) {
   const [paidErr, setPaidErr] = useState(null)
 
   async function refresh() {
-    const rows = await loadInvoices(app.activeLine)
+    const rows = await loadInvoices() // both lines — the board is combined and filters client-side
     setInvoices(rows)
     setSelId((cur) => (cur && rows.some((r) => r.id === cur) ? cur : rows[0]?.id || null))
   }
@@ -170,10 +183,14 @@ export default function Invoices({ app }) {
     })
   }, [invoices, range])
 
+  const lineFiltered = useMemo(() => (
+    lineFilter === 'all' ? dateFiltered : dateFiltered.filter((i) => i.businessLine === lineFilter)
+  ), [dateFiltered, lineFilter])
+
   const list = useMemo(() => {
-    let rows = filter === 'all' ? dateFiltered
-      : filter === 'tipped' ? dateFiltered.filter((i) => i.status === 'paid' && i.tipAmount > 0)
-      : dateFiltered.filter((i) => i.status === filter)
+    let rows = filter === 'all' ? lineFiltered
+      : filter === 'tipped' ? lineFiltered.filter((i) => i.status === 'paid' && i.tipAmount > 0)
+      : lineFiltered.filter((i) => i.status === filter)
     const q = search.trim().toLowerCase()
     const qDigits = q.replace(/\D/g, '') // phone lookups: ignore formatting
     if (q) rows = rows.filter((i) => {
@@ -183,22 +200,23 @@ export default function Invoices({ app }) {
       return false
     })
     return rows
-  }, [dateFiltered, filter, search])
+  }, [lineFiltered, filter, search])
   const cur = invoices.find((i) => i.id === selId) || null
 
-  const outstanding = round2(dateFiltered.filter((i) => i.status === 'sent').reduce((s, i) => s + i.total, 0))
-  const paidTotal = round2(dateFiltered.filter((i) => i.status === 'paid').reduce((s, i) => s + i.total, 0))
-  const tipsTotal = round2(dateFiltered.filter((i) => i.status === 'paid').reduce((s, i) => s + (i.tipAmount || 0), 0))
-  const tippedCount = dateFiltered.filter((i) => i.status === 'paid' && i.tipAmount > 0).length
-  const draftCount = dateFiltered.filter((i) => i.status === 'draft').length
+  const outstanding = round2(lineFiltered.filter((i) => i.status === 'sent').reduce((s, i) => s + i.total, 0))
+  const paidTotal = round2(lineFiltered.filter((i) => i.status === 'paid').reduce((s, i) => s + i.total, 0))
+  const tipsTotal = round2(lineFiltered.filter((i) => i.status === 'paid').reduce((s, i) => s + (i.tipAmount || 0), 0))
+  const tippedCount = lineFiltered.filter((i) => i.status === 'paid' && i.tipAmount > 0).length
+  const draftCount = lineFiltered.filter((i) => i.status === 'draft').length
   // "Running" drafts — the invoices that accumulate line items as drivers
   // complete stops (and the lawn cron adds visits). Same-customer first so a
   // client's month-to-date build-up reads top-down; then by age, oldest first
   // (those need sending the most).
   const running = useMemo(() => invoices
     .filter((i) => i.status === 'draft')
+    .filter((i) => lineFilter === 'all' || i.businessLine === lineFilter)
     .sort((a, b) => (a.customerName || '').localeCompare(b.customerName || '') || String(a.createdAt).localeCompare(String(b.createdAt))),
-  [invoices])
+  [invoices, lineFilter])
 
   // ---- form helpers ----
   const setF = (patch) => setForm((f) => ({ ...f, ...patch }))
@@ -221,6 +239,11 @@ export default function Invoices({ app }) {
         email: newClient.email.trim(),
         phone: newClient.phone.trim(),
         address: newClient.address.trim(),
+        // Stamp the line so the invoice lands on the right Junk/Waste board
+        // (was silently defaulting to 'waste' — the "junk invoice goes to the
+        // waste tab" bug). Pre-filled from the app's active line, overridable
+        // in the form.
+        businessLine: newClient.businessLine || app.activeLine || 'waste',
       })
       const rows = await loadCustomers()
       setCustomers(rows)
@@ -464,6 +487,7 @@ export default function Invoices({ app }) {
     setBoard('invoices')
     setSearch('')
     setFilter('all')
+    setLineFilter('all')
     setDatePreset('all')
     setSelId(f.id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -520,7 +544,7 @@ export default function Invoices({ app }) {
                     <div style={{ width: 26, height: 26, borderRadius: 7, background: '#e7f1eb', color: '#1f7a4d', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontWeight: 600, fontSize: 9, flex: 'none' }}>{initialsOf(inv.customerName)}</div>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontWeight: 600, fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{inv.customerName || 'Unknown'}</div>
-                      <div style={{ fontFamily: MONO, fontSize: 9.5, color: '#9aa69e' }}>{inv.number}</div>
+                      <div style={{ fontFamily: MONO, fontSize: 9.5, color: '#9aa69e', display: 'flex', alignItems: 'center', gap: 5 }}>{inv.number}<LinePill line={inv.businessLine} /></div>
                     </div>
                   </div>
                   <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginTop: 6 }}>
@@ -549,9 +573,18 @@ export default function Invoices({ app }) {
             )}
           </div>
           <div style={{ display: 'flex', gap: 5, padding: '4px 4px 8px', flexWrap: 'wrap', alignItems: 'center' }}>
+            {LINE_CHIPS.map(([id, label]) => {
+              const on = lineFilter === id
+              const m = LINES[id]
+              const n = id === 'all' ? dateFiltered.length : dateFiltered.filter((i) => i.businessLine === id).length
+              return (
+                <button key={id} onClick={() => setLineFilter(id)} title={id === 'all' ? 'Both lines' : `${label} line only`} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: on ? (m ? m.bg : '#1f7a4d') : '#f3f5f2', color: on ? (m ? m.color : '#fff') : '#5d6b63', border: `1px solid ${on && m ? m.border : 'transparent'}`, borderRadius: 8, padding: '6px 11px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>{label} {n ? `· ${n}` : ''}</button>
+              )
+            })}
+            <span style={{ width: 6 }} />
             {FILTERS.map(([id, label]) => {
               const on = filter === id
-              const n = id === 'all' ? dateFiltered.length : id === 'tipped' ? dateFiltered.filter((i) => i.status === 'paid' && i.tipAmount > 0).length : dateFiltered.filter((i) => i.status === id).length
+              const n = id === 'all' ? lineFiltered.length : id === 'tipped' ? lineFiltered.filter((i) => i.status === 'paid' && i.tipAmount > 0).length : lineFiltered.filter((i) => i.status === id).length
               return (
                 <button key={id} onClick={() => setFilter(id)} style={{ background: on ? '#1f7a4d' : '#f3f5f2', color: on ? '#fff' : '#5d6b63', border: 'none', borderRadius: 8, padding: '6px 11px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>{label} {n ? `· ${n}` : ''}</button>
               )
@@ -592,7 +625,7 @@ export default function Invoices({ app }) {
                 <div style={{ width: 36, height: 36, borderRadius: 9, background: '#e7f1eb', color: '#1f7a4d', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontWeight: 600, fontSize: 11, flex: 'none' }}>{initialsOf(inv.customerName)}</div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{inv.customerName || 'Unknown'}</div>
-                  <div style={{ fontFamily: MONO, fontSize: 10.5, color: '#9aa69e' }}>{inv.number}</div>
+                  <div style={{ fontFamily: MONO, fontSize: 10.5, color: '#9aa69e', display: 'flex', alignItems: 'center', gap: 5 }}>{inv.number}<LinePill line={inv.businessLine} /></div>
                 </div>
                 <div style={{ textAlign: 'right', flex: 'none' }}>
                   <div style={{ fontFamily: MONO, fontSize: 13, fontWeight: 600 }}>
@@ -757,7 +790,7 @@ export default function Invoices({ app }) {
                   value={form.customerId}
                   disabled={!!editId}
                   onChange={(id) => setF({ customerId: id })}
-                  onAddNew={(name) => { setNewClient((c) => ({ ...blankClient(), name: name || '' })); setAddingClient(true) }}
+                  onAddNew={(name) => { setNewClient((c) => ({ ...blankClient(), name: name || '', businessLine: app.activeLine || 'waste' })); setAddingClient(true) }}
                 />
               </Field>
               <div style={twoCol}>
@@ -805,6 +838,15 @@ export default function Invoices({ app }) {
                 <div style={twoCol}>
                   <Field label="Name *"><input value={newClient.name} onChange={(e) => setNewClient((c) => ({ ...c, name: e.target.value }))} style={inp} placeholder="Business or person" autoFocus /></Field>
                   <Field label="Contact name"><input value={newClient.contactName} onChange={(e) => setNewClient((c) => ({ ...c, contactName: e.target.value }))} style={inp} placeholder="Optional" /></Field>
+                  <Field label="Line">
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      {['waste', 'junk'].map((l) => {
+                        const m = LINES[l]
+                        const on = (newClient.businessLine || app.activeLine || 'waste') === l
+                        return <button key={l} type="button" onClick={() => setNewClient((c) => ({ ...c, businessLine: l }))} style={{ flex: 1, cursor: 'pointer', fontSize: 12.5, fontWeight: 600, padding: '8px 6px', borderRadius: 8, border: `1px solid ${on ? m.border : '#dde2dd'}`, background: on ? m.bg : '#fff', color: on ? m.color : '#7c8a82' }}>{m.label}</button>
+                      })}
+                    </div>
+                  </Field>
                 </div>
                 <div style={twoCol}>
                   <Field label="Email"><input value={newClient.email} onChange={(e) => setNewClient((c) => ({ ...c, email: e.target.value }))} style={inp} type="email" placeholder="Optional" /></Field>
@@ -982,7 +1024,7 @@ function InvoiceDetail({ inv, settings, paymentsOk, busy, onEdit, onMarkPaid, on
       <div style={{ display: 'flex', gap: 22, padding: '16px 22px 4px', flexWrap: 'wrap', alignItems: 'flex-start' }}>
         <div style={{ flex: 1, minWidth: 180 }}>
           <div style={{ fontSize: 22, fontWeight: 800, letterSpacing: '.04em', color: '#15281d' }}>INVOICE</div>
-          <div style={{ fontFamily: MONO, fontSize: 13, color: '#5d6b63', marginTop: 2 }}>{inv.number}</div>
+          <div style={{ fontFamily: MONO, fontSize: 13, color: '#5d6b63', marginTop: 2, display: 'flex', alignItems: 'center', gap: 7 }}>{inv.number}<LinePill line={inv.businessLine} /></div>
           <div style={{ fontSize: 12, color: '#9aa69e', marginTop: 6 }}>
             Issued {fmtDate(inv.issueDate)}{inv.dueDate ? ` · Due ${fmtDate(inv.dueDate)}` : ''}{inv.paidAt ? ` · Paid ${new Date(inv.paidAt).toLocaleDateString()}` : ''}{inv.paidAt && inv.paymentMethod ? ` via ${paymentMethodLabel(inv.paymentMethod)}${inv.paymentMethod === 'check' && inv.checkNumber ? ` #${inv.checkNumber}` : ''}` : ''}
           </div>
