@@ -77,6 +77,9 @@ function mapInvoice(row) {
       : null,
     number: row.number,
     status: row.status,
+    // Line tag for the combined Junk/Waste board — comes from the client's
+    // business_line (invoices have no line column of their own).
+    businessLine: row.customers?.business_line || 'waste',
     // Bill-to override — what the invoice DOCUMENT shows (email, pay page,
     // PDF) instead of the assigned customer's name/email/phone, e.g. a
     // property manager's end client for insurance purposes.
