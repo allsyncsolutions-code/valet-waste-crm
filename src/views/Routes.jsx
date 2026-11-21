@@ -435,7 +435,7 @@ export default function RoutesView({ app }) {
     setShowNewStop(true)
   }
 
-  // Open the modal when the top-bar "+ New pickup" button bumps the tick.
+  // Open the modal when the top-bar "⚡ One-time pickup" button bumps the tick.
   const pickupTickRef = useRef(app.newPickupTick)
   useEffect(() => {
     if (app.newPickupTick !== pickupTickRef.current) {
@@ -638,7 +638,8 @@ export default function RoutesView({ app }) {
     try {
       const res = await copyPreviousWeekday(routeCode, routeSel)
       if (res.noSource) setErr(`No earlier ${selDow} found for ${currentDef.name} to copy from.`)
-      else if (res.copied === 0) setErr(`Nothing new to copy — those stops are already on ${prettyDate(routeSel)}.`)
+      else if (res.copied === 0 && !res.leftOneTime) setErr(`Nothing new to copy — those stops are already on ${prettyDate(routeSel)}.`)
+      else if (res.leftOneTime > 0) setNotice(`Copied ${res.copied} recurring stop${res.copied === 1 ? '' : 's'} — and left ${res.leftOneTime} one-time pickup${res.leftOneTime === 1 ? '' : 's'} behind, since one-time jobs never repeat.`)
       await refresh(routeSel)
     } catch (e) {
       setErr(e.message || String(e))
@@ -1159,7 +1160,7 @@ export default function RoutesView({ app }) {
 
         <div style={{ flex: 1 }} />
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-          <button onClick={openNewStop} style={ghostBtn}>+ New pickup</button>
+          <button onClick={openNewStop} title="Add a one-time pickup — a single job for this date only. It never repeats, and removing it never affects any weekly schedule." style={ghostBtn}>⚡ One-time pickup</button>
           <button onClick={openMass} style={ghostBtn}>+ Add stops</button>
           {copyableRoutes.length > 0 && (
             <select value="" onChange={(e) => { if (e.target.value) handleCopyRouteFrom(e.target.value); e.target.value = '' }} title="Copy another route's stops for this day onto this route — the one-click way to build an alternate/backup run with the same addresses" style={{ ...ghostBtn, cursor: 'pointer', paddingRight: 4 }}>
@@ -1306,6 +1307,9 @@ export default function RoutesView({ app }) {
                           {st.lat == null && <span title="No map pin — address likely needs a city/ZIP" style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#c08a2e', background: '#fbf3e2', padding: '1px 5px', borderRadius: 4 }}>NO PIN</span>}
                           {sharedCodes.length > 0 && (
                             <span title={`Also on Route ${sharedCodes.join(' & ')} today — the address is shared between routes (alternate/backup run). Whoever completes their copy first auto-skips the other.`} style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#8a6d1e', background: '#f6efdd', padding: '1px 5px', borderRadius: 4 }}>⧉ ALSO ON {sharedCodes.join('/')}</span>
+                          )}
+                          {st.oneTime && (
+                            <span title="One-time pickup — not part of any weekly schedule. It won't reappear on future routes, and deleting it never touches the client's recurring service." style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#155e9c', background: '#e3eef8', border: '1px solid #bcd7ee', padding: '1px 5px', borderRadius: 4, letterSpacing: '.03em' }}>⚡ ONE-TIME</span>
                           )}
                         </div>
                         <div style={{ fontSize: 11.5, color: '#7c8a82' }}>{st.address && st.address !== st.name ? st.address : st.service}{st.clientName && st.clientName !== st.name ? ` · ${st.clientName}` : ''}</div>

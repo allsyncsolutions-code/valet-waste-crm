@@ -414,8 +414,12 @@ async function sendPlainCustomerEmail(to: string, subject: string, text: string,
 // the same thing staff do by hand with "Copy last <weekday>", minus paused
 // properties and that day's skip overrides. Existing routes are NEVER
 // touched, so anything built or edited manually stays exactly as-is and this
-// is safe to run every morning. (Stops added after the copy — new clients,
-// one-off pickups — are still a manual step; this only mirrors last week.)
+// is safe to run every morning. Since 2026-11-21 the copy also skips stops
+// whose property isn't scheduled on the target date, so one-time pickups
+// (one-off jobs, same-weekday-moved stops) never ride into next week; a
+// service override for the target date still carries them. (Stops added
+// after the copy — new clients, one-off pickups — are still a manual step;
+// this only mirrors last week's RECURRING stops.)
 async function runAutoBuildRoutes(): Promise<string> {
   const today = etToday()
   const horizon = addDays(today, 7)
@@ -433,11 +437,17 @@ async function runAutoBuildRoutes(): Promise<string> {
   // Copied stops respect pauses and skip overrides for that date.
   const paused = new Set((await sbGet(`properties?paused=eq.true&select=id&limit=3000`)).map((p: any) => p.id))
   const skipByDate = new Map<string, Set<string>>()
+  const extraByDate = new Map<string, Set<string>>()
   try {
     const ov = await sbGet(`property_day_overrides?skip_date=gte.${today}&skip_date=lte.${horizon}&select=property_id,skip_date&limit=3000`)
     for (const o of ov) {
       if (!skipByDate.has(o.skip_date)) skipByDate.set(o.skip_date, new Set())
       skipByDate.get(o.skip_date)!.add(o.property_id)
+    }
+    const ovx = await sbGet(`property_day_overrides?service_date=gte.${today}&service_date=lte.${horizon}&select=property_id,service_date&limit=3000`)
+    for (const o of ovx) {
+      if (!extraByDate.has(o.service_date)) extraByDate.set(o.service_date, new Set())
+      extraByDate.get(o.service_date)!.add(o.property_id)
     }
   } catch (_e) { /* overrides table unavailable → plain copy */ }
 
@@ -461,7 +471,21 @@ async function runAutoBuildRoutes(): Promise<string> {
       const stops = await sbGet(`route_stops?route_id=eq.${src.id}&select=property_id,service,time_window,lat,lng&order=seq.asc&limit=500`)
       if (!stops.length) continue
       const skips = skipByDate.get(date) || new Set<string>()
-      const rows = stops.filter((s: any) => !paused.has(s.property_id) && !skips.has(s.property_id))
+      const extras = extraByDate.get(date) || new Set<string>()
+      // Only carry stops whose property is actually scheduled on the target
+      // date (or has a service override for it) — one-time stops stay one day.
+      const propIds = [...new Set(stops.map((s: any) => s.property_id).filter(Boolean))]
+      const dueIds = new Set<string>()
+      if (propIds.length) {
+        const props = await sbGet(`properties?id=in.(${propIds.join(",")})&select=id,pickup_days,pickup_frequency,pickup_start_date&limit=500`)
+        for (const p of props) {
+          const days: string[] = Array.isArray(p.pickup_days) ? p.pickup_days : []
+          if (days.some((d: string) => scheduleHits({ day_of_week: d, frequency: p.pickup_frequency || "weekly", start_date: p.pickup_start_date || null }, date))) dueIds.add(p.id)
+        }
+      }
+      const rows = stops.filter((s: any) =>
+        !paused.has(s.property_id) && !skips.has(s.property_id) &&
+        (dueIds.has(s.property_id) || extras.has(s.property_id)))
       if (!rows.length) continue
       const def = defaults.get(code) || {}
       const route = await sbPost("routes", {
