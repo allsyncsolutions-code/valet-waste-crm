@@ -7,6 +7,8 @@ import {
   resequence,
   splitFixed,
   moveStop,
+  moveStopToPosition,
+  dropStopBefore,
   removeStop as removeLocal,
   addStop as addLocal,
   isFixed,
@@ -368,6 +370,27 @@ export default function RoutesView({ app }) {
 
   function handleMove(id, dir) {
     const next = moveStop(stops, id, dir)
+    setStops(next)
+    setOptimized(false)
+    withWrite(() => persistOrder(next))
+  }
+
+  // Jump straight to a position (owner ask 2026-11-21) — no more tapping ↑ 79x.
+  function handleMoveTo(id, target) {
+    const next = moveStopToPosition(stops, id, target)
+    setStops(next)
+    setOptimized(false)
+    withWrite(() => persistOrder(next))
+  }
+
+  // Drag-and-drop reordering (desktop web): the whole row is the handle.
+  const [dragId, setDragId] = useState(null)
+  const [dropId, setDropId] = useState(null)
+  function handleDropOn(targetId) {
+    const next = dropStopBefore(stops, dragId, targetId)
+    setDragId(null)
+    setDropId(null)
+    if (next === stops) return
     setStops(next)
     setOptimized(false)
     withWrite(() => persistOrder(next))
@@ -1244,7 +1267,16 @@ export default function RoutesView({ app }) {
               const locked = isFixed(st)
               const sharedCodes = st.sharedCodes || []
               return (
-                <div key={st.id} style={{ display: 'flex', gap: 10, padding: '7px 8px', borderBottom: '1px solid #f1f3f0', background: st.isNew ? '#fbf6e7' : sharedCodes.length ? '#fdf8ef' : undefined }}>
+                <div
+                  key={st.id}
+                  draggable={!locked}
+                  onDragStart={(e) => { setDragId(st.id); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', String(st.seq)) }}
+                  onDragOver={(e) => { if (dragId && dragId !== st.id) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setDropId(st.id) } }}
+                  onDrop={(e) => { e.preventDefault(); handleDropOn(st.id) }}
+                  onDragEnd={() => { setDragId(null); setDropId(null) }}
+                  title={locked ? undefined : 'Drag to reorder — or use ↑ ↓ / the # box'}
+                  style={{ display: 'flex', gap: 10, padding: '7px 8px', borderBottom: '1px solid #f1f3f0', opacity: dragId === st.id ? 0.5 : 1, background: dropId === st.id ? '#e7f1eb' : st.isNew ? '#fbf6e7' : sharedCodes.length ? '#fdf8ef' : undefined }}
+                >
                   <div style={{ width: 24, height: 24, flex: 'none', borderRadius: '50%', background: meta.bg, color: meta.fg, border: st.status === 'enroute' ? '2px solid #46c585' : 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontSize: 11, fontWeight: 600 }}>{st.seq}</div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     {editStopId === st.id ? (
@@ -1295,6 +1327,12 @@ export default function RoutesView({ app }) {
                       <div style={{ marginTop: 7, display: 'flex', gap: 6, alignItems: 'center' }}>
                         <button onClick={() => handleMove(st.id, -1)} style={miniBtn} title="Move up">↑</button>
                         <button onClick={() => handleMove(st.id, 1)} style={miniBtn} title="Move down">↓</button>
+                        <input
+                          type="number" min="1" max={stops.length} placeholder="#"
+                          title={`Jump to position 1–${stops.length} — press Enter`}
+                          onKeyDown={(e) => { if (e.key === 'Enter' && e.currentTarget.value) { handleMoveTo(st.id, e.currentTarget.value); e.currentTarget.value = '' } }}
+                          style={{ ...miniBtn, width: 54, textAlign: 'center', cursor: 'text', fontFamily: MONO }}
+                        />
                         <button onClick={() => startEditAddress(st)} style={miniBtn} title="Edit this address">✎ Address</button>
                         {st.needsReview && <button onClick={() => handleMarkReviewed(st)} style={{ ...miniBtn, color: '#1f7a4d' }} title="Clear this stop's ⚠ REVIEW flag">✓ Reviewed</button>}
                         <select
