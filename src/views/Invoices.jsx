@@ -28,6 +28,7 @@ import {
   attachExistingPhoto,
   loadClientServiceHistory,
   mergeInvoiceInto,
+  presetRange,
 } from '../lib/invoicesData.js'
 import { loadStopPhotos } from '../lib/photosData.js'
 import { currentActorName } from '../lib/activityData.js'
@@ -76,7 +77,10 @@ export default function Invoices({ app }) {
   const [filter, setFilter] = useState('all')
   const [lineFilter, setLineFilter] = useState('all') // all | waste | junk — view filter on the combined board
   const [search, setSearch] = useState('')
-  const [datePreset, setDatePreset] = useState('all') // all | thisMonth | lastMonth | thisYear | custom
+  const [datePreset, setDatePresetRaw] = useState(() => { // all | thisMonth | lastMonth | last30 | thisQuarter | lastQuarter | thisYear | lastYear | custom — per-user preference, month-to-date by default
+    try { return localStorage.getItem('vw_inv_range') || 'thisMonth' } catch (e) { return 'thisMonth' }
+  })
+  const setDatePreset = (p) => { setDatePresetRaw(p); try { localStorage.setItem('vw_inv_range', p) } catch (e) {} }
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const [selId, setSelId] = useState(null)
@@ -164,14 +168,10 @@ export default function Invoices({ app }) {
 
   // Date filter — paid invoices count by their PAID date, everything else by
   // issue date, so "This month" reads as "collected/billed this month".
+  // Presets live in invoicesData so the Dashboard KPIs use the exact same ones.
   const range = useMemo(() => {
-    const now = new Date()
-    const dstr = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-    if (datePreset === 'thisMonth') return [dstr(new Date(now.getFullYear(), now.getMonth(), 1)), dstr(now)]
-    if (datePreset === 'lastMonth') return [dstr(new Date(now.getFullYear(), now.getMonth() - 1, 1)), dstr(new Date(now.getFullYear(), now.getMonth(), 0))]
-    if (datePreset === 'thisYear') return [dstr(new Date(now.getFullYear(), 0, 1)), dstr(now)]
     if (datePreset === 'custom') return [dateFrom || '', dateTo || '']
-    return ['', '']
+    return presetRange(datePreset)
   }, [datePreset, dateFrom, dateTo])
 
   const dateFiltered = useMemo(() => {
@@ -488,7 +488,7 @@ export default function Invoices({ app }) {
     setSearch('')
     setFilter('all')
     setLineFilter('all')
-    setDatePreset('all')
+    setDatePresetRaw('all') // session-only — don't clobber the saved preference
     setSelId(f.id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [app.invoiceFocus])
@@ -512,6 +512,51 @@ export default function Invoices({ app }) {
         <SummaryCard label="Drafts" value={String(draftCount)} sub="not sent yet — click to list" accent="#7c8a82" onClick={() => setFilter(filter === 'draft' ? 'all' : 'draft')} active={filter === 'draft'} />
         <div style={{ flex: 1 }} />
         <button onClick={openCreate} style={{ alignSelf: 'center', background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 10, padding: '11px 17px', fontSize: 13.5, fontWeight: 600, cursor: 'pointer' }}>+ New invoice</button>
+      </div>
+
+      {/* Filters live at the TOP of the page (owner ask 2026-11-21) — the
+          summary cards above all follow the date preset chosen here.
+          Date preset is a per-user preference (month-to-date by default). */}
+      <div style={{ display: 'flex', gap: 5, marginBottom: 14, flexWrap: 'wrap', alignItems: 'center', background: '#fff', border: '1px solid #e6eae6', borderRadius: 13, padding: '10px 12px' }}>
+        {LINE_CHIPS.map(([id, label]) => {
+          const on = lineFilter === id
+          const m = LINES[id]
+          const n = id === 'all' ? dateFiltered.length : dateFiltered.filter((i) => i.businessLine === id).length
+          return (
+            <button key={id} onClick={() => setLineFilter(id)} title={id === 'all' ? 'Both lines' : `${label} line only`} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: on ? (m ? m.bg : '#1f7a4d') : '#f3f5f2', color: on ? (m ? m.color : '#fff') : '#5d6b63', border: `1px solid ${on && m ? m.border : 'transparent'}`, borderRadius: 8, padding: '6px 11px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>{label} {n ? `· ${n}` : ''}</button>
+          )
+        })}
+        <span style={{ width: 6 }} />
+        {FILTERS.map(([id, label]) => {
+          const on = filter === id
+          const n = id === 'all' ? lineFiltered.length : id === 'tipped' ? lineFiltered.filter((i) => i.status === 'paid' && i.tipAmount > 0).length : lineFiltered.filter((i) => i.status === id).length
+          return (
+            <button key={id} onClick={() => setFilter(id)} style={{ background: on ? '#1f7a4d' : '#f3f5f2', color: on ? '#fff' : '#5d6b63', border: 'none', borderRadius: 8, padding: '6px 11px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>{label} {n ? `· ${n}` : ''}</button>
+          )
+        })}
+        <span style={{ flex: 1 }} />
+        <select
+          value={datePreset}
+          onChange={(e) => setDatePreset(e.target.value)}
+          style={{ ...inp, width: 'auto', fontSize: 12, fontWeight: 600, padding: '6px 8px', color: datePreset === 'all' ? '#5d6b63' : '#1f7a4d', background: datePreset === 'all' ? '#f3f5f2' : '#e7f1eb', cursor: 'pointer' }}
+        >
+          <option value="all">All dates</option>
+          <option value="thisMonth">This month</option>
+          <option value="lastMonth">Last month</option>
+          <option value="last30">Last 30 days</option>
+          <option value="thisQuarter">This quarter</option>
+          <option value="lastQuarter">Last quarter</option>
+          <option value="thisYear">This year</option>
+          <option value="lastYear">Last year</option>
+          <option value="custom">Custom range…</option>
+        </select>
+        {datePreset === 'custom' && (
+          <>
+            <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} style={{ ...inp, width: 132, fontSize: 12, padding: '6px 8px', color: '#5d6b63' }} />
+            <span style={{ color: '#9aa69e', fontSize: 11 }}>to</span>
+            <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} style={{ ...inp, width: 132, fontSize: 12, padding: '6px 8px', color: '#5d6b63' }} />
+          </>
+        )}
       </div>
 
       {err && <div style={errorBox}>{err}</div>}
@@ -572,44 +617,6 @@ export default function Invoices({ app }) {
               <button onClick={() => setSearch('')} title="Clear search" style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: '#9aa69e', fontSize: 16, cursor: 'pointer', padding: 0, lineHeight: 1 }}>×</button>
             )}
           </div>
-          <div style={{ display: 'flex', gap: 5, padding: '4px 4px 8px', flexWrap: 'wrap', alignItems: 'center' }}>
-            {LINE_CHIPS.map(([id, label]) => {
-              const on = lineFilter === id
-              const m = LINES[id]
-              const n = id === 'all' ? dateFiltered.length : dateFiltered.filter((i) => i.businessLine === id).length
-              return (
-                <button key={id} onClick={() => setLineFilter(id)} title={id === 'all' ? 'Both lines' : `${label} line only`} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: on ? (m ? m.bg : '#1f7a4d') : '#f3f5f2', color: on ? (m ? m.color : '#fff') : '#5d6b63', border: `1px solid ${on && m ? m.border : 'transparent'}`, borderRadius: 8, padding: '6px 11px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>{label} {n ? `· ${n}` : ''}</button>
-              )
-            })}
-            <span style={{ width: 6 }} />
-            {FILTERS.map(([id, label]) => {
-              const on = filter === id
-              const n = id === 'all' ? lineFiltered.length : id === 'tipped' ? lineFiltered.filter((i) => i.status === 'paid' && i.tipAmount > 0).length : lineFiltered.filter((i) => i.status === id).length
-              return (
-                <button key={id} onClick={() => setFilter(id)} style={{ background: on ? '#1f7a4d' : '#f3f5f2', color: on ? '#fff' : '#5d6b63', border: 'none', borderRadius: 8, padding: '6px 11px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>{label} {n ? `· ${n}` : ''}</button>
-              )
-            })}
-            <span style={{ flex: 1 }} />
-            <select
-              value={datePreset}
-              onChange={(e) => setDatePreset(e.target.value)}
-              style={{ ...inp, width: 'auto', fontSize: 12, fontWeight: 600, padding: '6px 8px', color: datePreset === 'all' ? '#5d6b63' : '#1f7a4d', background: datePreset === 'all' ? '#f3f5f2' : '#e7f1eb', cursor: 'pointer' }}
-            >
-              <option value="all">All dates</option>
-              <option value="thisMonth">This month</option>
-              <option value="lastMonth">Last month</option>
-              <option value="thisYear">This year</option>
-              <option value="custom">Custom range…</option>
-            </select>
-            {datePreset === 'custom' && (
-              <>
-                <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} style={{ ...inp, width: 132, fontSize: 12, padding: '6px 8px', color: '#5d6b63' }} />
-                <span style={{ color: '#9aa69e', fontSize: 11 }}>to</span>
-                <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} style={{ ...inp, width: 132, fontSize: 12, padding: '6px 8px', color: '#5d6b63' }} />
-              </>
-            )}
-          </div>
-
           {loading && <div style={empty}>Loading invoices…</div>}
           {!loading && !invoices.length && <div style={empty}>No invoices yet. Create your first with “New invoice”.</div>}
           {!loading && !!invoices.length && !list.length && <div style={empty}>{search.trim() ? `No invoices match “${search.trim()}”.` : datePreset !== 'all' ? 'No invoices in this date range.' : `No ${filter} invoices.`}</div>}

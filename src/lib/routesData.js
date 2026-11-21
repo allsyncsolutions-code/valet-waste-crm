@@ -611,6 +611,38 @@ export async function loadDayRouteSummaries(date, line = null) {
     }))
 }
 
+// Every ACTUAL stop on this date across all routes — the same route_stops
+// rows the Routes page renders, so the dashboard "Today's pickups" number and
+// list can never disagree with Routes (e.g. carried-over one-time pickups that
+// no schedule knows about). Flattened and ordered route-by-route, seq order.
+export async function loadTodayStops(date, line = null) {
+  if (!date) return []
+  let q = supabase
+    .from('routes')
+    .select('id, code, route_stops(id, property_id, seq, status, service, time_window, properties(name, address))')
+    .eq('service_date', date)
+  if (line) q = q.eq('business_line', line)
+  const { data, error } = await q.order('code', { ascending: true })
+  if (error) throw error
+  const rows = []
+  for (const r of data || []) {
+    for (const s of r.route_stops || []) {
+      rows.push({
+        stopId: s.id,
+        propertyId: s.property_id,
+        name: s.properties?.name || 'Unknown',
+        address: s.properties?.address || '',
+        service: s.service || '',
+        window: s.time_window || '',
+        status: s.status || 'pending',
+        routeCode: r.code,
+        seq: s.seq,
+      })
+    }
+  }
+  return rows
+}
+
 // Copy ANOTHER route's stops for the same date onto this route — the one-click
 // way to build an alternate/backup route (same addresses, own stop order, own
 // driver). Properties already on the target route are skipped.

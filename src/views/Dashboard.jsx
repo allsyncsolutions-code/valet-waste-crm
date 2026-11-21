@@ -2,9 +2,9 @@ import { useEffect, useMemo, useState } from 'react'
 import { MONO } from '../data.js'
 import { hasSupabase } from '../lib/supabaseClient.js'
 import { loadCustomers, subscribeCustomers } from '../lib/customersData.js'
-import { loadInvoices, subscribeInvoices, round2 } from '../lib/invoicesData.js'
+import { loadInvoices, subscribeInvoices, round2, filterInvoicesByPreset, INVOICE_DATE_PRESETS } from '../lib/invoicesData.js'
 import { loadPropertyPickups, subscribeSchedules, freqLabel } from '../lib/schedulesData.js'
-import { scheduleHitsDate, loadDayOverrides, loadPendingNewProperties } from '../lib/routesData.js'
+import { scheduleHitsDate, loadDayOverrides, loadPendingNewProperties, loadTodayStops } from '../lib/routesData.js'
 import { updateProperty } from '../lib/customersData.js'
 import { logActivity } from '../lib/activityData.js'
 import { loadOpenRequests, subscribeOpenRequests } from '../lib/requestsData.js'
@@ -29,6 +29,14 @@ const STATUS_META = {
   void: { label: 'Void', color: '#9a2c1e', bg: '#fdecea' },
 }
 
+// Status chips for ACTUAL route stops on the Today's pickups panel.
+const PICKUP_STATUS = {
+  pending: { label: 'PENDING', color: '#5d6b63', bg: '#eef0ed' },
+  enroute: { label: 'ON SITE', color: '#8a5a10', bg: '#fdf2e0' },
+  done: { label: 'DONE', color: '#1f7a4d', bg: '#e7f1eb' },
+  skipped: { label: 'SKIPPED', color: '#8a6d1e', bg: '#f6efdd' },
+}
+
 export default function Dashboard({ app }) {
   const { isMobile, go } = app
   const [customers, setCustomers] = useState([])
@@ -40,18 +48,30 @@ export default function Dashboard({ app }) {
   const [openRequests, setOpenRequests] = useState(null) // null = still loading
   const [triageOpen, setTriageOpen] = useState(false)
   const [pendingNew, setPendingNew] = useState([]) // new properties not yet on a route
+  const [todayStops, setTodayStops] = useState([]) // ACTUAL stops on today's routes (same data Routes shows)
+  // Invoice KPI range — month-to-date by default, remembered per user/browser
+  // (Randy wants month, Matt wants year/quarter; each keeps their own).
+  const [invPreset, setInvPreset] = useState(() => {
+    try { return localStorage.getItem('vw_dash_range') || 'thisMonth' } catch (e) { return 'thisMonth' }
+  })
+  const changeInvPreset = (p) => {
+    setInvPreset(p)
+    try { localStorage.setItem('vw_dash_range', p) } catch (e) {}
+  }
   // Weekly route auto-build notice — dismissible, remembered per browser.
   const [routeBannerHidden, setRouteBannerHidden] = useState(() => { try { return !!localStorage.getItem('vw_banner_routeauto') } catch (e) { return false } })
 
   async function refresh() {
-    const [c, i, s, ov] = await Promise.all([
+    const [c, i, s, ov, ts] = await Promise.all([
       loadCustomers(), loadInvoices(app.activeLine), loadPropertyPickups(app.activeLine),
       loadDayOverrides(todayKey()).catch(() => null),
+      loadTodayStops(todayKey(), app.activeLine).catch(() => []),
     ])
     setCustomers(c.filter((x) => (x.business_line || 'waste') === (app.activeLine || 'waste')))
     setInvoices(i)
     setSchedules(s)
     setOverrides(ov)
+    setTodayStops(ts)
   }
 
   useEffect(() => {
@@ -95,17 +115,31 @@ export default function Dashboard({ app }) {
     const today = todayKey()
     // A property is due today if any of its pickup days lands on today's date
     // (respecting frequency / start date) and its client isn't paused.
-    const todayPickups = schedules.filter((p) => {
+    const dueToday = schedules.filter((p) => {
       if (p.customerStatus === 'paused' || p.paused) return false
       if (overrides?.skips?.has(p.id)) return false // one-time moved off today
       if (overrides?.extras?.has(p.id)) return true // one-time moved onto today
       return (p.days || []).some((d) => scheduleHitsDate({ day_of_week: d, frequency: p.frequency, start_date: p.startDate, active: true }, today))
     })
-    const outstanding = round2(invoices.filter((i) => i.status === 'sent').reduce((a, i) => a + i.total, 0))
-    const collected = round2(invoices.filter((i) => i.status === 'paid').reduce((a, i) => a + i.total, 0))
+    // Today's pickups = the ACTUAL stops on today's routes (the exact rows the
+    // Routes page shows, incl. one-time/carried-over pickups) PLUS any property
+    // the schedule says is due but isn't placed on a route yet. Dashboard and
+    // Routes can never disagree on the count because stops lead the list.
+    const onRouteIds = new Set(todayStops.map((s) => s.propertyId).filter(Boolean))
+    const placed = todayStops.map((s) => ({ kind: 'stop', key: `stop:${s.stopId}`, ...s }))
+    const unplaced = dueToday
+      .filter((p) => !onRouteIds.has(p.id))
+      .map((p) => ({ kind: 'due', key: `due:${p.id}`, id: p.id, name: p.name || p.address, address: p.address || '', service: p.service || '', status: 'unrouted', routeCode: null, seq: null, customerName: p.customerName, frequency: p.frequency }))
+    const todayPickups = [...placed, ...unplaced]
+    // Invoice KPIs respect the selected range preset (month-to-date default).
+    const ranged = filterInvoicesByPreset(invoices, invPreset)
+    const outstanding = round2(ranged.filter((i) => i.status === 'sent').reduce((a, i) => a + i.total, 0))
+    const collected = round2(ranged.filter((i) => i.status === 'paid').reduce((a, i) => a + i.total, 0))
     const drafts = invoices.filter((i) => i.status === 'draft').length
-    return { activeClients, todayPickups, outstanding, collected, drafts }
-  }, [customers, invoices, schedules, overrides])
+    const sentCount = ranged.filter((i) => i.status === 'sent').length
+    const paidCount = ranged.filter((i) => i.status === 'paid').length
+    return { activeClients, todayPickups, outstanding, collected, drafts, sentCount, paidCount }
+  }, [customers, invoices, schedules, overrides, todayStops, invPreset])
 
   const recentInvoices = invoices.slice(0, 6)
   const hasAnything = customers.length || invoices.length || schedules.length
@@ -210,28 +244,49 @@ export default function Dashboard({ app }) {
 
       {!loading && hasAnything && (
         <>
+          {/* Invoice range toggle — the same presets the Invoices board uses.
+              Default month-to-date; each browser keeps its own preference. */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
+            <span style={{ fontSize: 11.5, color: '#7c8a82', fontWeight: 600 }}>Invoice totals:</span>
+            {INVOICE_DATE_PRESETS.map((p) => (
+              <span
+                key={p.id}
+                onClick={() => changeInvPreset(p.id)}
+                style={{ fontSize: 11.5, fontWeight: 600, padding: '4px 10px', borderRadius: 7, cursor: 'pointer', border: `1px solid ${invPreset === p.id ? '#1f7a4d' : '#dde2dd'}`, background: invPreset === p.id ? '#e7f1eb' : '#fff', color: invPreset === p.id ? '#1f7a4d' : '#5d6b63' }}
+              >{p.label}</span>
+            ))}
+          </div>
+
           {/* KPI cards */}
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(4,1fr)', gap: 12, marginBottom: 16 }}>
             <Kpi label="Active clients" value={String(stats.activeClients)} sub={`${customers.length} total`} accent="#1f7a4d" onClick={() => go('clients')} />
-            <Kpi label="Today's pickups" value={String(stats.todayPickups.length)} sub={DOW[new Date().getDay()].replace(/^./, (m) => m.toUpperCase())} accent="#155e9c" onClick={() => go('schedule')} />
-            <Kpi label="Outstanding" value={money(stats.outstanding)} sub={`${invoices.filter((i) => i.status === 'sent').length} sent`} accent="#b07a1e" onClick={() => go('invoices')} />
-            <Kpi label="Collected" value={money(stats.collected)} sub={`${invoices.filter((i) => i.status === 'paid').length} paid`} accent="#1f7a4d" onClick={() => go('invoices')} />
+            <Kpi label="Today's pickups" value={String(stats.todayPickups.length)} sub={DOW[new Date().getDay()].replace(/^./, (m) => m.toUpperCase())} accent="#155e9c" onClick={() => go('routes')} />
+            <Kpi label="Outstanding" value={money(stats.outstanding)} sub={`${stats.sentCount} sent · ${INVOICE_DATE_PRESETS.find((p) => p.id === invPreset)?.label.toLowerCase() || ''}`} accent="#b07a1e" onClick={() => go('invoices')} />
+            <Kpi label="Collected" value={money(stats.collected)} sub={`${stats.paidCount} paid · ${INVOICE_DATE_PRESETS.find((p) => p.id === invPreset)?.label.toLowerCase() || ''}`} accent="#1f7a4d" onClick={() => go('invoices')} />
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 16 }}>
-            {/* Today's pickups */}
-            <Panel title="Today's pickups" actionLabel="Schedules" onAction={() => go('schedule')}>
+            {/* Today's pickups — the same route_stops rows Routes shows, plus
+                anything the schedule says is due but isn't placed on a route. */}
+            <Panel title="Today's pickups" actionLabel="Routes" onAction={() => go('routes')}>
               {stats.todayPickups.length === 0 && <div style={panelEmpty}>No pickups scheduled for today.</div>}
-              {stats.todayPickups.map((s) => (
-                <div key={s.id} style={row}>
-                  <div style={avatar}>{initialsOf(s.customerName)}</div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.customerName}</div>
-                    <div style={{ fontSize: 11.5, color: '#7c8a82', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.address || s.service || 'Pickup'}</div>
+              {stats.todayPickups.map((s) => {
+                const meta = PICKUP_STATUS[s.status] || PICKUP_STATUS.pending
+                return (
+                  <div key={s.key} style={row}>
+                    <div style={avatar}>{initialsOf(s.name)}</div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.name}</div>
+                      <div style={{ fontSize: 11.5, color: '#7c8a82', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.address || s.service || 'Pickup'}</div>
+                    </div>
+                    {s.kind === 'due' ? (
+                      <span title="Scheduled today but not placed on a route yet — open Routes to add it" style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#8a6d1e', background: '#fbf3e2', padding: '2px 8px', borderRadius: 6 }}>NOT ON ROUTE</span>
+                    ) : (
+                      <span style={{ flex: 'none', fontFamily: MONO, fontSize: 10, color: meta.color, background: meta.bg, padding: '2px 8px', borderRadius: 6 }}>{s.routeCode ? `${s.routeCode} · ` : ''}{meta.label}</span>
+                    )}
                   </div>
-                  <span style={{ flex: 'none', fontFamily: MONO, fontSize: 10, color: '#1f7a4d', background: '#e7f1eb', padding: '2px 8px', borderRadius: 6 }}>{freqLabel(s.frequency)}</span>
-                </div>
-              ))}
+                )
+              })}
             </Panel>
 
             {/* Recent invoices */}

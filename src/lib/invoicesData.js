@@ -37,6 +37,51 @@ export function paymentMethodLabel(value) {
 const num = (v) => (v == null || v === '' ? 0 : Number(v))
 export const round2 = (v) => Math.round(num(v) * 100) / 100
 
+// --- date-range presets (shared by the Dashboard KPIs and the Invoices board)
+// Paid invoices count by their PAID date, everything else by issue date, so
+// "This month" reads as "collected/billed this month" everywhere.
+export const INVOICE_DATE_PRESETS = [
+  { id: 'thisMonth', label: 'This month' },
+  { id: 'lastMonth', label: 'Last month' },
+  { id: 'last30', label: 'Last 30 days' },
+  { id: 'thisQuarter', label: 'This quarter' },
+  { id: 'lastQuarter', label: 'Last quarter' },
+  { id: 'thisYear', label: 'This year' },
+  { id: 'lastYear', label: 'Last year' },
+  { id: 'all', label: 'All time' },
+]
+
+const dstr = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+
+export function presetRange(preset, now = new Date()) {
+  const mStart = new Date(now.getFullYear(), now.getMonth(), 1)
+  const qFirstMonth = Math.floor(now.getMonth() / 3) * 3
+  const qStart = new Date(now.getFullYear(), qFirstMonth, 1)
+  const lastQEnd = new Date(now.getFullYear(), qFirstMonth, 0)
+  const lastQStart = new Date(lastQEnd.getFullYear(), lastQEnd.getMonth() - 2, 1)
+  switch (preset) {
+    case 'thisMonth': return [dstr(mStart), dstr(now)]
+    case 'lastMonth': return [dstr(new Date(now.getFullYear(), now.getMonth() - 1, 1)), dstr(new Date(now.getFullYear(), now.getMonth(), 0))]
+    case 'last30': return [dstr(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 30)), dstr(now)]
+    case 'thisQuarter': return [dstr(qStart), dstr(now)]
+    case 'lastQuarter': return [dstr(lastQStart), dstr(lastQEnd)]
+    case 'thisYear': return [dstr(new Date(now.getFullYear(), 0, 1)), dstr(now)]
+    case 'lastYear': return [dstr(new Date(now.getFullYear() - 1, 0, 1)), dstr(new Date(now.getFullYear() - 1, 11, 31))]
+    default: return ['', '']
+  }
+}
+
+export function invoiceInRange(inv, from, to) {
+  const d = (inv.status === 'paid' && inv.paidAt ? String(inv.paidAt) : inv.issueDate || inv.createdAt || '').slice(0, 10)
+  return !!d && (!from || d >= from) && (!to || d <= to)
+}
+
+export function filterInvoicesByPreset(invoices, preset) {
+  const [from, to] = presetRange(preset)
+  if (!from && !to) return invoices
+  return invoices.filter((i) => invoiceInRange(i, from, to))
+}
+
 // Compute a line's amount + the invoice subtotal/total from items & discount.
 export function lineAmount(item) {
   return round2(num(item.quantity) * num(item.unitPrice))
