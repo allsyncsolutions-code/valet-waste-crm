@@ -68,6 +68,8 @@ const BOTTOM_NAV = [
   { id: 'invoices', glyph: '$', label: 'Billing' },
   { id: 'clients', glyph: '◎', label: 'Clients' },
 ]
+// Every view id the hash router accepts (back/forward + refresh-safe URLs).
+const VALID_VIEWS = new Set([...NAV_MAIN, ...NAV_FIELD, ...BOTTOM_NAV].map((n) => n.id))
 
 export default function App({ user, onSignOut }) {
   const { isMobile, isTablet } = useResponsive()
@@ -84,7 +86,36 @@ export default function App({ user, onSignOut }) {
 
   // Remember where the user was across page refreshes (line + screen).
   const [activeLine, setActiveLine] = useState(() => { try { return localStorage.getItem('vw_line') || 'waste' } catch (e) { return 'waste' } })
-  const [activeView, setActiveView] = useState(() => { try { return localStorage.getItem('vw_view') || 'clients' } catch (e) { return 'clients' } })
+  // View: URL hash wins over localStorage so refresh/back/forward all land
+  // on the same screen (a stale stored view used to fight the browser).
+  const [activeView, setActiveView] = useState(() => {
+    try {
+      const h = window.location.hash.replace('#', '')
+      if (VALID_VIEWS.has(h)) return h
+      return localStorage.getItem('vw_view') || 'clients'
+    } catch (e) { return 'clients' }
+  })
+  // Browser back/forward drive the in-app view (Randy's fix): every go()
+  // pushes a history entry, popstate replays it. Without this, pressing back
+  // walked straight OUT of the app to whatever page opened it (google.com),
+  // and returning cost another login.
+  useEffect(() => {
+    try {
+      const cur = window.location.hash.replace('#', '')
+      if (!VALID_VIEWS.has(cur)) window.history.replaceState({ view: activeView }, '', '#' + activeView)
+    } catch (e) {}
+    const onPop = () => {
+      const v = window.location.hash.replace('#', '')
+      if (!VALID_VIEWS.has(v)) return
+      setActiveView(v)
+      setNavOpen(false)
+      setLineMenuOpen(false)
+    }
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  useEffect(() => { try { localStorage.setItem('vw_view', activeView) } catch (e) {} }, [activeView])
   const isAdmin = !!(user && user.role === 'admin')
   const [lineMenuOpen, setLineMenuOpen] = useState(false)
   const [navOpen, setNavOpen] = useState(false) // mobile drawer
@@ -265,6 +296,9 @@ export default function App({ user, onSignOut }) {
     setActiveView(view)
     setLineMenuOpen(false)
     setNavOpen(false)
+    try {
+      if (window.location.hash !== '#' + view) window.history.pushState({ view }, '', '#' + view)
+    } catch (e) {}
   }
 
   function scrollAi() {
