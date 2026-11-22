@@ -111,6 +111,7 @@ export default function Clients({ app }) {
   const [noteInput, setNoteInput] = useState('')
   const [noteBusy, setNoteBusy] = useState(false)
   const [billingFilter, setBillingFilter] = useState('all') // all | subscription | one_time
+  const [lineFilter, setLineFilter] = useState('all') // all | waste | junk — one customer base, tagged by line (owner ask 2026-11-21)
   const [focusPropId, setFocusPropId] = useState(null) // property briefly highlighted when jumped to from Routes/Field
   const [pinProp, setPinProp] = useState(null) // property whose pin is being set manually
   const [propSearch, setPropSearch] = useState('') // filter within a client's addresses
@@ -286,15 +287,15 @@ export default function Clients({ app }) {
     }
   }
 
-  // Only clients on the active business line (legacy rows count as waste).
-  const lineCustomers = useMemo(
-    () => customers.filter((c) => (c.business_line || 'waste') === (app.activeLine || 'waste')),
-    [customers, app.activeLine],
-  )
+  // ONE customer base (owner ask 2026-11-21): every client shows up here no
+  // matter the business line — Junk vs Waste is just a tag/filter, not a wall.
+  // Jobs (routes/schedules) and payments (invoices) still keep the distinction.
+  const lineCustomers = useMemo(() => customers, [customers])
   const q = search.toLowerCase().trim()
   const qDigits = q.replace(/\D/g, '') // phone lookups: ignore formatting
   const list = useMemo(() => {
     let l = lineCustomers
+    if (lineFilter !== 'all') l = l.filter((c) => (c.business_line || 'waste') === lineFilter)
     if (billingFilter !== 'all') l = l.filter((c) => (c.billingType || 'subscription') === billingFilter)
     if (q) l = l.filter((c) => {
       const hay = `${c.name || ''} ${c.address || ''} ${c.contactName || ''} ${c.contactPhone || ''} ${c.phone || ''} ${c.email || ''} ${addrIdx[c.id] || ''}`.toLowerCase()
@@ -305,21 +306,17 @@ export default function Clients({ app }) {
       return false
     })
     return l
-  }, [lineCustomers, q, qDigits, addrIdx, billingFilter])
+  }, [lineCustomers, lineFilter, q, qDigits, addrIdx, billingFilter])
   const cur = lineCustomers.find((c) => c.id === selId) || null
 
-  // Switching business line: drop any selection from the previous line.
-  // If the selected client isn't in the (loaded) customers list, leave the
-  // selection alone — it may be a cross-view focus (Routes stop click) that
-  // landed before the list finished loading.
+  // Keep the selection as long as the client still exists in the (now
+  // unified) list — the global business-line switch no longer drops it.
   useEffect(() => {
-    setSelId((cur) => {
-      if (!cur) return cur
-      const found = customers.find((c) => c.id === cur)
-      if (!found) return cur
-      return (found.business_line || 'waste') === (app.activeLine || 'waste') ? cur : (customers.find((c) => (c.business_line || 'waste') === (app.activeLine || 'waste'))?.id ?? null)
+    setSelId((curSel) => {
+      if (!curSel) return curSel
+      return customers.some((c) => c.id === curSel) ? curSel : null
     })
-  }, [app.activeLine, customers])
+  }, [customers])
   const set = (patch) => setForm((f) => ({ ...f, ...patch }))
 
   // Live duplicate check while CREATING a client: score the draft against
@@ -773,6 +770,17 @@ export default function Clients({ app }) {
             </>
           )}
         </div>
+        {/* business-line filter: one customer base, tagged by line */}
+        <div style={{ display: 'flex', gap: 6, margin: '0 6px 8px', alignItems: 'center' }}>
+          {[['all', 'All lines'], ['waste', 'Waste'], ['junk', 'Junk']].map(([v, l]) => {
+            const on = lineFilter === v
+            const color = v === 'junk' ? '#2f6db0' : '#1f7a4d'
+            const n = v === 'all' ? lineCustomers.length : lineCustomers.filter((c) => (c.business_line || 'waste') === v).length
+            return (
+              <button key={v} onClick={() => setLineFilter(v)} style={{ flex: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 600, padding: '5px 11px', borderRadius: 20, border: `1px solid ${on ? color : '#dde2dd'}`, background: on ? (v === 'all' ? '#eef0ed' : v === 'junk' ? '#e8f0fa' : '#e7f1eb') : '#fff', color: on ? color : '#7c8a82' }}>{l} ({n})</button>
+            )
+          })}
+        </div>
         {/* billing-type filter: subscription vs single-payment clients */}
         <div style={{ display: 'flex', gap: 6, margin: '0 6px 8px', alignItems: 'center' }}>
           {[['all', 'All'], ['subscription', 'Subscription'], ['one_time', 'Single payment']].map(([v, l]) => {
@@ -801,6 +809,9 @@ export default function Clients({ app }) {
                 <div style={{ fontSize: 11, color: '#7c8a82' }}>{c.pickup ? freqLabel(c.pickup.frequency) : 'No schedule'}</div>
               </div>
               {(c.billingType || 'subscription') === 'one_time' && <span title="Single-payment / on-demand client (not a subscription)" style={{ flex: 'none', fontFamily: MONO, fontSize: 9, fontWeight: 700, color: '#155e9c', background: '#e8f0fa', padding: '1px 6px', borderRadius: 5 }}>1×</span>}
+              {(c.business_line || 'waste') === 'junk'
+                ? <span title="Junk Removal line" style={{ flex: 'none', fontFamily: MONO, fontSize: 9, fontWeight: 700, color: '#2f6db0', background: '#e8f0fa', padding: '1px 6px', borderRadius: 5 }}>JUNK</span>
+                : <span title="Waste & Recycling line" style={{ flex: 'none', fontFamily: MONO, fontSize: 9, fontWeight: 700, color: '#1f7a4d', background: '#e7f1eb', padding: '1px 6px', borderRadius: 5 }}>WASTE</span>}
               {c.autopay?.saved && <span title={`Autopay on — ${(c.autopay.brand || 'card').toUpperCase()} ••${c.autopay.last4 || ''} · 5th week free`} style={{ flex: 'none', fontFamily: MONO, fontSize: 9, fontWeight: 700, color: '#1f7a4d', background: '#e7f1eb', padding: '1px 6px', borderRadius: 5 }}>💳 CARD</span>}
               {c.status !== 'active' && <span style={{ flex: 'none', fontFamily: MONO, fontSize: 9, color: '#b07a1e', background: '#fdf2e0', padding: '1px 6px', borderRadius: 5 }}>{c.status}</span>}
             </div>
@@ -833,6 +844,9 @@ export default function Clients({ app }) {
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontWeight: 700, fontSize: 18, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                     {cur.name}
+                    {(cur.business_line || 'waste') === 'junk'
+                      ? <span title="Junk Removal line" style={{ fontFamily: MONO, fontSize: 10.5, fontWeight: 700, color: '#2f6db0', background: '#e8f0fa', padding: '3px 9px', borderRadius: 7, letterSpacing: '.03em' }}>JUNK</span>
+                      : <span title="Waste & Recycling line" style={{ fontFamily: MONO, fontSize: 10.5, fontWeight: 700, color: '#1f7a4d', background: '#e7f1eb', padding: '3px 9px', borderRadius: 7, letterSpacing: '.03em' }}>WASTE</span>}
                     {(cur.billingType || 'subscription') === 'one_time' && (
                       <span title="Single-payment / on-demand client" style={{ fontFamily: MONO, fontSize: 10.5, fontWeight: 700, color: '#155e9c', background: '#e8f0fa', padding: '3px 9px', borderRadius: 7, letterSpacing: '.03em' }}>1× SINGLE PAYMENT</span>
                     )}

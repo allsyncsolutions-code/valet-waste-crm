@@ -7,6 +7,8 @@ import {
   resequence,
   splitFixed,
   moveStop,
+  moveStopToPosition,
+  dropStopBefore,
   removeStop as removeLocal,
   addStop as addLocal,
   isFixed,
@@ -373,6 +375,27 @@ export default function RoutesView({ app }) {
     withWrite(() => persistOrder(next))
   }
 
+  // Jump straight to a position (owner ask 2026-11-21) — no more tapping ↑ 79x.
+  function handleMoveTo(id, target) {
+    const next = moveStopToPosition(stops, id, target)
+    setStops(next)
+    setOptimized(false)
+    withWrite(() => persistOrder(next))
+  }
+
+  // Drag-and-drop reordering (desktop web): the whole row is the handle.
+  const [dragId, setDragId] = useState(null)
+  const [dropId, setDropId] = useState(null)
+  function handleDropOn(targetId) {
+    const next = dropStopBefore(stops, dragId, targetId)
+    setDragId(null)
+    setDropId(null)
+    if (next === stops) return
+    setStops(next)
+    setOptimized(false)
+    withWrite(() => persistOrder(next))
+  }
+
   function handleRemove(id) {
     const stop = stops.find((s) => s.id === id)
     if (!stop || isFixed(stop)) return
@@ -412,7 +435,7 @@ export default function RoutesView({ app }) {
     setShowNewStop(true)
   }
 
-  // Open the modal when the top-bar "+ New pickup" button bumps the tick.
+  // Open the modal when the top-bar "⚡ One-time pickup" button bumps the tick.
   const pickupTickRef = useRef(app.newPickupTick)
   useEffect(() => {
     if (app.newPickupTick !== pickupTickRef.current) {
@@ -615,7 +638,8 @@ export default function RoutesView({ app }) {
     try {
       const res = await copyPreviousWeekday(routeCode, routeSel)
       if (res.noSource) setErr(`No earlier ${selDow} found for ${currentDef.name} to copy from.`)
-      else if (res.copied === 0) setErr(`Nothing new to copy — those stops are already on ${prettyDate(routeSel)}.`)
+      else if (res.copied === 0 && !res.leftOneTime) setErr(`Nothing new to copy — those stops are already on ${prettyDate(routeSel)}.`)
+      else if (res.leftOneTime > 0) setNotice(`Copied ${res.copied} recurring stop${res.copied === 1 ? '' : 's'} — and left ${res.leftOneTime} one-time pickup${res.leftOneTime === 1 ? '' : 's'} behind, since one-time jobs never repeat.`)
       await refresh(routeSel)
     } catch (e) {
       setErr(e.message || String(e))
@@ -1136,7 +1160,7 @@ export default function RoutesView({ app }) {
 
         <div style={{ flex: 1 }} />
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-          <button onClick={openNewStop} style={ghostBtn}>+ New pickup</button>
+          <button onClick={openNewStop} title="Add a one-time pickup — a single job for this date only. It never repeats, and removing it never affects any weekly schedule." style={ghostBtn}>⚡ One-time pickup</button>
           <button onClick={openMass} style={ghostBtn}>+ Add stops</button>
           {copyableRoutes.length > 0 && (
             <select value="" onChange={(e) => { if (e.target.value) handleCopyRouteFrom(e.target.value); e.target.value = '' }} title="Copy another route's stops for this day onto this route — the one-click way to build an alternate/backup run with the same addresses" style={{ ...ghostBtn, cursor: 'pointer', paddingRight: 4 }}>
@@ -1244,7 +1268,16 @@ export default function RoutesView({ app }) {
               const locked = isFixed(st)
               const sharedCodes = st.sharedCodes || []
               return (
-                <div key={st.id} style={{ display: 'flex', gap: 10, padding: '7px 8px', borderBottom: '1px solid #f1f3f0', background: st.isNew ? '#fbf6e7' : sharedCodes.length ? '#fdf8ef' : undefined }}>
+                <div
+                  key={st.id}
+                  draggable={!locked}
+                  onDragStart={(e) => { setDragId(st.id); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', String(st.seq)) }}
+                  onDragOver={(e) => { if (dragId && dragId !== st.id) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setDropId(st.id) } }}
+                  onDrop={(e) => { e.preventDefault(); handleDropOn(st.id) }}
+                  onDragEnd={() => { setDragId(null); setDropId(null) }}
+                  title={locked ? undefined : 'Drag to reorder — or use ↑ ↓ / the # box'}
+                  style={{ display: 'flex', gap: 10, padding: '7px 8px', borderBottom: '1px solid #f1f3f0', opacity: dragId === st.id ? 0.5 : 1, background: dropId === st.id ? '#e7f1eb' : st.isNew ? '#fbf6e7' : sharedCodes.length ? '#fdf8ef' : undefined }}
+                >
                   <div style={{ width: 24, height: 24, flex: 'none', borderRadius: '50%', background: meta.bg, color: meta.fg, border: st.status === 'enroute' ? '2px solid #46c585' : 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontSize: 11, fontWeight: 600 }}>{st.seq}</div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     {editStopId === st.id ? (
@@ -1275,6 +1308,9 @@ export default function RoutesView({ app }) {
                           {sharedCodes.length > 0 && (
                             <span title={`Also on Route ${sharedCodes.join(' & ')} today — the address is shared between routes (alternate/backup run). Whoever completes their copy first auto-skips the other.`} style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#8a6d1e', background: '#f6efdd', padding: '1px 5px', borderRadius: 4 }}>⧉ ALSO ON {sharedCodes.join('/')}</span>
                           )}
+                          {st.oneTime && (
+                            <span title="One-time pickup — not part of any weekly schedule. It won't reappear on future routes, and deleting it never touches the client's recurring service." style={{ flex: 'none', fontFamily: MONO, fontSize: 9.5, fontWeight: 700, color: '#155e9c', background: '#e3eef8', border: '1px solid #bcd7ee', padding: '1px 5px', borderRadius: 4, letterSpacing: '.03em' }}>⚡ ONE-TIME</span>
+                          )}
                         </div>
                         <div style={{ fontSize: 11.5, color: '#7c8a82' }}>{st.address && st.address !== st.name ? st.address : st.service}{st.clientName && st.clientName !== st.name ? ` · ${st.clientName}` : ''}</div>
                         {(st.tags || []).length > 0 && (
@@ -1295,6 +1331,12 @@ export default function RoutesView({ app }) {
                       <div style={{ marginTop: 7, display: 'flex', gap: 6, alignItems: 'center' }}>
                         <button onClick={() => handleMove(st.id, -1)} style={miniBtn} title="Move up">↑</button>
                         <button onClick={() => handleMove(st.id, 1)} style={miniBtn} title="Move down">↓</button>
+                        <input
+                          type="number" min="1" max={stops.length} placeholder="#"
+                          title={`Jump to position 1–${stops.length} — press Enter`}
+                          onKeyDown={(e) => { if (e.key === 'Enter' && e.currentTarget.value) { handleMoveTo(st.id, e.currentTarget.value); e.currentTarget.value = '' } }}
+                          style={{ ...miniBtn, width: 54, textAlign: 'center', cursor: 'text', fontFamily: MONO }}
+                        />
                         <button onClick={() => startEditAddress(st)} style={miniBtn} title="Edit this address">✎ Address</button>
                         {st.needsReview && <button onClick={() => handleMarkReviewed(st)} style={{ ...miniBtn, color: '#1f7a4d' }} title="Clear this stop's ⚠ REVIEW flag">✓ Reviewed</button>}
                         <select

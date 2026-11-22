@@ -90,6 +90,34 @@ export function removeStop(stops, id) {
   return resequence(stops.filter((s) => s.id !== id))
 }
 
+// Jump a movable stop straight to a 1-based position (owner ask 2026-11-21:
+// clicking ↑ 79 times to move stop 81 → 2 was too slow). The locked prefix is
+// untouchable — target is clamped into the movable tail.
+export function moveStopToPosition(stops, id, targetSeq) {
+  const { fixed, movable } = splitFixed(stops)
+  const i = movable.findIndex((s) => s.id === id)
+  if (i < 0) return stops
+  const t = Math.min(Math.max(1, Number(targetSeq) || 1), movable.length) - 1
+  const next = movable.slice()
+  const [moved] = next.splice(i, 1)
+  next.splice(t, 0, moved)
+  return resequence([...fixed, ...next])
+}
+
+// Drag-and-drop: remove the dragged stop and insert it right before the drop
+// target, keeping the locked prefix intact.
+export function dropStopBefore(stops, dragId, dropId) {
+  if (!dragId || !dropId || dragId === dropId) return stops
+  const { fixed, movable } = splitFixed(stops)
+  const from = movable.findIndex((s) => s.id === dragId)
+  const to = movable.findIndex((s) => s.id === dropId)
+  if (from < 0 || to < 0) return stops
+  const next = movable.slice()
+  const [moved] = next.splice(from, 1)
+  next.splice(to, 0, moved)
+  return resequence([...fixed, ...next])
+}
+
 export function addStop(stops, stop) {
   return resequence([...stops, { ...stop, status: 'pending' }])
 }

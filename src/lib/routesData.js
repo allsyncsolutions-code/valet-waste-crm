@@ -176,11 +176,22 @@ export async function loadRouteSlice(code = 'B', date = null, line = null) {
 
   const { data: stopRows, error: sErr } = await supabase
     .from('route_stops')
-    .select('id, property_id, seq, status, service, time_window, lat, lng, skip_reason, skipped_by, properties(name, address, service, lat, lng, needs_review, created_at, customer_id, pickup_days, pickup_frequency, customers(name, phone, contact_name, contact_phone, customer_tags(tag:tags(id,name,color))))')
+    .select('id, property_id, seq, status, service, time_window, lat, lng, skip_reason, skipped_by, properties(name, address, service, lat, lng, needs_review, created_at, customer_id, pickup_days, pickup_frequency, pickup_start_date, customers(name, phone, contact_name, contact_phone, customer_tags(tag:tags(id,name,color))))')
     .eq('route_id', route.id)
     .order('seq', { ascending: true })
   if (sErr) throw sErr
-  const stops = stopRows.map(mapStop)
+  const stops = stopRows.map((row) => {
+    const s = mapStop(row)
+    // One-time tag (owner ask 2026-11-21): a stop is ONE-TIME when the property
+    // has no recurring schedule that hits THIS date — the one-off modal's
+    // addresses have no pickup_days at all, and a stop moved here "just this
+    // once" keeps its real days on another weekday. Deleting such a stop never
+    // touches the property's schedule, so the weekly subscription survives.
+    const p = row.properties || {}
+    const due = (p.pickup_days || []).some((d) =>
+      scheduleHitsDate({ day_of_week: d, frequency: p.pickup_frequency || 'weekly', start_date: p.pickup_start_date || null, active: true }, date))
+    return { ...s, oneTime: !!date && !due }
+  })
 
   let pq = supabase
     .from('properties')
@@ -554,11 +565,32 @@ export async function copyPreviousWeekday(code, date) {
   if (sErr) throw sErr
   if (!srcStops || !srcStops.length) return { copied: 0, sourceDate: match.service_date }
 
+  // One-time stops must NOT ride into next week (owner ask 2026-11-21): only
+  // carry stops whose property is actually scheduled on the TARGET date —
+  // plus service overrides for that date, minus skip overrides. A one-off
+  // party pickup (no pickup_days) or a stop moved here "just this once" stays
+  // exactly one day, and deleting it never touches the weekly subscription.
+  const propIds = [...new Set(srcStops.map((s) => s.property_id).filter(Boolean))]
+  const { data: srcProps } = propIds.length
+    ? await supabase.from('properties').select('id, pickup_days, pickup_frequency, pickup_start_date').in('id', propIds)
+    : { data: [] }
+  const dueIds = new Set((srcProps || [])
+    .filter((p) => (p.pickup_days || []).some((d) =>
+      scheduleHitsDate({ day_of_week: d, frequency: p.pickup_frequency || 'weekly', start_date: p.pickup_start_date || null, active: true }, date)))
+    .map((p) => p.id))
+  const ov = await loadDayOverrides(date).catch(() => null)
+  const carryable = srcStops.filter((s) => {
+    if (!s.property_id) return false
+    if (ov?.skips?.has(s.property_id)) return false
+    if (ov?.extras?.has(s.property_id)) return true
+    return dueIds.has(s.property_id)
+  })
+
   const route = await ensureRoute(code, date)
   const { data: existing } = await supabase.from('route_stops').select('property_id, seq').eq('route_id', route.id)
   const have = new Set((existing || []).map((e) => e.property_id))
   let seq = (existing || []).reduce((m, e) => Math.max(m, e.seq || 0), 0)
-  const rows = srcStops
+  const rows = carryable
     .filter((s) => !have.has(s.property_id))
     .map((s) => ({
       route_id: route.id, property_id: s.property_id, seq: ++seq, status: 'pending',
@@ -568,7 +600,7 @@ export async function copyPreviousWeekday(code, date) {
     const { error: iErr } = await supabase.from('route_stops').insert(rows)
     if (iErr) throw iErr
   }
-  return { copied: rows.length, sourceDate: match.service_date }
+  return { copied: rows.length, sourceDate: match.service_date, leftOneTime: srcStops.length - carryable.length }
 }
 
 // Every service property with its owning customer — powers the mass-add picker.
@@ -609,6 +641,38 @@ export async function loadDayRouteSummaries(date, line = null) {
       stops: r.route_stops.length,
       done: r.route_stops.filter((s) => s.status === 'done').length,
     }))
+}
+
+// Every ACTUAL stop on this date across all routes — the same route_stops
+// rows the Routes page renders, so the dashboard "Today's pickups" number and
+// list can never disagree with Routes (e.g. carried-over one-time pickups that
+// no schedule knows about). Flattened and ordered route-by-route, seq order.
+export async function loadTodayStops(date, line = null) {
+  if (!date) return []
+  let q = supabase
+    .from('routes')
+    .select('id, code, route_stops(id, property_id, seq, status, service, time_window, properties(name, address))')
+    .eq('service_date', date)
+  if (line) q = q.eq('business_line', line)
+  const { data, error } = await q.order('code', { ascending: true })
+  if (error) throw error
+  const rows = []
+  for (const r of data || []) {
+    for (const s of r.route_stops || []) {
+      rows.push({
+        stopId: s.id,
+        propertyId: s.property_id,
+        name: s.properties?.name || 'Unknown',
+        address: s.properties?.address || '',
+        service: s.service || '',
+        window: s.time_window || '',
+        status: s.status || 'pending',
+        routeCode: r.code,
+        seq: s.seq,
+      })
+    }
+  }
+  return rows
 }
 
 // Copy ANOTHER route's stops for the same date onto this route — the one-click
