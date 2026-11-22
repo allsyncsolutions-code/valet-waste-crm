@@ -460,6 +460,18 @@ function newPropertySummary(d: Record<string, unknown>): string {
   const notes = d.notes ? `\nNotes: ${d.notes}` : ""
   return `New address: ${d.address}\nService: ${days} (${freq.toLowerCase()})${notes}`
 }
+// junk_removal (2026-11-21) — same role as newPropertySummary for the
+// structured junk-pickup order.
+const JUNK_TIMING_LABEL: Record<string, string> = {
+  asap: "ASAP", few_days: "within a few days", this_week: "this week", date: "on a chosen date",
+}
+function junkSummary(d: Record<string, unknown>): string {
+  const items = Array.isArray(d.items) ? (d.items as string[]).join(", ") : ""
+  const when = d.timing === "date" && d.date ? `on ${d.date}` : (JUNK_TIMING_LABEL[String(d.timing)] || String(d.timing || ""))
+  const access = d.access ? `\nAccess: ${d.access}` : ""
+  const notes = d.notes ? `\nDetails: ${d.notes}` : ""
+  return `JUNK PICKUP — ${items || "items to confirm"}${when ? ` — needed ${when}` : ""}${access}${notes}`
+}
 
 // ---- SendGrid ----------------------------------------------------------------
 async function sendEmail(to: string, subject: string, html: string, companyName: string) {
@@ -1419,11 +1431,29 @@ Deno.serve(async (req) => {
         if (!address || !days.length) return json({ error: "Add the new address and pick at least one service day." }, 400)
         details = { address, days, frequency, notes: notes || null }
       }
+      // junk_removal (2026-11-21): structured junk-pickup order — items[],
+      // timing, optional date, access notes. Same details channel; a readable
+      // summary also lands in `message` for the staff alert email/text.
+      if (kind === "junk_removal" && body.details && typeof body.details === "object") {
+        const d = body.details as Record<string, unknown>
+        const items = (Array.isArray(d.items) ? d.items : [])
+          .map((x: unknown) => String(x).trim()).filter(Boolean).slice(0, 20)
+        const timing = ["asap", "few_days", "this_week", "date"].includes(String(d.timing)) ? String(d.timing) : "asap"
+        const rawDate = String(d.date || "").slice(0, 10)
+        const date = timing === "date" && /^\d{4}-\d{2}-\d{2}$/.test(rawDate) ? rawDate : null
+        const access = String(d.access || "").trim().slice(0, 1000) || null
+        const jNotes = String(d.notes || "").trim().slice(0, 1000) || null
+        details = { items, timing, date, access, notes: jNotes }
+      }
 
+      const summaryOf = (k: string, d: Record<string, unknown> | null) => {
+        if (!d) return null
+        return k === "new_property" ? newPropertySummary(d) : junkSummary(d)
+      }
       const { paths: photoPaths, errors: photoErrors } = await saveRequestPhotos(body.photos)
       const inserted = await sbPost("portal_requests", {
         customer_id: cust.id, kind,
-        message: message || (details ? newPropertySummary(details) : null),
+        message: message || summaryOf(kind, details),
         property_ids: kind === "new_property" ? [] : propertyIds,
         photos: photoPaths,
         details,
@@ -1444,7 +1474,7 @@ Deno.serve(async (req) => {
       }
       const photoTxt = photoPaths.length ? ` [${photoPaths.length} photo${photoPaths.length > 1 ? "s" : ""} attached — see the Dashboard triage]` : ""
       await textAdmins(`📥 ${cust.name} requested ${kindLabel[kind]}${addrTxt} via their portal.${message ? ` "${message.slice(0, 220)}"` : ""}${photoTxt} — Trashy Randy`)
-      if (reqId) await alertNewPortalRequest(String(reqId), cust.name || "A client", alertLabel[kind] || "Service request", addrTxt, `${message || (details ? newPropertySummary(details) : "(no description)")}${photoTxt}`)
+      if (reqId) await alertNewPortalRequest(String(reqId), cust.name || "A client", alertLabel[kind] || "Service request", addrTxt, `${message || summaryOf(kind, details) || "(no description)"}${photoTxt}`)
       return json({ ok: true, photos_saved: photoPaths.length, photo_errors: photoErrors })
     }
 
