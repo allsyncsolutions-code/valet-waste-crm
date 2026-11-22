@@ -468,19 +468,13 @@ export default function Invoices({ app }) {
     </div>
   )
 
-  if (board === 'billing') {
-    return (
-      <div style={{ maxWidth: 1240, margin: '0 auto' }}>
-        {boardToggle}
-        <BillingRun invoices={invoices} loading={loading} app={app} onChanged={refresh} onOpenInvoice={(id) => { setBoard('invoices'); setSelId(id) }} />
-      </div>
-    )
-  }
-
   // Deep-link from another view (client record → invoice click): select THAT
   // invoice and neutralize anything that could hide it (search, status/date
-  // filters, a different billing board). Must sit before the conditional
-  // board returns below (hooks order) — hence the eslint disable.
+  // filters, a different billing board).
+  // ⚠ Hooks order: BOTH board returns (billing + estimates) must sit AFTER
+  // every hook in this component. An early return above a hook re-renders with
+  // fewer hooks → React error #300 → whole app whites out. This was the
+  // "Billing run page is blank" bug (2026-11-21).
   useEffect(() => {
     const f = app.invoiceFocus
     if (!f) return
@@ -492,6 +486,15 @@ export default function Invoices({ app }) {
     setSelId(f.id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [app.invoiceFocus])
+
+  if (board === 'billing') {
+    return (
+      <div style={{ maxWidth: 1240, margin: '0 auto' }}>
+        {boardToggle}
+        <BillingRun invoices={invoices} loading={loading} app={app} onChanged={refresh} onOpenInvoice={(id) => { setBoard('invoices'); setSelId(id) }} />
+      </div>
+    )
+  }
 
   if (board === 'estimates') {    return (
       <div style={{ maxWidth: 1240, margin: '0 auto' }}>
