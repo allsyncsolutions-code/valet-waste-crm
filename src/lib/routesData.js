@@ -4,6 +4,7 @@
 import { supabase } from './supabaseClient.js'
 import { loadSettings, settingsDepot, geocodeAddress } from './settingsData.js'
 import { createClient } from './customersData.js'
+import { logActivity } from './activityData.js'
 
 const DEFAULT_DEPOT = { name: 'AllSync Yard', lat: 44.804, lng: -93.278 }
 
@@ -157,6 +158,30 @@ export async function loadPendingNewProperties(line = null) {
 
 // Load one route's depot, ordered stops, and the unrouted properties.
 // A route is identified by code + service_date, so each day has its own route.
+// Local-time YYYY-MM-DD (America/New_York ops) — string-compares correctly.
+const todayKey = () => {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+// Auto-materialize (owner ask 2026-11-25, band-aid removal): the first time
+// anyone views a date, its route is built straight from the schedule — every
+// future date shows its real stops instead of waiting for the Saturday copy.
+// Manual edits always win: build only fires when the (code, date) row is
+// missing. In-flight builds are deduped per (line|code|date) so rapid
+// refreshes / double-taps never build twice in the same tab.
+const buildInflight = new Map()
+export function autoBuildRoute(code, date, line = null) {
+  const key = `${line || ''}|${code}|${date}`
+  if (!buildInflight.has(key)) {
+    const p = buildRouteFromSchedules(code, date)
+      .catch(() => { /* offline / transient — the caller falls through to an empty slice */ })
+      .finally(() => buildInflight.delete(key))
+    buildInflight.set(key, p)
+  }
+  return buildInflight.get(key)
+}
+
 export async function loadRouteSlice(code = 'B', date = null, line = null) {
   // The configured starting location (Settings) is the map home + optimizer
   // start, unless a specific route overrides it with its own depot.
@@ -165,11 +190,20 @@ export async function loadRouteSlice(code = 'B', date = null, line = null) {
 
   let rq = supabase.from('routes').select('*').eq('code', code)
   rq = date ? rq.eq('service_date', date) : rq.is('service_date', null)
-  const { data: route, error: rErr } = await rq.maybeSingle()
+  let { data: route, error: rErr } = await rq.maybeSingle()
   if (rErr) throw rErr
 
-  // No route yet (e.g. fresh/empty database) — return an empty slice so the
-  // view shows an empty state instead of erroring.
+  // No route yet — auto-materialize from the schedule for today onward, so
+  // future dates (e.g. Dec 1 = every Tuesday job) render on first view.
+  // Past dates stay truthfully empty.
+  if (!route && date && date >= todayKey()) {
+    await autoBuildRoute(code, date, line)
+    const retry = await supabase.from('routes').select('*').eq('code', code).eq('service_date', date).maybeSingle()
+    if (retry.error) throw retry.error
+    route = retry.data
+  }
+
+  // Still nothing (no schedules for this date/line) — empty state, not an error.
   if (!route) {
     return { route: null, depot: homeDepot, stops: [], unrouted: [] }
   }
@@ -603,6 +637,46 @@ export async function copyPreviousWeekday(code, date) {
   return { copied: rows.length, sourceDate: match.service_date, leftOneTime: srcStops.length - carryable.length }
 }
 
+// Copy ANY day's stops onto this date as an explicit one-time snapshot
+// (owner ask 2026-11-25, band-aid replacement for "Copy last <weekday>").
+// The user picks the source date deliberately, so every stop on it copies
+// as-is — no schedule filtering. The copies are plain rows on the target
+// date: they don't recur, and the schedule-based weekly build never carries
+// them anywhere. Stops whose property is already on the target route are
+// skipped; the snapshot appends after any existing stops.
+export async function copyDayFromDate(code, targetDate, sourceDate) {
+  if (!code || !targetDate || !sourceDate) throw new Error('Pick the day to copy from.')
+  if (targetDate === sourceDate) throw new Error('That day already IS this route.')
+  const { data: src, error: sErr } = await supabase
+    .from('routes').select('id, code').eq('code', code).eq('service_date', sourceDate).maybeSingle()
+  if (sErr) throw sErr
+  if (!src) return { copied: 0, noSource: true, sourceDate }
+  const { data: srcStops, error: stErr } = await supabase
+    .from('route_stops')
+    .select('property_id, service, time_window, lat, lng, seq')
+    .eq('route_id', src.id)
+    .order('seq', { ascending: true })
+  if (stErr) throw stErr
+  if (!srcStops || !srcStops.length) return { copied: 0, sourceDate }
+
+  const route = await ensureRoute(code, targetDate)
+  const { data: existing } = await supabase.from('route_stops').select('property_id, seq').eq('route_id', route.id)
+  const have = new Set((existing || []).map((e) => e.property_id).filter(Boolean))
+  let seq = (existing || []).reduce((m, e) => Math.max(m, e.seq || 0), 0)
+  const rows = srcStops
+    .filter((s) => s.property_id && !have.has(s.property_id))
+    .map((s) => ({
+      route_id: route.id, property_id: s.property_id, seq: ++seq, status: 'pending',
+      service: s.service, time_window: s.time_window, lat: s.lat, lng: s.lng,
+    }))
+  if (rows.length) {
+    const { error: iErr } = await supabase.from('route_stops').insert(rows)
+    if (iErr) throw iErr
+  }
+  logActivity({ type: 'route_copied', summary: `Copied Route ${code} ${sourceDate} → ${targetDate} (${rows.length} stops, one-time)`, entityType: 'route', entityId: route.id })
+  return { copied: rows.length, sourceDate }
+}
+
 // Every service property with its owning customer — powers the mass-add picker.
 // Pass the active business line so lawn dispatch only offers lawn properties.
 export async function loadAllProperties(line) {
@@ -778,14 +852,34 @@ export async function removeStopsByIds(ids) {
 // Drivers & Field per-driver dispatch board.
 export async function loadDayDispatch(date, line) {
   if (!date) throw new Error('A date is required.')
-  let q = supabase
-    .from('routes')
-    .select('id, code, name, driver_id, business_line, route_stops(id, seq, status, service, time_window, lat, lng, check_in, check_out, on_my_way_at, excess_flagged, excess_note, tech_pay, nudge_sent, skip_reason, skipped_by, checkin_note, property_id, job_title, job_description, job_price, properties(name, address, notes, lat, lng, price, tech_pay, customer_id, customers(name, phone, contact_phone, notify_on_service, customer_tags(tag:tags(id,name,color)))), stop_photos(id))')
-    .eq('service_date', date)
-  if (line) q = q.eq('business_line', line)
-  const { data, error } = await q.order('code', { ascending: true })
-  if (error) throw error
-  const routes = (data || []).map((r) => ({
+  const fetchDay = async () => {
+    let q = supabase
+      .from('routes')
+      .select('id, code, name, driver_id, business_line, route_stops(id, seq, status, service, time_window, lat, lng, check_in, check_out, on_my_way_at, excess_flagged, excess_note, tech_pay, nudge_sent, skip_reason, skipped_by, checkin_note, property_id, job_title, job_description, job_price, properties(name, address, notes, lat, lng, price, tech_pay, customer_id, customers(name, phone, contact_phone, notify_on_service, customer_tags(tag:tags(id,name,color)))), stop_photos(id))')
+      .eq('service_date', date)
+    if (line) q = q.eq('business_line', line)
+    const { data, error } = await q.order('code', { ascending: true })
+    if (error) throw error
+    return data || []
+  }
+  let rows = await fetchDay()
+  // Auto-materialize (owner ask 2026-11-25): first view of an upcoming date
+  // builds every missing route code from the schedule, so the dispatch board
+  // / dashboard / map always show the real stops for any date — not just the
+  // week the Saturday band-aid happened to copy. Only missing rows build;
+  // anything already there (manual edits) is never touched.
+  if (date >= todayKey()) {
+    let defsQ = supabase.from('route_defaults').select('code')
+    if (line) defsQ = defsQ.eq('business_line', line)
+    const { data: defs } = await defsQ
+    const present = new Set(rows.map((r) => r.code))
+    const missing = (defs || []).map((d) => d.code).filter((c) => c && !present.has(c))
+    if (missing.length) {
+      await Promise.all(missing.map((c) => autoBuildRoute(c, date, line)))
+      rows = await fetchDay()
+    }
+  }
+  const routes = rows.map((r) => ({
     id: r.id,
     code: r.code,
     name: r.name || `Route ${r.code}`,
