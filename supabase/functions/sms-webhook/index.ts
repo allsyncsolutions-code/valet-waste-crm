@@ -81,7 +81,7 @@ async function maybeRandyReply(fromNumber: string, text: string) {
     { headers: restHeaders },
   ).then((r) => r.json()).catch(() => [])
 
-  // Chronological, merged so roles alternate (Anthropic requires it).
+  // Chronological, merged so roles alternate (the chat API requires it).
   const turns: Array<{ role: string; text: string }> = []
   for (const m of (Array.isArray(hist) ? hist : []).reverse()) {
     const role = m.direction === "in" ? "user" : "assistant"

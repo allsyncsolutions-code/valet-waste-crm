@@ -328,7 +328,7 @@ export default function App({ user, onSignOut }) {
     } catch (e) {
       setAiMessages((prev) => prev.concat([{
         role: 'ai',
-        text: "I couldn't reach the assistant service: " + ((e && e.message) || e) + '. (If this is the first run, make sure the ANTHROPIC_API_KEY secret is set in Supabase.)',
+        text: "I couldn't reach the assistant service: " + ((e && e.message) || e) + '. (If this is the first run, make sure the KIMI_API_KEY secret is set in Supabase.)',
       }]))
     }
     setAiBusy(false)
