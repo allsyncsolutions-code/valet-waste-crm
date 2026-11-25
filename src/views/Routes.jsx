@@ -36,7 +36,7 @@ import {
   deleteRouteDef,
   restoreRouteSnapshot,
   updateRouteDef,
-  copyPreviousWeekday,
+  copyDayFromDate,
   moveStopToRoute,
   copyStopToRoute,
   moveStopToDate,
@@ -631,15 +631,23 @@ export default function RoutesView({ app }) {
   const selDow = DOW[new Date(routeSel + 'T12:00:00').getDay()]
 
   const [copying, setCopying] = useState(false)
-  async function handleCopyPrevious() {
+  const [copyFromOpen, setCopyFromOpen] = useState(false)
+  const [copyFromDate, setCopyFromDate] = useState('')
+  async function handleCopyFromDate() {
     if (copying) return
+    if (!copyFromDate) { setErr('Pick a date to copy from first.'); return }
+    if (copyFromDate === routeSel) { setErr('That IS the day you are on — pick a different date.'); return }
     setCopying(true)
     setErr(null)
     try {
-      const res = await copyPreviousWeekday(routeCode, routeSel)
-      if (res.noSource) setErr(`No earlier ${selDow} found for ${currentDef.name} to copy from.`)
-      else if (res.copied === 0 && !res.leftOneTime) setErr(`Nothing new to copy — those stops are already on ${prettyDate(routeSel)}.`)
-      else if (res.leftOneTime > 0) setNotice(`Copied ${res.copied} recurring stop${res.copied === 1 ? '' : 's'} — and left ${res.leftOneTime} one-time pickup${res.leftOneTime === 1 ? '' : 's'} behind, since one-time jobs never repeat.`)
+      const res = await copyDayFromDate(routeCode, routeSel, copyFromDate)
+      if (res.noSource) setErr(`No stops found for ${currentDef.name} on ${prettyDate(copyFromDate)} to copy.`)
+      else if (res.copied === 0) setErr(`Nothing new to copy — those stops are already on ${prettyDate(routeSel)}.`)
+      else {
+        setNotice(`Copied ${res.copied} stop${res.copied === 1 ? '' : 's'} from ${prettyDate(copyFromDate)} — one-time copy, it will not repeat.`)
+        setCopyFromOpen(false)
+        setCopyFromDate('')
+      }
       await refresh(routeSel)
     } catch (e) {
       setErr(e.message || String(e))
@@ -1174,7 +1182,17 @@ export default function RoutesView({ app }) {
           {[...stops, ...unrouted].some((s) => s.needsReview) && (
             <button onClick={handleMarkAllReviewed} style={{ ...ghostBtn, color: '#1f7a4d', borderColor: '#cfe0d5' }} title="Clear every ⚠ REVIEW flag on this route">✓ Mark reviewed</button>
           )}
-          <button onClick={handleCopyPrevious} disabled={copying} style={{ ...ghostBtn, opacity: copying ? 0.6 : 1 }}>{copying ? 'Copying…' : `Copy last ${selDow}`}</button>
+          <span style={{ position: 'relative', display: 'inline-flex' }}>
+            <button onClick={() => { setCopyFromOpen((o) => !o); setErr(null) }} disabled={copying} title="Copy this route's stops from ANY past or future day as a one-time copy — it never repeats" style={{ ...ghostBtn, opacity: copying ? 0.6 : 1 }}>{copying ? 'Copying…' : '⧉ Copy from day…'}</button>
+            {copyFromOpen && (
+              <span style={{ position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 30, display: 'flex', alignItems: 'center', gap: 6, background: '#fff', border: '1px solid #dde2dd', borderRadius: 10, padding: '8px 10px', boxShadow: '0 8px 24px rgba(20,40,30,.18)', whiteSpace: 'nowrap' }}>
+                <span style={{ fontSize: 11.5, color: '#5d6b63' }}>From</span>
+                <input type="date" value={copyFromDate} onChange={(e) => setCopyFromDate(e.target.value)} style={{ border: '1px solid #dde2dd', borderRadius: 7, padding: '5px 7px', fontSize: 12, fontFamily: MONO, color: '#1a2420', outline: 'none' }} autoFocus />
+                <button onClick={handleCopyFromDate} disabled={copying} style={{ background: '#1f7a4d', color: '#fff', border: 'none', borderRadius: 7, padding: '5px 10px', fontSize: 11.5, fontWeight: 600, cursor: 'pointer', opacity: copying ? 0.6 : 1 }}>Copy</button>
+                <button onClick={() => { setCopyFromOpen(false); setCopyFromDate('') }} disabled={copying} style={{ background: 'none', border: '1px solid #dde2dd', borderRadius: 7, padding: '5px 9px', fontSize: 11.5, color: '#5d6b63', cursor: 'pointer' }}>✕</button>
+              </span>
+            )}
+          </span>
           <select value="" onChange={(e) => { if (e.target.value) handleScheduleAll(e.target.value); e.target.value = '' }} title={`Make every stop on ${prettyDate(routeSel)} a recurring ${weekdayName(routeSel)} pickup — stops already on that schedule are left alone`} style={{ ...ghostBtn, cursor: 'pointer', paddingRight: 4 }}>
             <option value="">↻ Schedule all…</option>
             <option value="weekly">All weekly</option>

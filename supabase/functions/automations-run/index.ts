@@ -408,34 +408,32 @@ async function sendPlainCustomerEmail(to: string, subject: string, text: string,
   await logEmail({ ...base, status: "sent" })
 }
 
-// Auto-build the coming week's routes: for each of the next 8 days, for each
-// route code that ran on the same weekday in the last 6 weeks, create the
-// day's route if it doesn't exist yet and copy that source route's stops —
-// the same thing staff do by hand with "Copy last <weekday>", minus paused
-// properties and that day's skip overrides. Existing routes are NEVER
-// touched, so anything built or edited manually stays exactly as-is and this
-// is safe to run every morning. Since 2026-11-21 the copy also skips stops
-// whose property isn't scheduled on the target date, so one-time pickups
-// (one-off jobs, same-weekday-moved stops) never ride into next week; a
-// service override for the target date still carries them. (Stops added
-// after the copy — new clients, one-off pickups — are still a manual step;
-// this only mirrors last week's RECURRING stops.)
+// Auto-build the coming week's routes FROM THE SCHEDULE (owner ask 2026-11-25,
+// band-aid removal). The old version copied last week's stops forward, which
+// only mirrored whatever happened to run last week — new clients, frequency
+// changes, and recently-added stops went missing, and any date past ~1 week
+// was blank until someone copied or built by hand. Now each (route code, day)
+// in the next 8 days is built the same way the app's schedule builder works:
+// every property due that day (pickup_days + frequency + start_date, minus
+// that day's skip overrides, plus service overrides, pauses respected)
+// becomes a pending stop. Existing routes are NEVER touched, so manual edits
+// always win. One-time stops never appear because only scheduled properties
+// are added — and the on-view auto-build in the apps means this weekly pass
+// is just a safety net for devices that haven't opened the date yet.
 async function runAutoBuildRoutes(): Promise<string> {
   const today = etToday()
   const horizon = addDays(today, 7)
-  const lookback = addDays(today, -42)
 
-  // Source candidates (recent same-weekday routes) + what's already scheduled.
-  const recent = await sbGet(
-    `routes?service_date=gte.${lookback}&service_date=not.is.null&select=id,code,service_date&order=service_date.desc&limit=500`,
-  )
   const upcoming = await sbGet(
-    `routes?service_date=gte.${today}&service_date=lte.${horizon}&select=id,code,service_date&limit=500`,
+    `routes?service_date=gte.${today}&service_date=lte.${horizon}&select=id,code,service_date&limit=1000`,
   )
   const have = new Set(upcoming.map((r: any) => `${r.code}|${r.service_date}`))
 
-  // Copied stops respect pauses and skip overrides for that date.
-  const paused = new Set((await sbGet(`properties?paused=eq.true&select=id&limit=3000`)).map((p: any) => p.id))
+  const defs = await sbGet(`route_defaults?select=code,driver_id,business_line&limit=100`)
+  const props = await sbGet(
+    `properties?paused=eq.false&select=id,service,lat,lng,business_line,pickup_days,pickup_frequency,pickup_start_date&limit=3000`,
+  )
+
   const skipByDate = new Map<string, Set<string>>()
   const extraByDate = new Map<string, Set<string>>()
   try {
@@ -449,64 +447,43 @@ async function runAutoBuildRoutes(): Promise<string> {
       if (!extraByDate.has(o.service_date)) extraByDate.set(o.service_date, new Set())
       extraByDate.get(o.service_date)!.add(o.property_id)
     }
-  } catch (_e) { /* overrides table unavailable → plain copy */ }
-
-  // Route defaults: the code's usual driver + business line.
-  const defaults = new Map(
-    (await sbGet(`route_defaults?select=code,driver_id,business_line&limit=100`)).map((d: any) => [d.code, d]),
-  )
+  } catch (_e) { /* overrides table unavailable → plain schedule build */ }
 
   const created: string[] = []
   let stopsAdded = 0
   for (let d = 0; d <= 7; d++) {
     const date = addDays(today, d)
-    const dow = new Date(date + "T12:00:00Z").getUTCDay()
-    const sameDow = (r: any) => new Date(r.service_date + "T12:00:00Z").getUTCDay() === dow
-    const codes = [...new Set(recent.filter((r: any) => r.service_date < date && sameDow(r)).map((r: any) => r.code))]
-    for (const code of codes) {
-      if (have.has(`${code}|${date}`)) continue // already scheduled — never touch
-      // Most recent same-weekday run of this code.
-      const src = recent.find((r: any) => r.code === code && r.service_date < date && sameDow(r))
-      if (!src) continue
-      const stops = await sbGet(`route_stops?route_id=eq.${src.id}&select=property_id,service,time_window,lat,lng&order=seq.asc&limit=500`)
-      if (!stops.length) continue
-      const skips = skipByDate.get(date) || new Set<string>()
-      const extras = extraByDate.get(date) || new Set<string>()
-      // Only carry stops whose property is actually scheduled on the target
-      // date (or has a service override for it) — one-time stops stay one day.
-      const propIds = [...new Set(stops.map((s: any) => s.property_id).filter(Boolean))]
-      const dueIds = new Set<string>()
-      if (propIds.length) {
-        const props = await sbGet(`properties?id=in.(${propIds.join(",")})&select=id,pickup_days,pickup_frequency,pickup_start_date&limit=500`)
-        for (const p of props) {
-          const days: string[] = Array.isArray(p.pickup_days) ? p.pickup_days : []
-          if (days.some((d: string) => scheduleHits({ day_of_week: d, frequency: p.pickup_frequency || "weekly", start_date: p.pickup_start_date || null }, date))) dueIds.add(p.id)
-        }
-      }
-      const rows = stops.filter((s: any) =>
-        !paused.has(s.property_id) && !skips.has(s.property_id) &&
-        (dueIds.has(s.property_id) || extras.has(s.property_id)))
-      if (!rows.length) continue
-      const def = defaults.get(code) || {}
+    const skips = skipByDate.get(date) || new Set<string>()
+    const extras = extraByDate.get(date) || new Set<string>()
+    for (const def of defs) {
+      if (have.has(`${def.code}|${date}`)) continue // already scheduled — never touch
+      const line = def.business_line || "waste"
+      const due = props.filter((p: any) =>
+        (p.business_line || "waste") === line &&
+        !skips.has(p.id) &&
+        (extras.has(p.id) || (p.pickup_days || []).some((day: string) =>
+          scheduleHits({ day_of_week: day, frequency: p.pickup_frequency || "weekly", start_date: p.pickup_start_date || null }, date))),
+      )
+      if (!due.length) continue
       const route = await sbPost("routes", {
-        code,
-        name: `Route ${code}`,
+        code: def.code,
+        name: `Route ${def.code}`,
         service_date: date,
         driver_id: def.driver_id || null,
-        business_line: def.business_line || "waste",
+        business_line: line,
       })
-      await sbPost("route_stops", rows.map((s: any, i: number) => ({
+      await sbPost("route_stops", due.map((p: any, i: number) => ({
         route_id: route[0].id,
-        property_id: s.property_id,
-        service: s.service || null,
-        time_window: s.time_window || null,
-        lat: s.lat ?? null,
-        lng: s.lng ?? null,
+        property_id: p.id,
         seq: i + 1,
+        status: "pending",
+        service: p.service || null,
+        lat: p.lat ?? null,
+        lng: p.lng ?? null,
       })))
-      created.push(`${code} ${date.slice(5)}`)
-      stopsAdded += rows.length
-      have.add(`${code}|${date}`)
+      created.push(`${def.code} ${date.slice(5)}`)
+      stopsAdded += due.length
+      have.add(`${def.code}|${date}`)
     }
   }
 
