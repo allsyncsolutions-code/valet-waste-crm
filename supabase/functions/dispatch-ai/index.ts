@@ -1,13 +1,14 @@
 // Trashy Randy — dispatch AI assistant (Supabase Edge Function).
 //
-// Holds the Anthropic API key server-side (never exposed to the browser) and
-// runs an agentic tool-use loop against the CRM's Postgres (via PostgREST with
-// the service-role key). It can look things up and make operational changes:
-// clients, pickup schedules, invoices, tags, and route stops.
+// Holds the Kimi (Moonshot AI) API key server-side (never exposed to the
+// browser) and runs an agentic tool-use loop against the CRM's Postgres (via
+// PostgREST with the service-role key). It can look things up and make
+// operational changes: clients, pickup schedules, invoices, tags, and route
+// stops.
 //
 // Secrets required (set in Supabase, NOT in the frontend):
-//   ANTHROPIC_API_KEY   - your Anthropic key
-//   ANTHROPIC_MODEL     - optional, defaults to claude-sonnet-4-6
+//   KIMI_API_KEY   - your Moonshot AI key (https://platform.moonshot.ai)
+//   KIMI_MODEL     - optional, defaults to kimi-k2-0905-preview
 // SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are injected automatically.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts"
@@ -18,8 +19,8 @@ const CORS = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 }
 
-const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
-const MODEL = Deno.env.get("ANTHROPIC_MODEL") ?? "claude-sonnet-4-6"
+const KIMI_URL = "https://api.moonshot.ai/v1/chat/completions"
+const MODEL = Deno.env.get("KIMI_MODEL") ?? "kimi-k2-0905-preview"
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
 
@@ -3367,29 +3368,32 @@ async function runTool(name: string, input: any): Promise<unknown> {
   }
 }
 
-// Prompt caching: one ephemeral breakpoint on the LAST tool caches the entire
-// stable prefix — system prompt + all ~66 tool definitions (~17K tokens) — so
-// repeat calls within the TTL read it at ~10% of list price instead of
-// re-billing the whole block on every request and every agent-loop iteration.
-// The prefix must stay BYTE-IDENTICAL between requests: volatile context
-// (pins / pending actions / SMS mode) is injected into the last user message
-// in the handler, never into `system`.
-const CACHED_TOOLS = tools.map((t: any, i: number) =>
-  i === tools.length - 1 ? { ...t, cache_control: { type: "ephemeral" } } : t
-)
+// Kimi speaks the OpenAI chat-completions format: tools are declared as
+// { type: "function", function: { name, description, parameters } } and the
+// model replies with tool_calls that we execute and feed back as role:"tool".
+const KIMI_TOOLS = tools.map((t: any) => ({
+  type: "function",
+  function: { name: t.name, description: t.description, parameters: t.input_schema },
+}))
 
-async function callAnthropic(messages: unknown[], apiKey: string, system: string) {
-  const r = await fetch(ANTHROPIC_URL, {
+async function callKimi(messages: unknown[], apiKey: string, system: string) {
+  const r = await fetch(KIMI_URL, {
     method: "POST",
     headers: {
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
     },
-    body: JSON.stringify({ model: MODEL, max_tokens: 4096, system, tools: CACHED_TOOLS, messages }),
+    body: JSON.stringify({
+      model: MODEL,
+      max_tokens: 4096,
+      temperature: 0.6,
+      messages: [{ role: "system", content: system }, ...messages],
+      tools: KIMI_TOOLS,
+      tool_choice: "auto",
+    }),
   })
   const data = await r.json()
-  if (!r.ok) throw new Error(data?.error?.message || `Anthropic ${r.status}`)
+  if (!r.ok) throw new Error(data?.error?.message || `Kimi ${r.status}`)
   return data
 }
 
@@ -3419,10 +3423,10 @@ Deno.serve(async (req) => {
       callerLabel = prof?.[0]?.full_name || prof?.[0]?.email || "staff"
     }
 
-    const apiKey = Deno.env.get("ANTHROPIC_API_KEY")
+    const apiKey = Deno.env.get("KIMI_API_KEY")
     if (!apiKey) {
       return json({
-        text: "I'm not connected yet — the ANTHROPIC_API_KEY secret hasn't been set in Supabase. Once it's added I can start helping.",
+        text: "I'm not connected yet — the KIMI_API_KEY secret hasn't been set in Supabase. Once it's added I can start helping.",
         actions: [],
       })
     }
@@ -3445,9 +3449,8 @@ Deno.serve(async (req) => {
     system += `\n\nCURRENT DATE: ${nowEt} (a ${dowEt}). Resolve EVERY date the user gives you — including month + day like "Aug 24" or "March 3", and relatives like "today", "tomorrow", "next Monday" — against THIS date and year, then pass tools the exact YYYY-MM-DD. Never assume a different year.`
 
     // Volatile context rides on the LAST USER MESSAGE, not the system prompt —
-    // the system+tools block must stay byte-identical across requests or the
-    // prompt cache (CACHED_TOOLS) never hits. The last user message changes
-    // every turn anyway, so this prefix costs nothing extra to cache.
+    // keeping the system block stable lets the provider reuse the cached prefix.
+    // The last user message changes every turn anyway.
     let volatileCtx = ""
     // Pinned context + pending risky action echo back from the client (they
     // die with the request otherwise — the #1 cause of "found it, then lost it").
@@ -3470,56 +3473,55 @@ Deno.serve(async (req) => {
     const newPins: unknown[] = []
     let pendingOut: { tool: string; input: any } | null = null
     let finalText = ""
-    // Per-request token accounting (0053) — Anthropic's usage fields are
-    // mutually exclusive: input/output exclude cache read/write.
+    // Per-request token accounting (0053). Kimi returns the OpenAI-style
+    // usage shape: prompt_tokens / completion_tokens (no cache fields).
     const usage = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0 }
     let iterCount = 0
     const turnsIn = messages.length
 
     for (let i = 0; i < 8; i++) {
-      const res = await callAnthropic(messages, apiKey, system)
+      const res = await callKimi(messages, apiKey, system)
       iterCount++
       const u: any = res.usage || {}
-      usage.input += Number(u.input_tokens || 0)
-      usage.output += Number(u.output_tokens || 0)
-      usage.cacheWrite += Number(u.cache_creation_input_tokens || 0)
-      usage.cacheRead += Number(u.cache_read_input_tokens || 0)
-      finalText = (res.content || [])
-        .filter((b: any) => b.type === "text")
-        .map((b: any) => b.text)
-        .join("\n")
-        .trim()
+      usage.input += Number(u.prompt_tokens || 0)
+      usage.output += Number(u.completion_tokens || 0)
+      const choice = (res.choices || [])[0] || {}
+      const msg = choice.message || {}
+      finalText = String(msg.content || "").trim()
 
-      if (res.stop_reason !== "tool_use") break
+      const toolCalls: any[] = Array.isArray(msg.tool_calls) ? msg.tool_calls : []
+      if (!toolCalls.length || choice.finish_reason !== "tool_calls") break
 
-      messages.push({ role: "assistant", content: res.content })
-      const results = []
-      for (const block of res.content) {
-        if (block.type !== "tool_use") continue
+      // Echo the assistant turn back verbatim (content may be null when the
+      // model only asked for tools) so the tool results can attach to it.
+      messages.push({ role: "assistant", content: msg.content ?? null, tool_calls: toolCalls })
+      for (const tc of toolCalls) {
+        const name = tc.function?.name
+        let input: any = {}
+        try { input = tc.function?.arguments ? JSON.parse(tc.function.arguments) : {} } catch (_) { input = {} }
         // Pin/propose are control-plane calls: collect them for the response
         // instead of running anything.
-        if (block.name === "pin_stop" || block.name === "pin_property") {
-          newPins.push({ ...(block.input || {}) })
-          results.push({ type: "tool_result", tool_use_id: block.id, content: JSON.stringify({ ok: true }) })
+        if (name === "pin_stop" || name === "pin_property") {
+          newPins.push({ ...(input || {}) })
+          messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify({ ok: true }) })
           continue
         }
-        if (block.name === "propose_action") {
-          pendingOut = { tool: String(block.input?.tool || ""), input: block.input?.input || {} }
-          results.push({ type: "tool_result", tool_use_id: block.id, content: JSON.stringify({ ok: true, proposed: true }) })
+        if (name === "propose_action") {
+          pendingOut = { tool: String(input?.tool || ""), input: input?.input || {} }
+          messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify({ ok: true, proposed: true }) })
           continue
         }
         try {
-          const out = await runTool(block.name, block.input)
-          if (block.name !== "find_clients" && block.name !== "get_overview" && block.name !== "list_routes" && block.name !== "list_needs_review" && block.name !== "find_duplicates" && block.name !== "list_skipped_stops" && block.name !== "list_route_stops" && block.name !== "list_services" && block.name !== "list_automations" && block.name !== "list_jobs" && block.name !== "get_client_invoices" && block.name !== "get_tech_pay" && block.name !== "get_service_history" && block.name !== "list_activity" && block.name !== "list_messages" && block.name !== "list_team" && block.name !== "list_quotes" && block.name !== "list_service_requests") {
-            actions.push({ tool: block.name, result: out })
-            await logForTool(block.name, out)
+          const out = await runTool(name, input)
+          if (name !== "find_clients" && name !== "get_overview" && name !== "list_routes" && name !== "list_needs_review" && name !== "find_duplicates" && name !== "list_skipped_stops" && name !== "list_route_stops" && name !== "list_services" && name !== "list_automations" && name !== "list_jobs" && name !== "get_client_invoices" && name !== "get_tech_pay" && name !== "get_service_history" && name !== "list_activity" && name !== "list_messages" && name !== "list_team" && name !== "list_quotes" && name !== "list_service_requests") {
+            actions.push({ tool: name, result: out })
+            await logForTool(name, out)
           }
-          results.push({ type: "tool_result", tool_use_id: block.id, content: JSON.stringify(out) })
+          messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(out) })
         } catch (e) {
-          results.push({ type: "tool_result", tool_use_id: block.id, content: `Error: ${e instanceof Error ? e.message : String(e)}`, is_error: true })
+          messages.push({ role: "tool", tool_call_id: tc.id, content: `Error: ${e instanceof Error ? e.message : String(e)}` })
         }
       }
-      messages.push({ role: "user", content: results })
     }
 
     // Best-effort telemetry (0053): who talked to Randy, how big the request
