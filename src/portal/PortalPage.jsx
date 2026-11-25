@@ -80,6 +80,19 @@ const newPropertyMessage = (d) => {
   return `New address: ${d.address}\nService: ${days} (${FREQ_SHORT[d.frequency] || d.frequency || 'weekly'})${d.notes ? `\nNotes: ${d.notes}` : ''}`
 }
 
+// Junk pickup (owner ask 2026-11-21): structured "Order a junk pickup" form —
+// what needs collecting, requested timing, access details for pricing. Same
+// details-JSON pattern as new_property (mig 0060); a readable summary also
+// lands in `message` for the staff alert email/text.
+const JUNK_ITEMS = ['Furniture', 'Mattress / box spring', 'Appliance', 'Electronics', 'Yard debris', 'Construction debris', 'Whole cleanout', 'Just a few bags']
+const JUNK_TIMINGS = [['asap', 'As soon as possible'], ['few_days', 'Within a few days'], ['this_week', 'This week'], ['date', 'Pick a date…']]
+const JUNK_TIMING_SHORT = { asap: 'ASAP', few_days: 'within a few days', this_week: 'this week', date: 'on a chosen date' }
+const junkSummary = (d) => {
+  const items = (d.items || []).join(', ')
+  const when = d.timing === 'date' && d.date ? `on ${d.date}` : (JUNK_TIMING_SHORT[d.timing] || d.timing || '')
+  return `JUNK PICKUP — ${items || 'items to confirm'}${when ? ` — needed ${when}` : ''}${d.access ? `\nAccess: ${d.access}` : ''}${d.notes ? `\nDetails: ${d.notes}` : ''}`
+}
+
 const card = { background: '#fff', border: '1px solid #e6eae6', borderRadius: 14, padding: '16px 18px' }
 const btnPrimary = { background: GREEN, color: '#fff', border: 'none', borderRadius: 9, padding: '10px 18px', fontSize: 13.5, fontWeight: 700, cursor: 'pointer' }
 const btnGhost = { background: '#fff', color: '#5d6b63', border: '1px solid #dde2dd', borderRadius: 9, padding: '10px 18px', fontSize: 13.5, fontWeight: 600, cursor: 'pointer' }
@@ -97,6 +110,10 @@ export default function PortalPage({ slug, code, previewCustomerId, shareToken, 
   const [err, setErr] = useState('')
   const [data, setData] = useState(null)
   const [tab, setTab] = useState('home')
+  // Preset request kind for the "Order a junk pickup" home shortcut — the
+  // RequestTab remounts on every tab switch, so it picks this up as its
+  // initial kind each time.
+  const [reqKind, setReqKind] = useState('extra_pickup')
   const [notice, setNotice] = useState('')
   const [loginCode, setLoginCode] = useState('') // public login: 6-digit code
   const [loginStep, setLoginStep] = useState('email') // email | code | accounts
@@ -363,6 +380,7 @@ export default function PortalPage({ slug, code, previewCustomerId, shareToken, 
           data={data} nextPickup={nextPickup} pendingQuotes={pendingQuotes} excessCount={excessCount}
           go={setTab} shared={shared} onShare={!shared && !preview ? copyShareLink : null}
           token={token} preview={preview}
+          onJunk={() => { setReqKind('junk_removal'); setTab('request') }}
         />
       )}
       {tab === 'pickups' && <PickupsTab data={data} />}
@@ -371,7 +389,7 @@ export default function PortalPage({ slug, code, previewCustomerId, shareToken, 
       {tab === 'invoices' && <InvoicesTab data={data} onPay={(id) => { const u = new URL(window.location.href); u.searchParams.set('pay_invoice', id); window.history.replaceState({}, '', u.toString()); setTab('pay_invoice') }} />}
       {tab === 'payments' && <PaymentsTab data={data} token={token} preview={preview} onChanged={() => loadData(token)} setNotice={setNotice} />}
       {tab === 'pay_invoice' && <PayInvoiceTab data={data} token={token} preview={preview} onChanged={() => loadData(token)} setNotice={setNotice} onDone={() => setTab('invoices')} />}
-      {tab === 'request' && <RequestTab data={data} token={token} preview={preview} onChanged={() => loadData(token)} />}
+      {tab === 'request' && <RequestTab data={data} token={token} preview={preview} onChanged={() => loadData(token)} initialKind={reqKind} />}
 
       {!preview && !shared && (
         <div style={{ textAlign: 'center', marginTop: 26 }}>
@@ -386,7 +404,7 @@ export default function PortalPage({ slug, code, previewCustomerId, shareToken, 
 }
 
 // ---- Home ---------------------------------------------------------------------
-function HomeTab({ data, nextPickup, pendingQuotes, excessCount, go, shared, onShare, token, preview }) {
+function HomeTab({ data, nextPickup, pendingQuotes, excessCount, go, shared, onShare, token, preview, onJunk }) {
   const payment = data.payment || {}
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -511,6 +529,9 @@ function HomeTab({ data, nextPickup, pendingQuotes, excessCount, go, shared, onS
 
       {!shared && <NotifyCard data={data} token={token} preview={preview} />}
 
+      {!shared && onJunk && (
+        <button onClick={onJunk} style={{ ...btnPrimary, background: '#2f6db0', padding: '13px 0', fontSize: 14.5, borderRadius: 12 }}>🛻 Order a junk pickup</button>
+      )}
       {!shared && <button onClick={() => go('request')} style={{ ...btnPrimary, padding: '13px 0', fontSize: 14.5, borderRadius: 12 }}>+ Request service</button>}
 
       {/* property managers: view-only link for their homeowners */}
@@ -1271,8 +1292,8 @@ async function shrinkToDataUrl(dataUrl) {
   return c.toDataURL('image/jpeg', 0.82)
 }
 
-function RequestTab({ data, token, preview, onChanged }) {
-  const [kind, setKind] = useState('extra_pickup')
+function RequestTab({ data, token, preview, onChanged, initialKind = 'extra_pickup' }) {
+  const [kind, setKind] = useState(initialKind)
   const [selected, setSelected] = useState([])
   const [message, setMessage] = useState('')
   const [photos, setPhotos] = useState([]) // [{ dataUrl }]
@@ -1285,6 +1306,14 @@ function RequestTab({ data, token, preview, onChanged }) {
   const [npDays, setNpDays] = useState([])
   const [npFreq, setNpFreq] = useState('weekly')
   const [npNotes, setNpNotes] = useState('')
+  // junk_removal (2026-11-21): structured junk-pickup order — items, timing,
+  // access details for pricing. Details ride the same details-JSON channel as
+  // new_property; a readable summary also lands in `message`.
+  const [jkItems, setJkItems] = useState([])
+  const [jkOther, setJkOther] = useState('')
+  const [jkTiming, setJkTiming] = useState('asap')
+  const [jkDate, setJkDate] = useState('')
+  const [jkAccess, setJkAccess] = useState('')
 
   function toggleProp(id) {
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
@@ -1292,6 +1321,10 @@ function RequestTab({ data, token, preview, onChanged }) {
 
   function toggleNpDay(day) {
     setNpDays((prev) => (prev.includes(day) ? prev.filter((x) => x !== day) : [...prev, day]))
+  }
+
+  function toggleJkItem(item) {
+    setJkItems((prev) => (prev.includes(item) ? prev.filter((x) => x !== item) : [...prev, item]))
   }
 
   async function addPhotos(files) {
@@ -1315,6 +1348,12 @@ function RequestTab({ data, token, preview, onChanged }) {
     if (kind === 'new_property') {
       if (!npAddress.trim()) { setErr('Add the address for the new property.'); return }
       if (!npDays.length) { setErr('Pick at least one service day.'); return }
+    } else if (kind === 'junk_removal') {
+      if (!jkItems.length && !jkOther.trim() && !message.trim() && !photos.length) {
+        setErr('Tell us what needs collecting — tap the items below, or describe it in "Anything else".')
+        return
+      }
+      if (jkTiming === 'date' && !jkDate) { setErr('Pick the date you need it gone by.'); return }
     } else if (!message.trim() && !photos.length) {
       if (!window.confirm('Send this request without a description? A note or photo helps us handle it faster.')) return
     }
@@ -1323,13 +1362,22 @@ function RequestTab({ data, token, preview, onChanged }) {
     try {
       const details = kind === 'new_property'
         ? { address: npAddress.trim(), days: npDays, frequency: npFreq, notes: npNotes.trim() || null }
-        : undefined
-      await portalApi({ action: 'request_service', token, kind, property_ids: selected, message: details ? newPropertyMessage(details) : message, photos: photos.map((p) => p.dataUrl), details })
+        : kind === 'junk_removal'
+          ? {
+              items: [...jkItems, ...(jkOther.trim() ? [jkOther.trim()] : [])],
+              timing: jkTiming,
+              date: jkTiming === 'date' ? jkDate : null,
+              access: jkAccess.trim() || null,
+              notes: message.trim() || null,
+            }
+          : undefined
+      await portalApi({ action: 'request_service', token, kind, property_ids: selected, message: details ? (kind === 'junk_removal' ? junkSummary(details) : newPropertyMessage(details)) : message, photos: photos.map((p) => p.dataUrl), details })
       setDone(true)
       setMessage('')
       setSelected([])
       setPhotos([])
       setNpAddress(''); setNpDays([]); setNpFreq('weekly'); setNpNotes('')
+      setJkItems([]); setJkOther(''); setJkTiming('asap'); setJkDate(''); setJkAccess('')
       await onChanged()
     } catch (e2) { setErr(e2.message || String(e2)) }
     setBusy(false)
@@ -1354,7 +1402,74 @@ function RequestTab({ data, token, preview, onChanged }) {
             ))}
           </div>
 
-          {kind === 'new_property' ? (
+          {kind === 'junk_removal' && (
+            <>
+              {data.properties.length > 0 && (
+                <>
+                  <div style={{ fontSize: 12.5, fontWeight: 600, color: '#5d6b63', marginBottom: 8 }}>Which address{data.properties.length > 1 ? 'es' : ''}? <span style={{ color: '#9aa69e', fontWeight: 400 }}>(optional)</span></div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 14, maxHeight: 180, overflowY: 'auto' }}>
+                    {data.properties.map((p) => (
+                      <label key={p.id} style={{ display: 'flex', gap: 9, alignItems: 'center', fontSize: 13, cursor: 'pointer', padding: '6px 9px', background: selected.includes(p.id) ? '#e8f0fa' : '#f7f9f7', borderRadius: 8 }}>
+                        <input type="checkbox" checked={selected.includes(p.id)} onChange={() => toggleProp(p.id)} style={{ accentColor: '#2f6db0' }} />
+                        {p.address}
+                      </label>
+                    ))}
+                  </div>
+                </>
+              )}
+
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: '#5d6b63', marginBottom: 8 }}>What needs collecting? <span style={{ color: '#9aa69e', fontWeight: 400 }}>(tap all that apply)</span></div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
+                {JUNK_ITEMS.map((item) => {
+                  const on = jkItems.includes(item)
+                  return (
+                    <button key={item} type="button" onClick={() => toggleJkItem(item)} style={{ background: on ? '#2f6db0' : '#fff', color: on ? '#fff' : '#5d6b63', border: `1px solid ${on ? '#2f6db0' : '#dde2dd'}`, borderRadius: 9, padding: '9px 12px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>{item}</button>
+                  )
+                })}
+              </div>
+              <input
+                value={jkOther} onChange={(e) => setJkOther(e.target.value)}
+                placeholder="Anything else? (optional — e.g. 'old swing set, two doors')"
+                autoCapitalize="sentences" autoCorrect="on" spellCheck
+                style={{ ...inputStyle, marginBottom: 14 }}
+              />
+
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: '#5d6b63', marginBottom: 8 }}>When do you need it gone?</div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
+                {JUNK_TIMINGS.map(([id, label]) => {
+                  const on = jkTiming === id
+                  return (
+                    <button key={id} type="button" onClick={() => setJkTiming(id)} style={{ background: on ? '#2f6db0' : '#fff', color: on ? '#fff' : '#5d6b63', border: `1px solid ${on ? '#2f6db0' : '#dde2dd'}`, borderRadius: 9, padding: '9px 12px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>{label}</button>
+                  )
+                })}
+              </div>
+              {jkTiming === 'date' && (
+                <input
+                  type="date" value={jkDate} onChange={(e) => setJkDate(e.target.value)}
+                  min={new Date().toISOString().slice(0, 10)}
+                  style={{ ...inputStyle, marginBottom: 14 }}
+                />
+              )}
+
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: '#5d6b63', marginBottom: 8 }}>Access details <span style={{ color: '#9aa69e', fontWeight: 400 }}>(gate code, where the items are, anything that helps us price it)</span></div>
+              <textarea
+                value={jkAccess} onChange={(e) => setJkAccess(e.target.value)} rows={2}
+                placeholder='e.g. "Side of the house by the gate — code 4417. Two flights of stairs from the driveway."'
+                autoCapitalize="sentences" autoCorrect="on" spellCheck
+                style={{ ...inputStyle, resize: 'vertical', fontFamily: 'inherit', lineHeight: 1.5, marginBottom: 14 }}
+              />
+
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: '#5d6b63', marginBottom: 8 }}>Anything else? <span style={{ color: '#9aa69e', fontWeight: 400 }}>(optional)</span></div>
+              <textarea
+                value={message} onChange={(e) => setMessage(e.target.value)} rows={2}
+                placeholder="Size, weight, condition — anything that helps us bring the right truck."
+                autoCapitalize="sentences" autoCorrect="on" spellCheck
+                style={{ ...inputStyle, resize: 'vertical', fontFamily: 'inherit', lineHeight: 1.5 }}
+              />
+            </>
+          )}
+
+          {kind !== 'junk_removal' && (kind === 'new_property' ? (
             <>
               <div style={{ fontSize: 12.5, fontWeight: 600, color: '#5d6b63', marginBottom: 8 }}>New property address</div>
               <input
@@ -1413,7 +1528,7 @@ function RequestTab({ data, token, preview, onChanged }) {
                 style={{ ...inputStyle, resize: 'vertical', fontFamily: 'inherit', lineHeight: 1.5 }}
               />
             </>
-          )}
+          ))}
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12, marginBottom: 2 }}>
             <label
@@ -1447,7 +1562,7 @@ function RequestTab({ data, token, preview, onChanged }) {
             type="submit" disabled={busy || preview}
             title={preview ? 'Disabled in admin preview' : undefined}
             style={{ ...btnPrimary, marginTop: 14, padding: '12px 22px', opacity: preview ? 0.55 : 1 }}
-          >{busy ? 'Sending…' : 'Send request'}</button>
+          >{busy ? 'Sending…' : kind === 'junk_removal' ? 'Send junk pickup request' : 'Send request'}</button>
         </form>
       )}
 

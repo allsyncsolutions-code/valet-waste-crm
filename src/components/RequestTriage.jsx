@@ -84,7 +84,15 @@ export default function RequestTriage({ requests, onChanged, onClose, app }) {
                   {r.details.notes && <div style={{ whiteSpace: 'pre-wrap' }}><b>Access notes:</b> {r.details.notes}</div>}
                 </div>
               )}
-              {!(r.kind === 'new_property' && r.details) && (
+              {r.kind === 'junk_removal' && r.details && (
+                <div style={{ background: '#eef3fa', border: '1px solid #d3e0f0', borderRadius: 10, padding: '10px 12px', marginBottom: 8, fontSize: 12.5, lineHeight: 1.6 }}>
+                  {(r.details.items || []).length > 0 && <div><b>🛻 Collecting:</b> {(r.details.items || []).join(', ')}</div>}
+                  <div><b>Needed:</b> {r.details.timing === 'date' && r.details.date ? r.details.date : ({ asap: 'ASAP', few_days: 'within a few days', this_week: 'this week', date: 'chosen date' }[r.details.timing] || r.details.timing || '—')}</div>
+                  {r.details.access && <div style={{ whiteSpace: 'pre-wrap' }}><b>Access:</b> {r.details.access}</div>}
+                  {r.details.notes && <div style={{ whiteSpace: 'pre-wrap' }}><b>Details:</b> {r.details.notes}</div>}
+                </div>
+              )}
+              {!(r.kind === 'new_property' && r.details) && !(r.kind === 'junk_removal' && r.details) && (
                 <div style={{ fontSize: 13, color: '#1a2420', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', lineHeight: 1.5 }}>
                   {r.message || (r.photoUrls?.length ? '(no description — photos only)' : '(no message — just the request)')}
                 </div>
